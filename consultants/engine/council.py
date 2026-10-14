@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from claude_hooks import capped_thinking, token_calib, truncation
-from consultants.engine import budget, retrospective
+from consultants.engine import budget
 from consultants.engine.storage import RoleTurn
 
 log = logging.getLogger("consultants.engine.council")
@@ -1096,7 +1096,9 @@ def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
                       tools: Optional[list] = None,
                       session: Optional[str] = None,
                       knobs: Optional["budget.Knobs"] = None,
-                      think: Any = None
+                      think: Any = None,
+                      recorder=None, round: int = 1,
+                      lane_idx: Optional[int] = None,
                       ) -> tuple[list[dict], "budget.Budget"]:
     """Size the next call, compacting the history first if it no longer
     leaves room to answer.
@@ -1119,40 +1121,18 @@ def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
                        session=session, knobs=knobs)
     if plan.needs_compaction:
         log.warning("role=%s: %s — compacting history", role, plan.detail)
-        keep = plan.trigger_tokens or max(
-            0, (plan.context_length or 0)
-            - budget.MAX_OUTPUT_TOKENS - budget.WINDOW_MARGIN_TOKENS)
-        # Compaction measures messages only and cannot shrink the tool
-        # schemas, so it aims for the trigger minus what they cost.
-        keep = max(0, keep - budget.estimate_tools_tokens(tools, model))
-        previous = retrospective.previous_digest(messages)
-
-        def _marker(dropped_msgs: list[dict], generation: int) -> dict:
-            """Two passes over the span being dropped, then the message
-            that replaces it.
-
-            Runs inside compaction rather than after it because this is
-            the only moment the discarded turns still exist: once
-            ``compact_messages`` returns they are gone, and a summary
-            written from what survived would describe the wrong thing.
-            """
-            digest = retrospective.write(
-                dropped_msgs, chat_client=chat_client, model=model,
-                target_tokens=keep, generation=generation,
-                previous=previous)
-            if digest.empty:
-                log.warning(
-                    "role=%s: compaction digest came back empty (%s); the "
-                    "elided span leaves only the marker",
-                    role, digest.stand_down or "both phases silent")
-                return None
-            return retrospective.render_marker(digest, len(dropped_msgs))
-
-        result = budget.compact_messages(
-            messages, keep_tokens=keep, context_length=plan.context_length,
-            model=model, make_marker=_marker)
-        if result.changed:
-            messages = result.messages
+        # Plan C: the digest is written on this role's own client and
+        # model (Scope has no other), serially, stall-protected under
+        # phase=compaction, and aimed at a quarter of the free content.
+        from consultants.engine import compaction
+        scope = compaction.Scope(
+            chat_client=chat_client, model=model, role=role or "",
+            recorder=recorder, round=round, lane_idx=lane_idx,
+            settings=knobs.compaction or compaction.DEFAULT_SETTINGS)
+        outcome = compaction.compact(scope, messages, plan=plan, tools=tools,
+                                     session=session)
+        if outcome.changed:
+            messages = outcome.messages
             plan = budget.plan(chat_client, model, messages, tools=tools,
                                session=session, knobs=knobs)
     if knobs.announce:
@@ -1278,17 +1258,27 @@ def _budget_knobs(state: Optional[dict], role: Optional[str],
     budget_layers`): ``*`` (``[budget]``), then the role
     (``[role.X.budget]``, ``ctx_max``), then ``role@model``
     (``[role.X.models."<m>"]``). Shipped defaults when nothing is set."""
-    layers = ((state or {}).get("runtime_control") or {}).get("budget") or {}
-    if not layers:
-        return budget.DEFAULT_KNOBS
-    return budget.knobs_from(layers.get("*"), layers.get(role or ""),
-                             layers.get(f"{role}@{model}"))
+    rc = (state or {}).get("runtime_control") or {}
+    layers = rc.get("budget") or {}
+    knobs = (budget.knobs_from(layers.get("*"), layers.get(role or ""),
+                               layers.get(f"{role}@{model}"))
+             if layers else budget.DEFAULT_KNOBS)
+    # Plan C: the (role, model)'s compaction settings ride on the knobs, so
+    # every site that sizes a call also knows how to fold its history.
+    from consultants.engine import compaction
+    settings = compaction.settings_from(rc, role, model)
+    if settings != compaction.DEFAULT_SETTINGS:
+        import dataclasses
+        knobs = dataclasses.replace(knobs, compaction=settings)
+    return knobs
 
 
 def _loop_payload_budgeter(chat_client, model: str, *,
                            role: Optional[str] = None,
                            knobs: Optional["budget.Knobs"] = None,
-                           sampling: Optional[dict] = None):
+                           sampling: Optional[dict] = None,
+                           recorder=None, round: int = 1,
+                           lane_idx: Optional[int] = None):
     """``LoopConfig.prepare_payload`` for a role's tool loop: re-plan the
     output budget, compacting first when the history has outgrown the
     window, before every iteration.
@@ -1313,7 +1303,8 @@ def _loop_payload_budgeter(chat_client, model: str, *,
         messages, plan = _plan_and_compact(
             chat_client, model, list(payload.get("messages") or []),
             role=role, tools=payload.get("tools") or None, session=session,
-            knobs=knobs, think=payload.get("think"))
+            knobs=knobs, think=payload.get("think"), recorder=recorder,
+            round=round, lane_idx=lane_idx)
         window["ctx"] = plan.context_length
         payload["messages"] = messages
         payload["options"] = _budget_options(payload.get("options"), plan,
@@ -1447,7 +1438,8 @@ def _single_shot(chat_client, model: str, messages: list[dict],
     session = _calibration_session(f"single-{role or 'role'}")
     convo, plan = _plan_and_compact(chat_client, model, list(messages),
                                     role=role, session=session, knobs=knobs,
-                                    think=think)
+                                    think=think, recorder=recorder,
+                                    round=round, lane_idx=lane_idx)
 
     text_parts: list[str] = []
     total_pt = total_ct = 0
@@ -1578,7 +1570,9 @@ def _single_shot(chat_client, model: str, messages: list[dict],
         # would make each continuation shorter than the last and turn a
         # bounded recovery into a guaranteed failure.
         convo, plan = _plan_and_compact(chat_client, model, convo, role=role,
-                                        knobs=knobs, think=think)
+                                        knobs=knobs, think=think,
+                                        recorder=recorder, round=round,
+                                        lane_idx=lane_idx)
 
     return ("".join(text_parts).strip(), total_pt, total_ct)
 
@@ -1927,7 +1921,9 @@ def _role_turn(chat_client, model: str, messages: list[dict],
     try:
         from claude_hooks.agent_loop.runner import LoopConfig
         _budgeter = _loop_payload_budgeter(chat_client, model, role=role,
-                                           knobs=knobs, sampling=sampling)
+                                           knobs=knobs, sampling=sampling,
+                                           recorder=recorder, round=round,
+                                           lane_idx=lane_idx)
         cfg = LoopConfig(
             **result_kw,
             max_iterations=ROLE_TOOL_MAX_ITERATIONS,
@@ -2758,7 +2754,8 @@ def researcher_node(state: dict, *,
         _budgeter = _loop_payload_budgeter(
             chat_client, model, role="researcher",
             knobs=_budget_knobs(state, "researcher", model),
-            sampling=lane_sampling)
+            sampling=lane_sampling, recorder=recorder, round=this_round,
+            lane_idx=lane_idx)
         cfg = LoopConfig(
             **result_kw,
             max_iterations=caps.researcher_loop_iters,

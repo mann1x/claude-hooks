@@ -121,12 +121,20 @@ class Knobs:
     num_ctx: Any = "model"
     #: State the cap in the role's system prompt (``# Output Budget``).
     announce: bool = True
+    #: Share of the window a prompt may reach before compaction (plan C3).
+    trigger_ratio: float = 0.9
+    #: Never reserve less output room than this (plan C3).
+    output_room_min: int = 8_000
+    #: The (role, model)'s compaction settings
+    #: (:class:`consultants.engine.compaction.Settings`), or ``None`` for
+    #: the shipped defaults. Not a ``[budget]`` key: it has its own table.
+    compaction: Any = None
 
 
 DEFAULT_KNOBS = Knobs()
 
-#: The keys :class:`Knobs` takes, for config validation.
-KNOB_KEYS = tuple(Knobs.__dataclass_fields__)
+#: The keys :class:`Knobs` takes from ``[budget]``, for config validation.
+KNOB_KEYS = tuple(k for k in Knobs.__dataclass_fields__ if k != "compaction")
 
 
 def knobs_from(*layers: Optional[dict]) -> Knobs:
@@ -351,14 +359,24 @@ def with_output_budget_section(messages: list[dict], cap: Optional[int],
 #: the run; short enough to follow a model that changes register.
 OUTPUT_ROOM_SAMPLE_TURNS = 12
 
+#: The newest turns, whose largest always counts in full. Older than
+#: this, a single turn larger than every other is an outlier, not what
+#: the next reply will cost (fork ``9b53fc656``: one 83k-character call
+#: held half a 128k window back for twelve turns).
+OUTPUT_ROOM_RECENT_TURNS = 3
+
 #: Multiplier on the observed high-water turn. The next turn is not
 #: bounded by the last twelve, so the measurement is a starting point
 #: rather than an answer. Half again leaves room for a turn somewhat
 #: larger than anything seen without reserving for one that never comes.
 OUTPUT_ROOM_HEADROOM = 1.5
 
-#: Never reserve less than this, however quiet the run has been.
-MIN_OUTPUT_ROOM_TOKENS = 2_048
+#: Never reserve less than this, however quiet the run has been. 8,000
+#: (plan C3, the fork's floor): the reservation is measured from what the
+#: transcript carries, which understates what a turn needed to produce
+#: because its reasoning is not in the footprint. At 2,048 the fork saw
+#: caps that cut tool-call JSON mid-string. ``[budget] output_room_min``.
+MIN_OUTPUT_ROOM_TOKENS = 8_000
 
 #: The largest share of the window the measurement may claim. Above half,
 #: reserving for output and having a prompt become the same argument.
@@ -384,8 +402,9 @@ PRESERVE_RECENT_WINDOW_EXPONENT = 2 / 3
 #: leaves the summary nothing to be written into.
 PRESERVE_RECENT_TARGET_SHARE = 0.6
 
-#: Fraction of the usable window a prompt may reach before compaction.
-COMPACTION_TRIGGER_RATIO = 0.8
+#: Fraction of the usable window a prompt may reach before compaction
+#: (plan C3, the fork's 0.9). ``[budget] trigger_ratio``.
+COMPACTION_TRIGGER_RATIO = 0.9
 
 #: Floor on the trigger as a share of the window. Output room is
 #: subtracted from the window, and on a small window a large cap can eat
@@ -435,12 +454,23 @@ def estimate_tools_tokens(tools: Optional[list], model: str = "") -> int:
 
 def observed_output_tokens(
         messages: list[dict],
-        sample_turns: int = OUTPUT_ROOM_SAMPLE_TURNS) -> Optional[int]:
-    """High-water output of this run's recent turns, or ``None``.
+        sample_turns: int = OUTPUT_ROOM_SAMPLE_TURNS,
+        model: str = "") -> Optional[int]:
+    """What this run's recent turns occupy in the context, as a basis for
+    the reply reserve, or ``None``.
 
-    The high-water mark rather than the mean: the reservation exists for
-    the largest turn, and an average over a run that thinks on one turn
-    in four describes none of them.
+    **Measured from the transcript, never from the bill** (plan C3, fork
+    ``compaction-shared.ts:297-412``). A turn whose reasoning was dropped
+    or condensed still carries its original invoice: the fork saw a capped
+    think billed at 30,786 tokens, replaced the same second by a
+    624-character note, go on reserving half a 65k window for twelve
+    turns. The floor (:data:`MIN_OUTPUT_ROOM_TOKENS`) covers what the
+    footprint understates.
+
+    The newest :data:`OUTPUT_ROOM_RECENT_TURNS` count at full size (a long
+    one there is a model that changed register); past them a single
+    largest turn is an outlier and, with at least four samples, the
+    second largest sets the room.
 
     ``None`` below two samples — one turn is not a pattern, and the first
     turn of a run is routinely the smallest it will produce.
@@ -449,15 +479,17 @@ def observed_output_tokens(
     for message in reversed(messages or []):
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
-        tokens = (message.get("_output_tokens")
-                  or (message.get("metrics") or {}).get("output_tokens"))
+        tokens = estimate_messages_tokens([message], model)
         if _positive(tokens):
             observed.append(int(tokens))
         if len(observed) >= sample_turns:
             break
     if len(observed) < 2:
         return None
-    return max(observed)
+    recent = max(observed[:OUTPUT_ROOM_RECENT_TURNS])
+    ranked = sorted(observed, reverse=True)
+    typical = ranked[1] if len(ranked) >= 4 else ranked[0]
+    return max(recent, typical)
 
 
 def preserve_recent_tokens(*, context_length: Optional[int] = None,
@@ -481,22 +513,25 @@ def preserve_recent_tokens(*, context_length: Optional[int] = None,
 
 def compaction_trigger_tokens(*, context_length: int,
                               model_max_tokens: Optional[int] = None,
-                              observed_output: Optional[int] = None) -> int:
+                              observed_output: Optional[int] = None,
+                              ratio: float = COMPACTION_TRIGGER_RATIO,
+                              room_min: int = MIN_OUTPUT_ROOM_TOKENS) -> int:
     """The largest prompt that still leaves the model room to answer.
 
     Takes the smaller of the ratio trigger and the room trigger, which
     keeps the old ratio as an upper bound while making room for a full
     turn the binding constraint — which is what it actually is.
+    ``ratio`` and ``room_min`` are the ``[budget]`` knobs
+    ``trigger_ratio`` / ``output_room_min``.
     """
-    ratio_trigger = context_length * COMPACTION_TRIGGER_RATIO
+    ratio_trigger = context_length * ratio
     declared_room = (int(model_max_tokens) if _positive(model_max_tokens)
                      else MAX_OUTPUT_TOKENS)
     if _positive(observed_output):
         output_room = min(
             declared_room,
             context_length * MAX_MEASURED_OUTPUT_ROOM_WINDOW_SHARE,
-            max(MIN_OUTPUT_ROOM_TOKENS,
-                observed_output * OUTPUT_ROOM_HEADROOM),
+            max(room_min, observed_output * OUTPUT_ROOM_HEADROOM),
         )
     else:
         output_room = min(
@@ -614,9 +649,10 @@ def plan(chat_client: Any, model: str, messages: list[dict], *,
                              "target budget so a provider default cannot "
                              "silently rule", **common)
 
-    observed = observed_output_tokens(messages)
+    observed = observed_output_tokens(messages, model=model)
     trigger = compaction_trigger_tokens(
-        context_length=ctx, model_max_tokens=ask, observed_output=observed)
+        context_length=ctx, model_max_tokens=ask, observed_output=observed,
+        ratio=float(knobs.trigger_ratio), room_min=int(knobs.output_room_min))
     available = ctx - prompt_tokens - reserve_tokens(prompt_tokens, knobs)
 
     if available < MIN_OUTPUT_TOKENS:
@@ -660,6 +696,231 @@ def plan(chat_client: Any, model: str, messages: list[dict], *,
                   trigger_tokens=trigger, **common)
 
 
+# --- cut planning (plan C3; fork compaction-shared.ts:1237-1642) ------ #
+
+#: The share of the history's messages the kept tail should reach before
+#: the token floor alone may end the walk. A token floor says nothing
+#: about how much *conversation* survives: the fork kept seven of 113
+#: messages because two file dumps met a 20k floor.
+PRESERVE_RECENT_MESSAGES_RATIO = 0.25
+
+#: The least share of what follows a pinned prompt that a pinned cut
+#: folds. A ratio rather than a count: the estimator's bias is on both
+#: sides of it and cancels.
+PINNED_PROMPT_FOLD_RATIO = 0.5
+
+#: Past this share of ``window - overhead``, the latest turn stops being
+#: kept whole and is cut with its prompt pinned. One prompt over a long
+#: tool loop is one turn; clamping the cut to its start folded 9.5% of a
+#: request in the fork and the trigger fired again on the next turn.
+LAST_TURN_CEILING_SHARE = 0.66
+
+#: The compaction target as a share of the free content
+#: (``window - overhead``), plan C3 / 02 P1-a. Ours used to be the
+#: trigger itself — a digest budget about 3.6x the fork's.
+COMPACTION_TARGET_SHARE = 0.25
+
+
+def _message_text(message: dict) -> str:
+    content = (message or {}).get("content")
+    if isinstance(content, list):
+        return " ".join(str(b.get("text") or "") for b in content
+                        if isinstance(b, dict))
+    return str(content or "")
+
+
+def is_compaction_marker(message: Any) -> bool:
+    return isinstance(message, dict) and bool(message.get("_compaction_marker"))
+
+
+def is_typed_prompt(message: Any) -> bool:
+    """A turn the user (or the role's caller) typed: a ``user`` message
+    that is not a compaction marker and not a harness note (``_harness``:
+    a nudge, a continuation request, a forced-retry instruction)."""
+    return (isinstance(message, dict) and message.get("role") == "user"
+            and not message.get("_compaction_marker")
+            and not message.get("_harness")
+            and bool(_message_text(message).strip()))
+
+
+def is_safe_cut_boundary(message: Any) -> bool:
+    """Where a kept tail may begin: an assistant turn (its tool results
+    follow it, so both halves stay on one side) or a typed prompt. Never a
+    ``tool`` message — its call would be folded and the result orphaned,
+    which OpenAI-compatible backends reject outright."""
+    return (isinstance(message, dict) and message.get("role") == "assistant"
+            ) or is_typed_prompt(message)
+
+
+@dataclass(frozen=True)
+class CutPlan:
+    """Where a history is cut.
+
+    ``messages[:head_end]`` (the leading system turns and the question)
+    always survive; ``[head_end, cut_end)`` is folded, except
+    ``pinned_index`` which survives verbatim after the digest; and
+    ``[cut_end:]`` is the kept tail (empty when ``cut_end == len``)."""
+    head_end: int
+    cut_end: int
+    pinned_index: int = -1
+    foldable: int = 0
+    reason: str = ""
+
+    @property
+    def folds(self) -> bool:
+        return self.foldable > 0
+
+
+def _head_end(messages: list[dict]) -> int:
+    i = 0
+    while i < len(messages) and messages[i].get("role") == "system":
+        i += 1
+    if i < len(messages):
+        i += 1   # the question
+    return i
+
+
+def _walk_back(messages: list[dict], cut: int, floor: int) -> int:
+    while floor < cut < len(messages) and not is_safe_cut_boundary(messages[cut]):
+        cut -= 1
+    return cut
+
+
+def _foldable(messages: list[dict], start: int, cut: int, pinned: int) -> int:
+    """Messages a cut would fold that no earlier digest already stands
+    for, minus the pinned prompt. Zero means the compaction would only
+    replace a digest with a digest of the same digest."""
+    last_marker = max((i for i in range(start, cut)
+                       if is_compaction_marker(messages[i])), default=start - 1)
+    return sum(1 for i in range(last_marker + 1, cut) if i != pinned)
+
+
+def _last_typed_prompt(messages: list[dict], start: int) -> int:
+    for i in range(len(messages) - 1, start - 1, -1):
+        if is_typed_prompt(messages[i]):
+            return i
+    return -1
+
+
+def plan_cut(messages: list[dict], *, keep_tokens: int,
+             context_length: Optional[int] = None, model: str = "",
+             overhead_tokens: int = 0, keep_recent: int = 4,
+             tail: bool = True) -> CutPlan:
+    """Decide what a compaction folds (fork ``findCutPlan`` /
+    ``planFullCut``).
+
+    With a tail: walk back from the newest message until the kept tail
+    reaches ``keep_tokens`` (the ceiling), or both the recency floor
+    (:func:`preserve_recent_tokens`) and a quarter of the messages; clamp
+    the cut to the latest typed prompt so that whole turn survives —
+    unless that turn alone is past :data:`LAST_TURN_CEILING_SHARE`, or the
+    clamp folds nothing, in which case the prompt is pinned and at least
+    half of what follows it is folded; then walk back to a safe boundary.
+
+    Without a tail (the rescue): everything after the head is folded and
+    the latest typed prompt is pinned — a digest that drops the request
+    leaves the model a detailed account of work whose purpose it no
+    longer knows (the fork measured a model asking what the task was
+    sixteen seconds later).
+    """
+    n = len(messages)
+    head_end = _head_end(messages)
+    if head_end >= n:
+        return CutPlan(head_end, head_end, reason="nothing-after-head")
+    cache: dict[int, int] = {}
+
+    def cost(i: int) -> int:
+        if i not in cache:
+            cache[i] = estimate_messages_tokens([messages[i]], model)
+        return cache[i]
+
+    last_prompt = _last_typed_prompt(messages, head_end)
+
+    if not tail:
+        pinned = last_prompt
+        return CutPlan(head_end, n, pinned,
+                       _foldable(messages, head_end, n, pinned), "no-tail")
+
+    ceiling = max(1, int(keep_tokens))
+    floor = min(preserve_recent_tokens(context_length=context_length,
+                                       target_tokens=keep_tokens), ceiling)
+    body = n - head_end
+    count_floor = min(body, max(math.ceil(body * PRESERVE_RECENT_MESSAGES_RATIO),
+                                int(keep_recent or 0)))
+    last_turn_ceiling = (
+        LAST_TURN_CEILING_SHARE * max(0, context_length - overhead_tokens)
+        if _positive(context_length) else None)
+
+    def pinned_plan(p: int) -> Optional[CutPlan]:
+        start = p + 1
+        if p < head_end or start >= n or is_compaction_marker(messages[p]):
+            return None
+        tail_tokens = sum(cost(i) for i in range(start, n))
+        keep = min(max(tail_tokens * PINNED_PROMPT_FOLD_RATIO,
+                       min(floor, tail_tokens)), ceiling)
+        total, cut = 0, n
+        for i in range(n - 1, start - 1, -1):
+            total += cost(i)
+            cut = i
+            if total >= keep:
+                break
+        cut = _walk_back(messages, cut, start)
+        folds = _foldable(messages, head_end, cut, p)
+        if folds == 0:
+            return None
+        return CutPlan(head_end, cut, p, folds, "pinned")
+
+    total = kept = 0
+    candidate = n
+    for i in range(n - 1, head_end - 1, -1):
+        total += cost(i)
+        kept += 1
+        candidate = i
+        if total >= ceiling:
+            break
+        if total >= floor and kept >= count_floor:
+            break
+
+    if last_prompt >= 0 and last_turn_ceiling is not None:
+        spent = 0
+        for i in range(last_prompt, n):
+            spent += cost(i)
+            if spent > last_turn_ceiling:
+                pinned = pinned_plan(last_prompt)
+                if pinned is not None:
+                    return CutPlan(pinned.head_end, pinned.cut_end,
+                                   pinned.pinned_index, pinned.foldable,
+                                   "last-turn-ceiling")
+                break
+
+    capped = min(candidate, last_prompt) if last_prompt >= 0 else candidate
+    cut = _walk_back(messages, capped, head_end)
+    folds = _foldable(messages, head_end, cut, -1)
+    if folds > 0:
+        return CutPlan(head_end, cut, -1, folds, "recency")
+    pinned = pinned_plan(last_prompt)
+    if pinned is not None:
+        return pinned
+    return CutPlan(head_end, head_end, reason="no-progress")
+
+
+def compaction_target_tokens(context_length: Optional[int], *,
+                             overhead_tokens: int = 0,
+                             trigger_tokens: Optional[int] = None,
+                             share: float = COMPACTION_TARGET_SHARE) -> int:
+    """What a compaction aims the folded history at: ``share`` of the free
+    content (``window - overhead``, overhead = system turns + tool
+    schemas), kept below the trigger so a compaction never lands where it
+    fires again (plan C3 / 02 P1-a)."""
+    if not _positive(context_length):
+        base = trigger_tokens or 0
+        return max(1, int(base * share) if base else 1)
+    target = int(share * max(0, int(context_length) - max(0, overhead_tokens)))
+    if _positive(trigger_tokens):
+        target = min(target, int(trigger_tokens) - 1)
+    return max(1, target)
+
+
 @dataclass
 class CompactionResult:
     messages: list[dict]
@@ -675,6 +936,10 @@ class CompactionResult:
     #: Where the marker sits in ``messages``, so a caller that writes a
     #: digest can replace it without re-deriving the layout.
     marker_index: Optional[int] = None
+    #: The typed prompt kept verbatim after the marker, if any.
+    pinned: Optional[dict] = None
+    #: Why the cut landed where it did (:attr:`CutPlan.reason`).
+    cut_reason: str = ""
 
     def __iter__(self):
         """Backwards compatibility with the ``(messages, changed)``
@@ -682,23 +947,36 @@ class CompactionResult:
         return iter((self.messages, self.changed))
 
 
+def _accepts_pinned(factory: Any) -> bool:
+    import inspect
+    try:
+        params = list(inspect.signature(factory).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    if any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in params):
+        return True
+    return len([p for p in params if p.kind in (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD)]) >= 3
+
+
 def compact_messages(messages: list[dict], *, keep_tokens: int,
                      keep_recent: int = 4,
                      context_length: Optional[int] = None,
                      model: str = "",
-                     make_marker: Optional[Any] = None) -> CompactionResult:
-    """Drop from the middle until the history fits ``keep_tokens``.
+                     make_marker: Optional[Any] = None,
+                     tail: bool = True,
+                     overhead_tokens: int = 0) -> CompactionResult:
+    """Fold the middle of a history into one marker message.
 
     What survives:
 
     * every leading ``system`` message — the role's instructions;
     * the first non-system message — the question being answered;
-    * the most recent exchanges — the live state of the work.
-
-    How many count as "recent" is derived from the window when one is
-    known (:func:`preserve_recent_tokens`), falling back to
-    ``keep_recent`` messages otherwise. A flat message count is right for
-    exactly one window size.
+    * the latest typed prompt, pinned verbatim when the cut has to fold
+      the turn it opens (a follow-up is never folded away);
+    * the most recent exchanges — the live state of the work — sized by
+      :func:`plan_cut`; none when ``tail`` is false (the no-tail rescue).
 
     The elided span is replaced by a visible marker rather than removed
     silently, because a model that can see it was given an abridged
@@ -706,52 +984,30 @@ def compact_messages(messages: list[dict], *, keep_tokens: int,
     it has the whole record.
 
     The dropped messages are returned rather than discarded, so a
-    caller can distil them into a summary and a retrospective —
-    compaction is the right place to do that, because it is where the
-    turns that produced them are going away. ``make_marker`` lets that
-    caller supply the replacement message; the default is the bare
-    elision note, which carries the fact of the loss but none of its
-    content.
+    caller can distil them into a digest. ``make_marker(dropped,
+    generation[, pinned])`` supplies the replacement message; the default
+    is the bare elision note, which carries the fact of the loss but none
+    of its content.
     """
     if not messages:
         return CompactionResult(messages, False)
-    if estimate_messages_tokens(messages, model) <= keep_tokens:
+    if tail and estimate_messages_tokens(messages, model) <= keep_tokens:
         return CompactionResult(messages, False)
 
-    head: list[dict] = []
-    i = 0
-    while i < len(messages) and messages[i].get("role") == "system":
-        head.append(messages[i])
-        i += 1
-    if i < len(messages):
-        head.append(messages[i])   # the question
-        i += 1
+    cut = plan_cut(messages, keep_tokens=keep_tokens,
+                   context_length=context_length, model=model,
+                   overhead_tokens=overhead_tokens, keep_recent=keep_recent,
+                   tail=tail)
+    if not cut.folds:
+        log.info("compaction: no cut makes progress (%s)", cut.reason)
+        return CompactionResult(messages, False, cut_reason=cut.reason)
 
-    tail_budget = preserve_recent_tokens(
-        context_length=context_length, target_tokens=keep_tokens)
-    tail: list[dict] = []
-    spent = 0
-    for message in reversed(messages[i:]):
-        cost = estimate_messages_tokens([message], model)
-        if tail and spent + cost > tail_budget:
-            break
-        tail.insert(0, message)
-        spent += cost
-    if len(tail) < keep_recent:
-        tail = messages[max(i, len(messages) - keep_recent):]
-    # A ``tool`` message answers the assistant ``tool_calls`` before it.
-    # Cut between the two and the tail opens with a reply to a call that
-    # no longer exists, which OpenAI-compatible backends reject outright
-    # and Ollama passes to a model that cannot tell what it answers. The
-    # results go with their call.
-    while tail and tail[0].get("role") == "tool":
-        tail = tail[1:]
-
-    middle_start, middle_end = i, len(messages) - len(tail)
-    if middle_end <= middle_start:
-        return CompactionResult(messages, False)
-
-    dropped_msgs = messages[middle_start:middle_end]
+    head = messages[:cut.head_end]
+    pinned = messages[cut.pinned_index] if cut.pinned_index >= 0 else None
+    dropped_msgs = [m for i, m in enumerate(messages[cut.head_end:cut.cut_end],
+                                             start=cut.head_end)
+                    if i != cut.pinned_index]
+    kept_tail = messages[cut.cut_end:]
     reclaimed = []
     for message in dropped_msgs:
         for key in token_calib.REASONING_KEYS:
@@ -760,13 +1016,13 @@ def compact_messages(messages: list[dict], *, keep_tokens: int,
                 reclaimed.append(value)
 
     dropped = len(dropped_msgs)
-    generation = 1 + sum(
-        1 for m in messages
-        if m.get("_compaction_marker") and m.get("role") == "system")
+    generation = 1 + sum(1 for m in messages if is_compaction_marker(m))
     marker = None
     if make_marker is not None:
         try:
-            marker = make_marker(dropped_msgs, generation)
+            marker = (make_marker(dropped_msgs, generation, pinned)
+                      if _accepts_pinned(make_marker)
+                      else make_marker(dropped_msgs, generation))
         except Exception:  # pragma: no cover — a digest must not block
             log.exception("marker factory raised; falling back to the bare "
                           "elision note")
@@ -775,6 +1031,7 @@ def compact_messages(messages: list[dict], *, keep_tokens: int,
         marker = {
             "role": "system",
             "_compaction_marker": True,
+            "_compaction_generation": generation,
             "content": (
                 f"[{dropped} earlier message(s) elided to fit the model's "
                 f"context window. The instructions above and the most recent "
@@ -783,19 +1040,20 @@ def compact_messages(messages: list[dict], *, keep_tokens: int,
                 f"answer rather than inferring what it contained.]"
             ),
         }
-    out = head + [marker] + tail
+    out = head + [marker] + ([pinned] if pinned is not None else []) + kept_tail
     log.warning(
-        "compacted history (gen %d): %d -> %d messages "
-        "(~%d -> ~%d tok, budget %d, tail %d tok)",
-        generation, len(messages), len(out),
+        "compacted history (gen %d, %s): %d -> %d messages "
+        "(~%d -> ~%d tok, budget %d)",
+        generation, cut.reason, len(messages), len(out),
         estimate_messages_tokens(messages, model),
-        estimate_messages_tokens(out, model), keep_tokens, tail_budget,
+        estimate_messages_tokens(out, model), keep_tokens,
     )
     return CompactionResult(out, True, dropped=dropped,
                             generation=generation,
                             reclaimed_thinking=reclaimed,
                             dropped_messages=list(dropped_msgs),
-                            marker_index=len(head))
+                            marker_index=len(head), pinned=pinned,
+                            cut_reason=cut.reason)
 
 
 __all__ = ["Budget", "CompactionResult", "Knobs", "Window", "estimate_tokens",
@@ -805,7 +1063,9 @@ __all__ = ["Budget", "CompactionResult", "Knobs", "Window", "estimate_tokens",
            "OUTPUT_CEILING_TOKENS", "DEFAULT_WINDOW_TOKENS",
            "estimate_messages_tokens", "estimate_tools_tokens",
            "context_length_of", "plan",
-           "compact_messages", "observed_output_tokens",
+           "compact_messages", "observed_output_tokens", "CutPlan",
+           "plan_cut", "compaction_target_tokens", "is_typed_prompt",
+           "is_compaction_marker", "is_safe_cut_boundary",
            "preserve_recent_tokens", "compaction_trigger_tokens",
            "MAX_OUTPUT_TOKENS", "MIN_OUTPUT_TOKENS", "TARGET_OUTPUT_TOKENS",
            "WINDOW_MARGIN_TOKENS", "CHARS_PER_TOKEN"]

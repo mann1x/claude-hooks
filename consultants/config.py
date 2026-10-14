@@ -223,6 +223,7 @@ class RoleConfig:
     # model string exactly as the role names it).
     budget: dict[str, Any] = field(default_factory=dict)
     sampling: dict[str, Any] = field(default_factory=dict)
+    compaction: dict[str, Any] = field(default_factory=dict)
     model_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
@@ -788,6 +789,8 @@ BUDGET_KEYS: dict[str, Any] = {
     "reserve_share": lambda v: _budget_share(v, 0.0, 0.9, lo_open=False),
     "num_ctx": _budget_num_ctx,
     "announce": _budget_bool,
+    "trigger_ratio": lambda v: _budget_share(v, 0.3, 0.98, lo_open=False),
+    "output_room_min": lambda v: _budget_int(v, 0),
 }
 
 #: ``think`` values (plan B3): off, on (the model's own budget), a level,
@@ -851,8 +854,36 @@ SAMPLING_KEYS: dict[str, Any] = {
     "temperature_range_pct": _check_range_pct,
 }
 
+def _choice(*allowed: str):
+    def check(v: Any) -> str:
+        if isinstance(v, str) and v.strip().lower() in allowed:
+            return v.strip().lower()
+        raise ValueError(f"must be one of {', '.join(allowed)}")
+    return check
+
+
+#: Compaction (plan C). Defaults live in
+#: ``consultants.engine.compaction.Settings``: flow "reduced" (replay
+#: writer → retrospective → reviewer), placement "system", review true,
+#: target_share 0.25, writer_attempts 3, ledger true, tool results
+#: middle-truncated past 32000 chars (file contents 50000), stale reads
+#: rewritten at 0.4 of the window, reasoning_replay "none".
+COMPACTION_KEYS: dict[str, Any] = {
+    "flow": _choice("reduced", "full", "basic"),
+    "placement": _choice("system", "user"),
+    "review": _budget_bool,
+    "target_share": lambda v: _budget_share(v, 0.05, 0.6, lo_open=False),
+    "writer_attempts": lambda v: min(5, _budget_int(v, 1)),
+    "ledger": _budget_bool,
+    "tool_result_max_chars": lambda v: _budget_int(v, 1_000),
+    "file_result_max_chars": lambda v: _budget_int(v, 1_000),
+    "stale_read_share": lambda v: _budget_share(v, 0.0, 1.0, lo_open=False),
+    "reasoning_replay": _choice("none", "all", "inline"),
+}
+
 #: Keys a ``[role.X.models."<model>"]`` table takes.
 MODEL_OVERRIDE_KEYS: dict[str, Any] = {**BUDGET_KEYS, **SAMPLING_KEYS,
+                                       **COMPACTION_KEYS,
                                        "think": check_think}
 
 
@@ -973,6 +1004,7 @@ class ConsultantsConfig:
     # Plan B: ``[budget]`` / ``[sampling]`` — only the keys a layer set.
     budget: dict[str, Any] = field(default_factory=dict)
     sampling: dict[str, Any] = field(default_factory=dict)
+    compaction: dict[str, Any] = field(default_factory=dict)
 
     def role(self, name: str) -> RoleConfig:
         if name not in ROLES:
@@ -1042,6 +1074,7 @@ def _merge_role(base: RoleConfig, override: dict) -> RoleConfig:
         default_route=base.default_route,
         budget=dict(base.budget),
         sampling=dict(base.sampling),
+        compaction=dict(base.compaction),
         model_overrides={m: dict(v) for m, v in base.model_overrides.items()},
     )
     if "budget" in override:
@@ -1050,6 +1083,9 @@ def _merge_role(base: RoleConfig, override: dict) -> RoleConfig:
     if "sampling" in override:
         out.sampling.update(validate_settings(
             override["sampling"], SAMPLING_KEYS, where="role sampling"))
+    if "compaction" in override:
+        out.compaction.update(validate_settings(
+            override["compaction"], COMPACTION_KEYS, where="role compaction"))
     if isinstance(override.get("models"), dict):
         for m, table in override["models"].items():
             if not isinstance(m, str) or not m.strip():
@@ -1407,6 +1443,9 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
     if "sampling" in raw:
         base.sampling.update(validate_settings(raw["sampling"], SAMPLING_KEYS,
                                                where="sampling"))
+    if "compaction" in raw:
+        base.compaction.update(validate_settings(
+            raw["compaction"], COMPACTION_KEYS, where="compaction"))
 
     # protocol (plan G)
     proto = raw.get("protocol") or {}
@@ -1807,6 +1846,20 @@ def _render(cfg: ConsultantsConfig, *,
         if k in cfg.sampling:
             L.append(f"{k} = {_toml_value(cfg.sampling[k])}")
     L.append("")
+    L.append("[compaction]")
+    L.append("# Compaction (plan C). Unset keys use the defaults: flow = "
+             "\"reduced\" (replay writer, retrospective, one reviewer; "
+             "\"full\" adds the halfway marker, two half-critics and a "
+             "synthesizer; \"basic\" makes no model call), placement = "
+             "\"system\", review = true, target_share = 0.25, "
+             "writer_attempts = 3, ledger = true, tool_result_max_chars = "
+             "32000, file_result_max_chars = 50000, stale_read_share = 0.4, "
+             "reasoning_replay = \"none\". Every step runs on the role's "
+             "own model. Per role: [role.X.compaction].")
+    for k in COMPACTION_KEYS:
+        if k in cfg.compaction:
+            L.append(f"{k} = {_toml_value(cfg.compaction[k])}")
+    L.append("")
     L.append("[protocol]")
     L.append("# typed: roles hand typed records to each other (plan G); the "
              "synthesizer stays prose. Off until benched.")
@@ -1877,6 +1930,11 @@ def _render(cfg: ConsultantsConfig, *,
         if rc.sampling:
             L.append(f"[role.{role}.sampling]")
             for k, v in rc.sampling.items():
+                L.append(f"{k} = {_toml_value(v)}")
+            L.append("")
+        if rc.compaction:
+            L.append(f"[role.{role}.compaction]")
+            for k, v in rc.compaction.items():
                 L.append(f"{k} = {_toml_value(v)}")
             L.append("")
         for m in sorted(rc.model_overrides):
@@ -2194,6 +2252,41 @@ def set_sampling(values: Optional[dict] = None, *,
                   else rc.sampling)
     else:
         target = cfg.sampling
+    target.update(checked)
+    for k in clear or []:
+        target.pop(k, None)
+    if role and model and not target:
+        cfg.roles[role].model_overrides.pop(model, None)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_compaction(values: Optional[dict] = None, *,
+                   clear: Optional[list[str]] = None,
+                   role: Optional[str] = None, model: Optional[str] = None,
+                   scope: str = "user",
+                   cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set or clear compaction keys (plan C) in ``[compaction]``,
+    ``[role.<role>.compaction]`` or ``[role.<role>.models."<model>"]``.
+    Bad values raise ``ValueError``; nothing is written then."""
+    if model and not role:
+        raise ValueError("--model needs --role: per-model settings belong "
+                         "to a role")
+    checked = {}
+    for k, v in (values or {}).items():
+        if k not in COMPACTION_KEYS:
+            raise ValueError(f"unknown compaction key {k!r} "
+                             f"(keys: {', '.join(COMPACTION_KEYS)})")
+        checked[k] = COMPACTION_KEYS[k](v)
+    for k in clear or []:
+        if k not in COMPACTION_KEYS:
+            raise ValueError(f"unknown compaction key {k!r}")
+    cfg = _load_for_edit(scope, cwd)
+    if role:
+        rc = cfg.role(role)
+        target = (rc.model_overrides.setdefault(model, {}) if model
+                  else rc.compaction)
+    else:
+        target = cfg.compaction
     target.update(checked)
     for k in clear or []:
         target.pop(k, None)

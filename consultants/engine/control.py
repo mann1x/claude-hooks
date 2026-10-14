@@ -226,7 +226,30 @@ def runtime_control_defaults(
     sampling = sampling_layers(cfg)
     if sampling:
         rc["sampling"] = sampling  # type: ignore[typeddict-item]
+    # Plan C: layers only when something is set (M12 parity).
+    compaction = compaction_layers(cfg)
+    if compaction:
+        rc["compaction"] = compaction  # type: ignore[typeddict-item]
     return rc
+
+
+def compaction_layers(cfg: cc.ConsultantsConfig) -> dict:
+    """``[compaction]`` / ``[role.X.compaction]`` / per-model compaction
+    keys as ``"*"`` / ``"<role>"`` / ``"<role>@<model>"`` layers for
+    :func:`consultants.engine.compaction.settings_from`; empty when
+    nothing is set."""
+    out: dict = {}
+    if getattr(cfg, "compaction", None):
+        out["*"] = dict(cfg.compaction)
+    for role, rc in (getattr(cfg, "roles", None) or {}).items():
+        if getattr(rc, "compaction", None):
+            out[role] = dict(rc.compaction)
+        for model, vals in (getattr(rc, "model_overrides", None) or {}).items():
+            picked = {k: v for k, v in (vals or {}).items()
+                      if k in cc.COMPACTION_KEYS}
+            if picked:
+                out[f"{role}@{model}"] = picked
+    return out
 
 
 def sampling_layers(cfg: cc.ConsultantsConfig) -> dict:

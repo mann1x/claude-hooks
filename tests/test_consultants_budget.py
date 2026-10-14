@@ -130,10 +130,17 @@ class TestCompaction(unittest.TestCase):
         self.assertEqual(out[1]["content"], "the original question")
 
     def test_keeps_the_most_recent_exchanges(self):
+        """The tail is the newest messages; the token ceiling (the target)
+        disposes over the count floor, as in the fork's ``findCutPlan`` —
+        ~10k-token turns against a 20k target keep two, not four."""
         msgs = self._history()
         out, _ = budget.compact_messages(msgs, keep_tokens=20000,
                                          keep_recent=4)
-        self.assertEqual(out[-4:], msgs[-4:])
+        self.assertEqual(out[-2:], msgs[-2:])
+        small = self._history(size=200)
+        out, _ = budget.compact_messages(small, keep_tokens=4000,
+                                         keep_recent=4)
+        self.assertEqual(out[-4:], small[-4:])
 
     def test_elision_is_announced_not_silent(self):
         """A model that knows its history was abridged reasons about the
@@ -218,7 +225,7 @@ class TestToolLoopBudget(unittest.TestCase):
                  for i in range(20)]
         payload = {"messages": list(msgs)}
         with unittest.mock.patch(
-                "consultants.engine.retrospective.write",
+                "consultants.engine.compaction.write_digest",
                 side_effect=RuntimeError("no digest in tests")):
             prepare(payload)
         self.assertLess(len(payload["messages"]), len(msgs))

@@ -623,6 +623,7 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
         # Plan B: only the keys set; unset ones use the shipped defaults.
         "budget": dict(cfg.budget),
         "sampling": dict(cfg.sampling),
+        "compaction": dict(cfg.compaction),
         # Named chat servers roles use as ``@name`` / ``@name/model``.
         # The key is never printed, only whether one is set.
         "endpoints": {
@@ -652,6 +653,7 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
                 "think": cc.role_think(cfg, r),
                 "budget": dict(cfg.roles[r].budget),
                 "sampling": dict(cfg.roles[r].sampling),
+                "compaction": dict(cfg.roles[r].compaction),
                 "models": {m: dict(v) for m, v
                            in cfg.roles[r].model_overrides.items()},
                 # The coder routes per language. The skill's status
@@ -1262,7 +1264,8 @@ def cmd_config_set_protocol(args, base: str) -> int:
 def cmd_config_set_budget(args, base: str) -> int:
     values: dict = {}
     for key in ("output_ceiling", "output_window_share", "reserve_min",
-                "reserve_share", "num_ctx", "announce"):
+                "reserve_share", "num_ctx", "announce", "trigger_ratio",
+                "output_room_min"):
         v = getattr(args, key, None)
         if v is not None:
             values[key] = v
@@ -1289,6 +1292,29 @@ def cmd_config_set_sampling(args, base: str) -> int:
     try:
         cfg = cc.set_sampling(values, clear=args.clear, role=args.role,
                               model=args.model, **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+_COMPACTION_ARGS = ("flow", "placement", "review", "target_share",
+                    "writer_attempts", "ledger", "tool_result_max_chars",
+                    "file_result_max_chars", "stale_read_share",
+                    "reasoning_replay")
+
+
+def cmd_config_set_compaction(args, base: str) -> int:
+    values: dict = {}
+    for key in _COMPACTION_ARGS:
+        v = getattr(args, key, None)
+        if v is not None:
+            values[key] = v
+    if not values and not args.clear:
+        raise CLIError("set-compaction: name at least one setting or "
+                       "--clear KEY", exit_code=2)
+    try:
+        cfg = cc.set_compaction(values, clear=args.clear, role=args.role,
+                                model=args.model, **_resolve_active_scope(args))
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
     return _emit_config(cfg, args)
@@ -2721,6 +2747,12 @@ def build_parser() -> argparse.ArgumentParser:
                           "in tokens.")
     cbu.add_argument("--announce", choices=["on", "off"],
                      help="State the cap in the role's prompt (on).")
+    cbu.add_argument("--trigger-ratio", dest="trigger_ratio", type=float,
+                     help="Compact once the prompt reaches this share of "
+                          "the window (default 0.9, 0.3-0.98).")
+    cbu.add_argument("--output-room-min", dest="output_room_min", type=int,
+                     help="Never reserve less reply room than this when "
+                          "deciding to compact (default 8000).")
     cbu.add_argument("--clear", action="append", default=[], metavar="KEY",
                      help="Remove a setting (repeatable).")
     _add_scope_args(cbu)
@@ -2744,6 +2776,48 @@ def build_parser() -> argparse.ArgumentParser:
     csa.add_argument("--clear", action="append", default=[], metavar="KEY")
     _add_scope_args(csa)
     csa.set_defaults(fn=cmd_config_set_sampling)
+
+    cco = cfg_sub.add_parser(
+        "set-compaction",
+        help="Compaction (plan C), globally, per role or per (role, model). "
+             "Every step runs on the role's own model. --clear KEY removes "
+             "a setting.")
+    cco.add_argument("--role", choices=list(cc.ROLES))
+    cco.add_argument("--model", help="Model exactly as the role names it.")
+    cco.add_argument("--flow", choices=["reduced", "full", "basic"],
+                     help="reduced (default): replay writer, retrospective, "
+                          "one reviewer. full: halfway marker, two "
+                          "half-critics, synthesizer. basic: no model call.")
+    cco.add_argument("--placement", choices=["system", "user"],
+                     help="Role of the message that replaces the folded "
+                          "span (default system).")
+    cco.add_argument("--review", choices=["on", "off"],
+                     help="The reduced flow's reviewer (default on).")
+    cco.add_argument("--target-share", dest="target_share", type=float,
+                     help="Fold to this share of the free window "
+                          "(default 0.25, 0.05-0.6).")
+    cco.add_argument("--writer-attempts", dest="writer_attempts", type=int,
+                     help="Writer retries, with the measured overrun fed "
+                          "back (default 3, max 5).")
+    cco.add_argument("--ledger", choices=["on", "off"],
+                     help="Numbered tool record with [#N] citations "
+                          "(default on).")
+    cco.add_argument("--tool-result-max-chars", dest="tool_result_max_chars",
+                     type=int, help="Middle-truncate a tool result in "
+                                    "history past this (default 32000).")
+    cco.add_argument("--file-result-max-chars", dest="file_result_max_chars",
+                     type=int, help="The same for file contents "
+                                    "(default 50000).")
+    cco.add_argument("--stale-read-share", dest="stale_read_share",
+                     type=float, help="Rewrite superseded reads once the "
+                                      "history reaches this share of the "
+                                      "window (default 0.4).")
+    cco.add_argument("--reasoning-replay", dest="reasoning_replay",
+                     choices=["none", "all", "inline"],
+                     help="Past-turn reasoning on the wire (default none).")
+    cco.add_argument("--clear", action="append", default=[], metavar="KEY")
+    _add_scope_args(cco)
+    cco.set_defaults(fn=cmd_config_set_compaction)
 
     cth = cfg_sub.add_parser(
         "set-think",

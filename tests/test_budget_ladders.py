@@ -20,9 +20,16 @@ class _Client:
         return self.ctx
 
 
-def _assistant(output_tokens):
-    return {"role": "assistant", "content": "x",
-            "_output_tokens": output_tokens}
+def _assistant(tokens):
+    """An assistant turn that occupies about ``tokens`` in the context.
+    The bill (``_output_tokens``) is deliberately absurd: plan C3 measures
+    the transcript, never the invoice."""
+    return {"role": "assistant", "content": "x" * (tokens * 4),
+            "_output_tokens": 10 ** 9}
+
+
+def _tok(msg):
+    return budget.estimate_messages_tokens([msg])
 
 
 class TestObservedOutputReservation(unittest.TestCase):
@@ -34,22 +41,35 @@ class TestObservedOutputReservation(unittest.TestCase):
         routinely the smallest it will produce."""
         self.assertIsNone(budget.observed_output_tokens([_assistant(500)]))
 
-    def test_high_water_not_mean(self):
-        """The reservation exists for the largest turn; an average over
-        a run that thinks on one turn in four describes none of them."""
-        msgs = [_assistant(100), _assistant(100), _assistant(9000),
-                _assistant(100)]
-        self.assertEqual(budget.observed_output_tokens(msgs), 9000)
+    def test_recent_high_water_counts_in_full(self):
+        """A long turn among the newest three is a model that changed
+        register; it sets the room."""
+        big = _assistant(9000)
+        msgs = [_assistant(100), _assistant(100), big, _assistant(100)]
+        self.assertEqual(budget.observed_output_tokens(msgs), _tok(big))
+
+    def test_an_older_outlier_gives_way_to_the_second_largest(self):
+        """Fork 9b53fc656: one 83k-character call held half a 128k window
+        back for twelve turns. Past the newest three, with four or more
+        samples, the second largest sets the room."""
+        second = _assistant(700)
+        msgs = [_assistant(30_000), second] + [_assistant(100)] * 5
+        self.assertEqual(budget.observed_output_tokens(msgs), _tok(second))
+
+    def test_measures_the_transcript_not_the_bill(self):
+        msgs = [_assistant(50), _assistant(60)]
+        self.assertLess(budget.observed_output_tokens(msgs), 1_000)
 
     def test_only_looks_at_recent_turns(self):
         msgs = [_assistant(99_000)] + [_assistant(100)] * 20
         self.assertEqual(budget.observed_output_tokens(msgs, sample_turns=5),
-                         100)
+                         _tok(_assistant(100)))
 
     def test_user_messages_are_not_turns(self):
-        msgs = [{"role": "user", "content": "q", "_output_tokens": 9999},
+        msgs = [{"role": "user", "content": "q" * 40_000},
                 _assistant(10), _assistant(20)]
-        self.assertEqual(budget.observed_output_tokens(msgs), 20)
+        self.assertEqual(budget.observed_output_tokens(msgs),
+                         _tok(_assistant(20)))
 
     def test_a_quiet_run_lowers_the_trigger_less_than_cold_start(self):
         """The measurement is what stops 21% of the window being held

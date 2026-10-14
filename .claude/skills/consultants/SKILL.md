@@ -809,6 +809,9 @@ and **More…** opens the next batch (ending with **Done**):
     the context window each role is budgeted against, and the per-instance
     seed / temperature jitter, globally, per role or per (role, model) —
     see Subflow K
+12. **Compaction** — how a role's history is folded when it outgrows the
+    window (reduced or full flow, placement, review, ledger, history
+    truncation), globally, per role or per (role, model) — see Subflow L
 
 Loop back to step 1 after each successful change; exit on **Done**.
 
@@ -1129,6 +1132,38 @@ model declares none). Same scope question, then:
 - **Reset** — `--clear <key>`.
 
 `claude-consultants show <sid>` lists the realized `samplers`.
+
+### Subflow L — Compaction
+
+Read `compaction` (global) and each role's `compaction` / `models`
+blocks from `config show`. Only set keys appear; the shipped defaults
+are `flow` `reduced`, `placement` `system`, `review` on, `target_share`
+0.25, `writer_attempts` 3, `ledger` on, `tool_result_max_chars` 32000,
+`file_result_max_chars` 50000, `stale_read_share` 0.4,
+`reasoning_replay` `none`. Every compaction step runs on the role's own
+model, one call after another; nothing here changes that. Ask the scope
+first (all roles, one role, one role on one model), then:
+
+- **Flow** — `claude-consultants config set-compaction [--role R
+  [--model M]] --flow reduced|full|basic`. `reduced`: a present-tense
+  replay writer, a retrospective and one reviewer (3 calls). `full`: the
+  writer marks a halfway point, two critics each rewrite a half, a
+  synthesizer joins them (5 calls) — for small models, opt-in per role.
+  `basic`: no model call, only the elision note.
+- **Placement** — `--placement system|user`: the role of the message
+  that replaces the folded span.
+- **Reviewer** — `--review on|off` (reduced flow only).
+- **Target** — `--target-share <0.05-0.6>`: fold to this share of the
+  free window.
+- **Tool record** — `--ledger on|off`: the numbered `[#N]` call record
+  the replay cites.
+- **History truncation** — `--tool-result-max-chars N`,
+  `--file-result-max-chars N`, `--stale-read-share <s>`.
+- **Past reasoning on the wire** — `--reasoning-replay none|all|inline`.
+- **Reset** — `--clear <key>` (repeatable).
+
+The trigger itself is a budget knob: `set-budget --trigger-ratio <r>`
+(default 0.9) and `--output-room-min N` (default 8000).
 
 ### Subflow I — Tool surface
 

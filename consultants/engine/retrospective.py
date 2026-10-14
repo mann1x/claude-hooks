@@ -489,6 +489,17 @@ class Digest:
     generation: int = 1
     dropped: int = 0
     stand_down: str = ""
+    #: Every typed request so far, carried across generations (plan C2).
+    user_requests: list = field(default_factory=list)
+    #: The same, as shown in the marker (middle-elided to budget).
+    shown_requests: list = field(default_factory=list)
+    #: The tool ledger, carried across generations (entry dicts).
+    ledger: list = field(default_factory=list)
+    #: The rendered entries the replay did not cite.
+    uncited: str = ""
+    invalid_citations: list = field(default_factory=list)
+    flow: str = ""
+    info: dict = field(default_factory=dict)
 
     @property
     def empty(self) -> bool:
@@ -498,7 +509,12 @@ class Digest:
         return {"generation": self.generation, "dropped": self.dropped,
                 "has_summary": bool(self.summary.strip()),
                 "has_retrospective": bool(self.retrospective.strip()),
-                "stand_down": self.stand_down}
+                "stand_down": self.stand_down, "flow": self.flow,
+                "user_requests": len(self.user_requests),
+                "ledger_entries": len(self.ledger),
+                "invalid_citations": len(self.invalid_citations),
+                **{k: v for k, v in self.info.items()
+                   if isinstance(v, (int, str, bool))}}
 
 
 def _call(chat_client: Any, model: str, system: str, user: str,
@@ -640,19 +656,33 @@ def write(dropped_messages: list[dict], *, chat_client: Any, model: str,
     return digest
 
 
-def render_marker(digest: Digest, dropped: int) -> dict:
+def render_marker(digest: Digest, dropped: int, *,
+                  placement: str = "system") -> dict:
     """The message that replaces the elided span.
 
-    Retrospective first — it is what the model should read first: how
-    the work went, before what the work was.
+    In order (the fork's ``buildSummaryMessage``): the user's requests,
+    quoted — first, because they are the task and an account read before
+    the instruction it serves is read without a test to apply to it; the
+    retrospective — how the work went, before what the work was; the
+    replay; the calls it did not cite, recorded by the harness; and the
+    elision note.
+
+    ``placement`` is the message's role: ``system`` (ours) or ``user``
+    (the fork's, where the replay sits in the model's own voice). Plan
+    §11.2 settles the default by an A/B.
 
     Everything is plain text. The retrospective riding as a reasoning
     block was the fork's first attempt and fails at the wire: reasoning
-    parts are only valid on an assistant message, and this is the
-    message replacing a span of transcript. The heading carries the
-    framing the block type cannot.
+    parts are only valid on an assistant message. Each part ends in a
+    blank line, because Ollama joins parts with nothing.
     """
     parts: list[str] = []
+    if digest.shown_requests:
+        parts.append(
+            "What the user asked, in their own words — every instruction "
+            "given so far, quoted by the harness:\n\n"
+            + "\n\n".join(f"<user_request>\n{r}\n</user_request>"
+                           for r in digest.shown_requests) + "\n")
     if digest.retrospective.strip():
         parts.append(
             "Retrospective on the work this summary replaces — your own "
@@ -660,19 +690,26 @@ def render_marker(digest: Digest, dropped: int) -> dict:
             + digest.retrospective.strip() + "\n")
     if digest.summary.strip():
         parts.append("Context summary:\n\n" + digest.summary.strip() + "\n")
+    if digest.uncited.strip():
+        parts.append("The tool calls this summary stands for, recorded by the "
+                     "harness rather than written by the model:\n\n"
+                     + digest.uncited.strip() + "\n")
+    recorded = bool(digest.summary.strip() or digest.retrospective.strip())
     parts.append(
         f"[{dropped} earlier message(s) were elided to fit the model's "
         f"context window. The instructions above and the most recent "
         f"exchanges below are intact. What the elided span established is "
-        f"{'recorded above' if parts else 'not recorded'}; say so if you "
+        f"{'recorded above' if recorded else 'not recorded'}; say so if you "
         f"need something from it that is missing rather than inferring "
         f"what it contained.]")
     return {
-        "role": "system",
+        "role": "user" if placement == "user" else "system",
         "_compaction_marker": True,
         "_compaction_generation": digest.generation,
         "_compaction_summary": digest.summary,
         "_compaction_retrospective": digest.retrospective,
+        "_compaction_user_requests": list(digest.user_requests),
+        "_compaction_ledger": list(digest.ledger),
         "content": "\n".join(parts),
     }
 
@@ -682,7 +719,7 @@ def previous_digest(messages: list[dict]) -> Optional[Digest]:
 
     Chained so a fifth compaction revises the fourth's assessment rather
     than writing a fresh one from a span that no longer contains the
-    work it is describing.
+    work it is describing; the requests and the ledger carry the same way.
     """
     for message in reversed(messages or []):
         if (message or {}).get("_compaction_marker"):
@@ -690,6 +727,8 @@ def previous_digest(messages: list[dict]) -> Optional[Digest]:
                 summary=message.get("_compaction_summary") or "",
                 retrospective=message.get("_compaction_retrospective") or "",
                 generation=int(message.get("_compaction_generation") or 1),
+                user_requests=list(message.get("_compaction_user_requests") or []),
+                ledger=list(message.get("_compaction_ledger") or []),
             )
     return None
 
