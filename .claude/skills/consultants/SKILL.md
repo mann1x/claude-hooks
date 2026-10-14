@@ -69,6 +69,7 @@ after `/consultants`:
 | `accept`     | accept     | Drop the verb; mark the consultancy (rest = sid) ACCEPTED.     |
 | `grant`      | grant      | Drop the verb; rest = `[sid] [N]`; raise that consultancy's cap by N now. |
 | `config`     | config     | Drop the verb; run **config** flow with the rest as sub-args.  |
+| `account`    | account    | Run `claude-consultants account [--model M ...]`; show the plan and, per cloud model, window / max output / thinking values, flagging `plan_ok: false`. |
 | anything else (incl. empty) | ask | Implicit ask: treat the **entire** arg as the question. |
 
 Examples:
@@ -810,7 +811,10 @@ AskUserQuestion the role (`planner`/`researcher`/`critic`/
   researcher (validation error on next consult).
 - **Change model** → `claude-consultants config list-models`,
   pick up to 3 candidates + `Other (custom)`, then
-  `set-role <role> --model <chosen>`.
+  `set-role <role> --model <chosen>`. For a cloud pick, run
+  `claude-consultants account --model <chosen>` first and warn the
+  user when it reports `plan_ok: false` (the account's plan does not
+  cover the model).
 - **Manage extra models** — researcher + critic only. Sub-action:
   add / remove / clear / back. Forward to
   `set-role <role> --add-model|--remove-model|--clear-extras ...`.

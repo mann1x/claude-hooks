@@ -317,6 +317,11 @@ class MessageRecorder:
                 "completion_tokens": completion_tokens,
                 "error": error,
                 "truncated": trunc.kind if trunc else None,
+                # Per-call timings the chat client measured (queue,
+                # TTFT, prefill/decode, granted window), plan A5. The
+                # full record is in ``response_json``.
+                "timings": (response.get("timings")
+                            if isinstance(response, dict) else None),
             },
         )
 

@@ -126,9 +126,21 @@ def _plan_cache_path() -> Path:
     return Path.home() / ".claude" / "ollama-plan.json"
 
 
+#: The last Ollama server a cloud call went through. ``_fetch_plan``
+#: asks it first: the local server signs ``/api/me`` with its own key,
+#: so the direct signed call below is needed only when it cannot.
+_plan_server: Optional[str] = None
+
+
 def _fetch_plan() -> Optional[str]:
-    """The account's plan from ``ollama.com/api/me``. That response
-    carries personal data; only ``Plan`` is read, and only it is kept."""
+    """The account's plan: through the local server's ``/api/me`` first,
+    else ``ollama.com/api/me`` signed with ``~/.ollama``. That response
+    carries personal data; only the plan is read, and only it is kept."""
+    if _plan_server:
+        from claude_hooks import ollama_account
+        acct = ollama_account.whoami(_plan_server)
+        if acct.get("signed_in") and acct.get("plan"):
+            return acct["plan"]
     key = Path.home() / ".ollama" / "id_ed25519"
     try:
         from cryptography.hazmat.primitives.serialization import (
@@ -192,6 +204,8 @@ def scope_for(base_url: str, model: str,
     if not s["enabled"]:
         return None
     if is_cloud(base_url, model):
+        global _plan_server
+        _plan_server = base_url
         n = cloud_limit(cfg)
         return ("cloud", n) if n > 0 else None
     n = int(s["local_limit"] or 0)

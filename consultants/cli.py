@@ -956,6 +956,22 @@ def cmd_config_set_store_distillation(args, base: str) -> int:
     return _emit_config(cfg, args)
 
 
+def cmd_account(args, base: str) -> int:
+    """The Ollama account behind the council: plan, and per cloud model
+    the window, max output and thinking values the service publishes,
+    with a flag when the plan does not cover a model. Read through the
+    server's own ``/api/me`` and model recommendations, so no key is
+    needed here."""
+    from claude_hooks import ollama_account
+    from consultants.server.runner import default_ollama_url
+    upstream = (args.ollama_url or default_ollama_url()).rstrip("/")
+    st = ollama_account.status(upstream, models=list(args.model or []) or None)
+    if not st["account"].get("reachable"):
+        raise CLIError(f"Could not read the account through {upstream}")
+    print(json.dumps({"ok": True, **st}, indent=2))
+    return 0
+
+
 def cmd_config_list_models(args, base: str) -> int:
     """Proxy /api/tags from the configured Ollama upstream and filter
     to tools-capable models. The skill uses this to populate the
@@ -1987,6 +2003,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="List in-memory sessions (warm or recently completed). "
              "Closed sessions don't appear here.")
     lo.set_defaults(fn=cmd_list_open)
+
+    # account (plan A3)
+    acc = sub.add_parser(
+        "account",
+        help="Ollama account: plan, and each cloud model's window, max "
+             "output, thinking values and plan requirement.")
+    acc.add_argument("--model", action="append",
+                     help="Only these models (repeatable). Default: every "
+                          "cloud model the server lists or recommends.")
+    acc.add_argument("--ollama-url", dest="ollama_url",
+                     help="Ollama server (default: the engine's).")
+    acc.set_defaults(fn=cmd_account)
 
     # list
     l_ = sub.add_parser("list", help="List sessions for a project.")

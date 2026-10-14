@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -75,6 +77,177 @@ def is_outage(exc: BaseException, body: str = "") -> bool:
     if isinstance(exc, urllib.error.URLError):
         return True  # raised before a response: connect / DNS phase
     return isinstance(exc, (ConnectionError, BrokenPipeError))
+
+
+#: Fault classes a failed call is tagged with (``ChatFault.fault_class``).
+#: The class decides what a caller does next, so it is named rather than
+#: left for the caller to re-derive from a status code and a body:
+#: ``transport`` (network, 5xx, a dead stream) is retried until the run's
+#: deadline; ``refusal`` (429, admission) is backed off; ``model_missing``
+#: moves to the next model in a role's chain without spending a retry;
+#: ``context_overflow`` asks for compaction; ``bad_request`` is ours to fix.
+TRANSPORT = "transport"
+REFUSAL = "refusal"
+MODEL_MISSING = "model_missing"
+CONTEXT_OVERFLOW = "context_overflow"
+BAD_REQUEST = "bad_request"
+
+
+class ChatFault(RuntimeError):
+    """A chat call that failed for good, with the reason named.
+
+    A ``RuntimeError`` so every existing ``except RuntimeError`` keeps
+    catching it; the message is unchanged from before the class existed.
+    """
+
+    def __init__(self, message: str, *, fault_class: str,
+                 status: Optional[int] = None, body: str = ""):
+        super().__init__(message)
+        self.fault_class = fault_class
+        self.status = status
+        self.body = body
+
+
+_MODEL_MISSING_RX = re.compile(
+    r"model\s+['\"]?[^'\"]*['\"]?\s+not found|not found, try pulling|"
+    r"no such model|model not found|pull model manifest", re.I)
+_OVERFLOW_RX = re.compile(
+    r"context[ _]length|context[ _]window|exceeds? the (?:maximum )?context|"
+    r"too many tokens|prompt is too long|context_window_exceeded", re.I)
+
+
+def classify_http_fault(status: int, body: str) -> str:
+    if status == 404 or (400 <= status < 500 and _MODEL_MISSING_RX.search(body or "")):
+        return MODEL_MISSING
+    if status == 429:
+        return REFUSAL
+    if status in RETRYABLE_STATUS or status >= 500:
+        return TRANSPORT
+    if _OVERFLOW_RX.search(body or ""):
+        return CONTEXT_OVERFLOW
+    return BAD_REQUEST
+
+
+#: A refusal that names the provider's real output maximum. Ollama Cloud
+#: / Z.ai, Anthropic, OpenAI spellings (Cerebriline ``gateway.ts:125-135``).
+OUTPUT_CEILING_PATTERNS = (
+    re.compile(r"maximum output tokens\s*\((\d+)\)", re.I),
+    re.compile(r"max_tokens:\s*\d+\s*>\s*(\d+)", re.I),
+    re.compile(r"supports at most\s*(\d+)\s*completion tokens", re.I),
+)
+
+#: Learned per (server, model) for the life of the process: a ceiling the
+#: provider stated is a fact about the provider, not about one request.
+_learned_ceilings: dict[tuple[str, str], int] = {}
+_ceilings_lock = threading.Lock()
+
+
+def learned_output_ceiling(base_url: str, model: str) -> Optional[int]:
+    with _ceilings_lock:
+        return _learned_ceilings.get((base_url, model))
+
+
+def _learn_ceiling(base_url: str, model: str, body: str) -> Optional[int]:
+    for rx in OUTPUT_CEILING_PATTERNS:
+        m = rx.search(body or "")
+        if m:
+            n = int(m.group(1))
+            if n > 0:
+                with _ceilings_lock:
+                    _learned_ceilings[(base_url, model)] = n
+                return n
+    return None
+
+
+#: ``Retry-After`` is honoured up to this many seconds per wait; a longer
+#: ask is answered with this, and the next attempt asks again.
+RETRY_AFTER_MAX_S = 30.0
+
+
+def retry_after_s(headers) -> Optional[float]:
+    """Seconds a 429/503 asks us to wait: integer seconds or an
+    HTTP-date (a past date is 0). ``None`` when absent or unparseable."""
+    if headers is None:
+        return None
+    try:
+        raw = headers.get("Retry-After")
+    except Exception:  # noqa: BLE001
+        return None
+    if raw is None:
+        return None
+    raw = str(raw).strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when is None:
+        return None
+    import datetime as _dt
+    now = _dt.datetime.now(when.tzinfo or _dt.timezone.utc)
+    return max(0.0, (when - now).total_seconds())
+
+
+#: An answer with no content, no tool call and no reasoning that still
+#: says it stopped normally is a dropped reply, not a verdict. Asked
+#: again this many times, a short pause apart (Cerebriline
+#: ``retry-empty-response.ts``, commit 9d7cf0b6f).
+EMPTY_RETRIES = 2
+EMPTY_RETRY_DELAY_S = 0.25
+
+
+def _is_empty_reply(data: dict) -> bool:
+    msg = data.get("message") or {}
+    if (msg.get("content") or "").strip() or msg.get("tool_calls"):
+        return False
+    if any((msg.get(k) or "").strip() for k in _STREAMED_REASONING_KEYS
+           if isinstance(msg.get(k), str)):
+        return False
+    return (data.get("done_reason") or "stop") == "stop"
+
+
+def _timings(data: dict, *, wall_s: float, queue_s: float,
+             ttft_s: Optional[float], attempts: int, empty_retries: int,
+             headers=None) -> dict:
+    """Per-call timings for the run record (plan A5). Durations Ollama
+    reports in nanoseconds become milliseconds; prefill and decode rates
+    are computed from evaluated tokens only."""
+    out: dict = {"wall_ms": round(wall_s * 1000), "queue_ms": round(queue_s * 1000),
+                 "attempts": attempts}
+    if ttft_s is not None:
+        out["ttft_ms"] = round(ttft_s * 1000)
+    if empty_retries:
+        out["empty_retries"] = empty_retries
+    for src, dst in (("load_duration", "load_ms"),
+                     ("prompt_eval_duration", "prompt_eval_ms"),
+                     ("eval_duration", "eval_ms"),
+                     ("total_duration", "total_ms")):
+        v = data.get(src)
+        if isinstance(v, (int, float)) and v >= 0:
+            out[dst] = round(v / 1e6)
+    pe, pd = data.get("prompt_eval_count"), data.get("prompt_eval_duration")
+    if isinstance(pe, int) and pe > 0 and isinstance(pd, (int, float)) and pd > 0:
+        out["prefill_tok_s"] = round(pe / (pd / 1e9), 1)
+    ev, ed = data.get("eval_count"), data.get("eval_duration")
+    if isinstance(ev, int) and ev > 0 and isinstance(ed, (int, float)) and ed > 0:
+        out["decode_tok_s"] = round(ev / (ed / 1e9), 1)
+    if headers is not None:
+        try:
+            win = headers.get("X-Context-Window")
+        except Exception:  # noqa: BLE001
+            win = None
+        if win:
+            try:
+                out["granted_window"] = int(win)
+            except ValueError:
+                pass
+    return out
 
 
 class _Attempts:
@@ -232,7 +405,8 @@ class ChatClient:
                  max_retries: int = DEFAULT_MAX_RETRIES,
                  retry_base_delay_s: float = DEFAULT_RETRY_BASE_DELAY_S,
                  retry_max_delay_s: float = DEFAULT_RETRY_MAX_DELAY_S,
-                 outage_wait_s: float = 0.0):
+                 outage_wait_s: float = 0.0,
+                 api_key: Optional[str] = None):
         self.base_url = base_url.rstrip("/")
         # How long one call keeps waiting out a network outage
         # (``is_outage``) before the ordinary retry budget applies again.
@@ -240,8 +414,14 @@ class ChatClient:
         # line, not hang on it. Benchmarks turn it on — a lost verdict
         # costs more than a late one.
         self.outage_wait_s = float(outage_wait_s or 0.0)
-        if self.base_url.endswith("/v1"):
-            self.base_url = self.base_url[: -len("/v1")]
+        # ``/v1`` (OpenAI compat) or ``/api`` pasted onto the root: both
+        # are stripped, because every path below is built from the root.
+        for suffix in ("/v1", "/api"):
+            if self.base_url.endswith(suffix):
+                self.base_url = self.base_url[: -len(suffix)]
+        # Sent as a bearer token only when one is configured (ollama.com
+        # direct, a keyed xOllama). A local server needs none.
+        self.api_key = api_key or None
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.retry_base_delay_s = retry_base_delay_s
@@ -288,6 +468,35 @@ class ChatClient:
         # ``/api/show`` probe, ``None`` for a model that declares no
         # thinking-budget message.
         self._budget_message: dict[str, Optional[str]] = {}
+        # The whole ``/api/show`` answer per model, kept so the capability
+        # record (:meth:`caps`) is built without a second round trip.
+        self._show: dict[str, dict] = {}
+        # Per-call timings of the last successful call (plan A5); also
+        # attached to the returned response as ``timings``.
+        self.last_timings: dict = {}
+
+    def _headers(self, **extra) -> dict:
+        h = {"Content-Type": "application/json", **extra}
+        if self.api_key:
+            h["Authorization"] = f"Bearer {self.api_key}"
+        return h
+
+    def caps(self, model: str, *, refresh: bool = False):
+        """The :class:`claude_hooks.provider_caps.ProviderCaps` record for
+        ``model`` on this server: window, output max, thinking values,
+        cloud marker, Modelfile temperature, xOllama features."""
+        from claude_hooks import provider_caps
+        if model not in self._show and model not in self._probed_think:
+            self._probe_supports_think(model)
+        auth = ({"Authorization": f"Bearer {self.api_key}"}
+                if self.api_key else None)
+        return provider_caps.ollama_caps(
+            self.base_url, model, show=self._show.get(model),
+            headers=auth, refresh=refresh)
+
+    def learned_output_ceiling(self, model: str) -> Optional[int]:
+        """An output maximum this server's refusal named for ``model``."""
+        return learned_output_ceiling(self.base_url, model)
 
     def _wait_out_outage(self, e: BaseException, body: str,
                          attempts: "_Attempts", state: dict, *,
@@ -350,7 +559,7 @@ class ChatClient:
         encoded = json.dumps({"model": model}).encode()
         req = urllib.request.Request(
             url, data=encoded, method="POST",
-            headers={"Content-Type": "application/json"},
+            headers=self._headers(),
         )
         try:
             with urllib.request.urlopen(req, timeout=10.0) as resp:
@@ -370,6 +579,8 @@ class ChatClient:
         # than in a second round-trip: the probe is already cached per
         # model, and a separate call would double the /api/show traffic
         # for information that arrived in the first one.
+        if isinstance(data, dict):
+            self._show[model] = data
         self._context_length[model] = _context_length_from_show(data)
         # Same response, same reasoning: the thinking-budget message is
         # declared in the Modelfile and arrives here, so harvest it on
@@ -440,143 +651,7 @@ class ChatClient:
         anyway and we get a fresh 400 of that shape, strip + retry
         immediately (no retry-budget cost) and remember the model.
         """
-        # Decide whether to forward ``think``. Three layers, cheapest
-        # first: (1) prior reactive fallback already marked this
-        # model unsupported -> strip; (2) proactive ``/api/show``
-        # probe says ``thinking`` is not in capabilities -> strip;
-        # (3) probe says yes or is unknown -> send and rely on the
-        # reactive 400 path as a safety net.
-        model_tag = (payload or {}).get("model") or ""
-        strip_think = model_tag in self._unsupported_think
-        if (not strip_think
-                and "think" in (payload or {})
-                and model_tag
-                and model_tag not in self._probed_think):
-            probe = self._probe_supports_think(model_tag)
-            if probe is False:
-                strip_think = True
-
-        body = self._to_ollama(payload, strip_think=strip_think)
-        url = f"{self.base_url}/api/chat"
-        encoded = json.dumps(body).encode()
-
-        last_exc: Optional[Exception] = None
-        attempts, outage = _Attempts(self.max_retries), {}
-        for attempt in attempts:
-            req = urllib.request.Request(
-                url,
-                data=encoded,
-                method="POST",
-                headers={"Content-Type": "application/json"},
-            )
-            try:
-                # One connection slot per attempt, released during the
-                # backoff below: a sleeping retry holds no connection.
-                with ollama_slots.slot(self.base_url, model_tag):
-                    attempt_start = time.monotonic()
-                    with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
-                        data = json.loads(resp.read())
-                # Inference-time accounting: ONLY the successful
-                # attempt's duration counts. Prior failed attempts
-                # (timeouts, retryable 5xx, network resets) and the
-                # exponential-backoff sleeps between them are excluded
-                # from total_inference_s. The bench reads this field
-                # at trial end to produce a retry-decontaminated cost
-                # signal.
-                self.last_inference_s = time.monotonic() - attempt_start
-                self.total_inference_s += self.last_inference_s
-                if attempt > 0:
-                    log.info(
-                        "ollama chat: succeeded on retry %d/%d "
-                        "(inference %.1fs)",
-                        attempt, self.max_retries, self.last_inference_s,
-                    )
-                return self._from_ollama(data)
-            except urllib.error.HTTPError as e:
-                last_exc = e
-                # Read the body once — it carries the actual error
-                # detail from Ollama / cloud upstream (e.g. "context
-                # length exceeded", "model not loaded"). The default
-                # urllib repr only says "HTTP Error N: Reason".
-                try:
-                    err_body = e.read().decode(errors="replace")[:500]
-                except Exception:
-                    err_body = "<unreadable>"
-                # First-class: model rejected ``think``. Strip it,
-                # remember the model, retry once outside the normal
-                # retry budget so a stale config doesn't burn 9 round
-                # trips. Only triggers when we DID send think on this
-                # call.
-                think_rejected = (
-                    e.code in (400, 422)
-                    and "think" in body
-                    and any(s in err_body
-                            for s in THINK_UNSUPPORTED_4XX_BODY_SUBSTRINGS)
-                )
-                if think_rejected:
-                    log.warning(
-                        "ollama chat: model %s rejected 'think' field "
-                        "(HTTP %d). Stripping and retrying once. "
-                        "Future calls to this model will skip the "
-                        "field. Body: %s",
-                        model_tag, e.code, err_body,
-                    )
-                    self._unsupported_think.add(model_tag)
-                    body = self._to_ollama(payload, strip_think=True)
-                    encoded = json.dumps(body).encode()
-                    # Don't count this against retry budget; loop
-                    # back into the same attempt index.
-                    continue
-
-                retryable = (
-                    e.code in RETRYABLE_STATUS
-                    or (400 <= e.code < 500
-                        and any(s in err_body
-                                for s in RETRYABLE_4XX_BODY_SUBSTRINGS))
-                )
-                if self._wait_out_outage(e, err_body, attempts, outage,
-                                         what="ollama chat"):
-                    continue
-                if retryable and attempt < self.max_retries:
-                    delay = min(
-                        self.retry_base_delay_s * (2 ** attempt),
-                        self.retry_max_delay_s,
-                    )
-                    log.warning(
-                        "ollama chat: HTTP %d on attempt %d/%d, "
-                        "retrying in %.1fs (body: %s)",
-                        e.code, attempt + 1, self.max_retries + 1, delay,
-                        err_body,
-                    )
-                    time.sleep(delay)
-                    continue
-                log.error("ollama chat: HTTP %d (giving up) body=%s",
-                          e.code, err_body)
-                raise RuntimeError(
-                    f"ollama chat HTTP {e.code}: {err_body}"
-                ) from e
-            except (urllib.error.URLError, OSError) as e:
-                last_exc = e
-                if self._wait_out_outage(e, "", attempts, outage,
-                                         what="ollama chat"):
-                    continue
-                if attempt < self.max_retries:
-                    delay = min(
-                        self.retry_base_delay_s * (2 ** attempt),
-                        self.retry_max_delay_s,
-                    )
-                    log.warning(
-                        "ollama chat: %s on attempt %d/%d, retrying in %.1fs",
-                        e, attempt + 1, self.max_retries + 1, delay,
-                    )
-                    time.sleep(delay)
-                    continue
-                log.error("ollama chat: %s (giving up)", e)
-                raise
-        # Shouldn't reach here — the loop either returns or raises.
-        if last_exc is not None:
-            raise last_exc
-        raise RuntimeError("ollama chat: no attempts made")
+        return self._call(payload, stream=False)
 
     # ---- streaming variant ---------------------------------------- #
 
@@ -615,10 +690,53 @@ class ChatClient:
         the orchestrator's job, observing token cadence through
         ``on_token``.
         """
-        # Lazy import to avoid coupling get_advice -> consultants.
-        from consultants.engine.stall import CancelledByOrchestrator
+        return self._call(payload, stream=True, on_token=on_token,
+                          cancel_check=cancel_check, on_admitted=on_admitted)
 
-        # Same think-stripping path as chat().
+    def _prepare(self, payload: dict, *, strip_think: bool,
+                 stream: bool) -> dict:
+        body = self._to_ollama(payload, strip_think=strip_think)
+        # A ceiling this server's refusal already named is applied before
+        # sending, so only the first request to a model pays the refusal.
+        ceiling = learned_output_ceiling(self.base_url, body.get("model") or "")
+        opts = body.get("options")
+        if (ceiling and isinstance(opts, dict)
+                and isinstance(opts.get("num_predict"), int)
+                and opts["num_predict"] > ceiling):
+            opts["num_predict"] = ceiling
+        if stream:
+            body["stream"] = True       # the one bit that actually changes
+        return body
+
+    def _call(self, payload: dict, *, stream: bool,
+              on_token: Optional[Callable[[str], None]] = None,
+              cancel_check: Optional[Callable[[], bool]] = None,
+              on_admitted: Optional[Callable[[], None]] = None) -> dict:
+        """The one retry loop behind :meth:`chat` and :meth:`chat_streamed`.
+
+        Beyond the retry budget it handles, without spending a retry:
+        a model that rejects ``think`` (strip it, remember the model); a
+        refusal that names the provider's output maximum (retry once at
+        that value, remember it per server and model); and an empty
+        reply (asked again up to :data:`EMPTY_RETRIES` times). A 429/503
+        carrying ``Retry-After`` waits what it asks, up to
+        :data:`RETRY_AFTER_MAX_S`. A call that fails for good raises
+        :class:`ChatFault` with its fault class named.
+        """
+        if stream:
+            # Lazy import to avoid coupling get_advice -> consultants.
+            from consultants.engine.stall import CancelledByOrchestrator
+            cancelled_exc: tuple = (CancelledByOrchestrator,)
+        else:
+            cancelled_exc = ()
+        what = "ollama chat_streamed" if stream else "ollama chat"
+
+        # Decide whether to forward ``think``. Three layers, cheapest
+        # first: (1) prior reactive fallback already marked this
+        # model unsupported -> strip; (2) proactive ``/api/show``
+        # probe says ``thinking`` is not in capabilities -> strip;
+        # (3) probe says yes or is unknown -> send and rely on the
+        # reactive 400 path as a safety net.
         model_tag = (payload or {}).get("model") or ""
         strip_think = model_tag in self._unsupported_think
         if (not strip_think
@@ -629,61 +747,106 @@ class ChatClient:
             if probe is False:
                 strip_think = True
 
-        body = self._to_ollama(payload, strip_think=strip_think)
-        body["stream"] = True       # the one bit that actually changes
+        body = self._prepare(payload, strip_think=strip_think, stream=stream)
         url = f"{self.base_url}/api/chat"
         encoded = json.dumps(body).encode()
 
         last_exc: Optional[Exception] = None
         attempts, outage = _Attempts(self.max_retries), {}
+        ceiling_retried = False
+        empty_retries = 0
+        sent = 0
         for attempt in attempts:
+            sent += 1
+            extra = {"Accept": "application/x-ndjson"} if stream else {}
             req = urllib.request.Request(
                 url, data=encoded, method="POST",
-                headers={"Content-Type": "application/json",
-                         "Accept": "application/x-ndjson"},
+                headers=self._headers(**extra),
             )
+            clock: dict = {}
             try:
+                # One connection slot per attempt, released during the
+                # backoff below: a sleeping retry holds no connection.
+                queued_at = time.monotonic()
                 try:
-                    admitted = ollama_slots.slot(self.base_url, model_tag,
-                                                 cancel_check=cancel_check)
+                    admitted = (ollama_slots.slot(self.base_url, model_tag,
+                                                  cancel_check=cancel_check)
+                                if stream else
+                                ollama_slots.slot(self.base_url, model_tag))
                     admitted.__enter__()
                 except ollama_slots.Cancelled as e:
-                    raise CancelledByOrchestrator(
+                    raise cancelled_exc[0](
                         f"cancelled while queued for a {e} slot") from e
                 try:
+                    queue_s = time.monotonic() - queued_at
                     # The stall clock starts when the call is admitted:
                     # time queued for a slot is not a silent model.
                     if on_admitted is not None:
                         on_admitted()
                     attempt_start = time.monotonic()
                     with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
-                        final = self._consume_ndjson(
-                            resp, on_token=on_token,
-                            cancel_check=cancel_check,
-                        )
+                        resp_headers = getattr(resp, "headers", None)
+                        if stream:
+                            data = self._consume_ndjson(
+                                resp, on_token=on_token,
+                                cancel_check=cancel_check, clock=clock,
+                            )
+                        else:
+                            data = json.loads(resp.read())
                 finally:
                     admitted.__exit__(None, None, None)
-                # Inference-time accounting — same semantic as chat():
-                # only the successful attempt's duration is recorded.
-                self.last_inference_s = time.monotonic() - attempt_start
-                self.total_inference_s += self.last_inference_s
+                wall_s = time.monotonic() - attempt_start
+                if empty_retries < EMPTY_RETRIES and _is_empty_reply(data):
+                    empty_retries += 1
+                    log.warning(
+                        "%s: %s answered with nothing (no content, tool "
+                        "call or reasoning); asking again (%d/%d)",
+                        what, model_tag, empty_retries, EMPTY_RETRIES)
+                    time.sleep(EMPTY_RETRY_DELAY_S)
+                    attempts.hold()
+                    continue
+                # Inference-time accounting: ONLY the successful
+                # attempt's duration counts. Prior failed attempts
+                # (timeouts, retryable 5xx, network resets) and the
+                # exponential-backoff sleeps between them are excluded
+                # from total_inference_s. The bench reads this field
+                # at trial end to produce a retry-decontaminated cost
+                # signal.
+                self.last_inference_s = wall_s
+                self.total_inference_s += wall_s
                 if attempt > 0:
                     log.info(
-                        "ollama chat_streamed: succeeded on retry %d/%d "
-                        "(inference %.1fs)",
-                        attempt, self.max_retries, self.last_inference_s,
+                        "%s: succeeded on retry %d/%d (inference %.1fs)",
+                        what, attempt, self.max_retries, self.last_inference_s,
                     )
-                return self._from_ollama(final)
-            except CancelledByOrchestrator:
+                out = self._from_ollama(data)
+                first = clock.get("first")
+                self.last_timings = _timings(
+                    data, wall_s=wall_s, queue_s=queue_s,
+                    ttft_s=(first - attempt_start) if first else None,
+                    attempts=sent, empty_retries=empty_retries,
+                    headers=resp_headers)
+                out["timings"] = self.last_timings
+                return out
+            except cancelled_exc:
                 # Cooperative abort — propagate without retrying. The
                 # orchestrator owns the retry decision.
                 raise
             except urllib.error.HTTPError as e:
                 last_exc = e
+                # Read the body once — it carries the actual error
+                # detail from Ollama / cloud upstream (e.g. "context
+                # length exceeded", "model not loaded"). The default
+                # urllib repr only says "HTTP Error N: Reason".
                 try:
                     err_body = e.read().decode(errors="replace")[:500]
                 except Exception:
                     err_body = "<unreadable>"
+                # First-class: model rejected ``think``. Strip it,
+                # remember the model, retry once outside the normal
+                # retry budget so a stale config doesn't burn 9 round
+                # trips. Only triggers when we DID send think on this
+                # call.
                 think_rejected = (
                     e.code in (400, 422)
                     and "think" in body
@@ -692,50 +855,71 @@ class ChatClient:
                 )
                 if think_rejected:
                     log.warning(
-                        "ollama chat_streamed: model %s rejected 'think' "
-                        "field (HTTP %d). Stripping and retrying once.",
-                        model_tag, e.code,
+                        "%s: model %s rejected 'think' field "
+                        "(HTTP %d). Stripping and retrying once. "
+                        "Future calls to this model will skip the "
+                        "field. Body: %s",
+                        what, model_tag, e.code, err_body,
                     )
                     self._unsupported_think.add(model_tag)
-                    body = self._to_ollama(payload, strip_think=True)
-                    body["stream"] = True
+                    body = self._prepare(payload, strip_think=True,
+                                         stream=stream)
                     encoded = json.dumps(body).encode()
                     continue
-                retryable = (
+                # A refusal naming the provider's real output maximum:
+                # retry once at that value and remember it.
+                if e.code in (400, 413, 422) and not ceiling_retried:
+                    asked = (body.get("options") or {}).get("num_predict")
+                    ceiling = _learn_ceiling(self.base_url, model_tag, err_body)
+                    if ceiling and isinstance(asked, int) and asked > ceiling:
+                        ceiling_retried = True
+                        log.warning(
+                            "%s: %s accepts at most %d output tokens (asked "
+                            "%d); retrying once at the ceiling, which is now "
+                            "remembered", what, model_tag, ceiling, asked)
+                        body["options"]["num_predict"] = ceiling
+                        encoded = json.dumps(body).encode()
+                        attempts.hold()
+                        continue
+
+                fault = classify_http_fault(e.code, err_body)
+                retryable = fault != MODEL_MISSING and (
                     e.code in RETRYABLE_STATUS
                     or (400 <= e.code < 500
                         and any(s in err_body
                                 for s in RETRYABLE_4XX_BODY_SUBSTRINGS))
                 )
                 if self._wait_out_outage(e, err_body, attempts, outage,
-                                         what="ollama chat_streamed",
-                                         cancel_check=cancel_check):
+                                         what=what, cancel_check=cancel_check):
                     continue
                 if retryable and attempt < self.max_retries:
                     delay = min(
                         self.retry_base_delay_s * (2 ** attempt),
                         self.retry_max_delay_s,
                     )
+                    asked_wait = (retry_after_s(getattr(e, "headers", None))
+                                  if e.code in (429, 503) else None)
+                    if asked_wait is not None:
+                        delay = min(asked_wait, RETRY_AFTER_MAX_S)
                     log.warning(
-                        "ollama chat_streamed: HTTP %d on attempt %d/%d, "
-                        "retrying in %.1fs (body: %s)",
-                        e.code, attempt + 1, self.max_retries + 1, delay,
+                        "%s: HTTP %d on attempt %d/%d, "
+                        "retrying in %.1fs%s (body: %s)",
+                        what, e.code, attempt + 1, self.max_retries + 1, delay,
+                        " as Retry-After asked" if asked_wait is not None else "",
                         err_body,
                     )
                     time.sleep(delay)
                     continue
-                log.error(
-                    "ollama chat_streamed: HTTP %d (giving up) body=%s",
-                    e.code, err_body,
-                )
-                raise RuntimeError(
-                    f"ollama chat_streamed HTTP {e.code}: {err_body}"
+                log.error("%s: HTTP %d (giving up, %s) body=%s",
+                          what, e.code, fault, err_body)
+                raise ChatFault(
+                    f"{what} HTTP {e.code}: {err_body}",
+                    fault_class=fault, status=e.code, body=err_body,
                 ) from e
             except (urllib.error.URLError, OSError) as e:
                 last_exc = e
                 if self._wait_out_outage(e, "", attempts, outage,
-                                         what="ollama chat_streamed",
-                                         cancel_check=cancel_check):
+                                         what=what, cancel_check=cancel_check):
                     continue
                 if attempt < self.max_retries:
                     delay = min(
@@ -743,22 +927,23 @@ class ChatClient:
                         self.retry_max_delay_s,
                     )
                     log.warning(
-                        "ollama chat_streamed: %s on attempt %d/%d, "
-                        "retrying in %.1fs",
-                        e, attempt + 1, self.max_retries + 1, delay,
+                        "%s: %s on attempt %d/%d, retrying in %.1fs",
+                        what, e, attempt + 1, self.max_retries + 1, delay,
                     )
                     time.sleep(delay)
                     continue
-                log.error("ollama chat_streamed: %s (giving up)", e)
+                log.error("%s: %s (giving up)", what, e)
                 raise
+        # Shouldn't reach here — the loop either returns or raises.
         if last_exc is not None:
             raise last_exc
-        raise RuntimeError("ollama chat_streamed: no attempts made")
+        raise RuntimeError(f"{what}: no attempts made")
 
     def _consume_ndjson(self, resp,
                         *,
                         on_token: Optional[Callable[[str], None]],
                         cancel_check: Optional[Callable[[], bool]],
+                        clock: Optional[dict] = None,
                         ) -> dict:
         """Read Ollama NDJSON stream off ``resp`` and assemble the
         final response dict.
@@ -824,6 +1009,9 @@ class ChatClient:
                 # minutes before its first content token, and a tool-call
                 # turn may carry no content at all — both are a working
                 # model, not a silent one.
+                if (clock is not None and "first" not in clock
+                        and (delta or tcs or reasoned)):
+                    clock["first"] = time.monotonic()
                 if on_token is not None and (delta or tcs or reasoned):
                     try:
                         on_token(delta)

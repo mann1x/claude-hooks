@@ -53,6 +53,10 @@ FIELDS = frozenset({
     "temperature", "top_p", "top_k", "min_p", "typical_p",
     "repeat_penalty", "repeat_last_n", "presence_penalty",
     "frequency_penalty", "seed", "mirostat", "mirostat_tau", "mirostat_eta",
+    # Ollama options the Cerebriline map found missing (plan A1): kept
+    # tokens on a context shift, stop strings, and the think-budget pair
+    # local think-budget builds and xOllama read.
+    "num_keep", "stop", "think_budget", "think_budget_message",
 })
 
 
