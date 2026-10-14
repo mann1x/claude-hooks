@@ -968,6 +968,13 @@ class ChatClient:
                     ttft_s=(first - attempt_start) if first else None,
                     attempts=sent, empty_retries=empty_retries,
                     headers=resp_headers)
+                # The realized sampler (plan A5/B4), whichever shape the
+                # body has: Ollama ``options`` or OpenAI top level.
+                src = body.get("options") if isinstance(body.get("options"), dict) else body
+                sampler = {k: src[k] for k in ("seed", "temperature")
+                           if k in src}
+                if sampler:
+                    self.last_timings["sampler"] = sampler
                 if "think_budget_tokens" not in self.last_timings:
                     sent_tb = _sent_think_budget(body)
                     if sent_tb is not None:

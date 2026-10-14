@@ -27,6 +27,8 @@ Pure-Python; imports cleanly without langgraph.
 
 from __future__ import annotations
 
+import uuid
+
 import time
 from typing import Any, Optional
 
@@ -213,7 +215,31 @@ def runtime_control_defaults(
         if "think" in (vals or {})}
     if think_by_model:
         rc["think"] = think_by_model  # type: ignore[typeddict-item]
+    # Plan B4: scopes seed uniqueness to this run (rides the checkpoint,
+    # so a resumed council keeps it); layers only when something is set.
+    rc["sampling_run"] = uuid.uuid4().hex  # type: ignore[typeddict-item]
+    sampling = sampling_layers(cfg)
+    if sampling:
+        rc["sampling"] = sampling  # type: ignore[typeddict-item]
     return rc
+
+
+def sampling_layers(cfg: cc.ConsultantsConfig) -> dict:
+    """``[sampling]`` / ``[role.X.sampling]`` / per-model sampling keys as
+    ``"*"`` / ``"<role>"`` / ``"<role>@<model>"`` layers; empty when
+    nothing is set (the defaults then apply)."""
+    out: dict = {}
+    if getattr(cfg, "sampling", None):
+        out["*"] = dict(cfg.sampling)
+    for role, rc in (getattr(cfg, "roles", None) or {}).items():
+        if getattr(rc, "sampling", None):
+            out[role] = dict(rc.sampling)
+        for model, vals in (getattr(rc, "model_overrides", None) or {}).items():
+            picked = {k: v for k, v in (vals or {}).items()
+                      if k in cc.SAMPLING_KEYS}
+            if picked:
+                out[f"{role}@{model}"] = picked
+    return out
 
 
 def budget_layers(cfg: cc.ConsultantsConfig) -> dict:

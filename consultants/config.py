@@ -222,6 +222,7 @@ class RoleConfig:
     # ``[role.X.models."<model>"]`` (per-model settings, keyed by the
     # model string exactly as the role names it).
     budget: dict[str, Any] = field(default_factory=dict)
+    sampling: dict[str, Any] = field(default_factory=dict)
     model_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
@@ -817,8 +818,42 @@ def check_think(v: Any) -> Any:
                      f"({'/'.join(THINK_LEVELS)}, xhigh) or a token count")
 
 
+def _check_seed(v: Any) -> Any:
+    if isinstance(v, str) and v.strip().lower() in ("random", "off"):
+        return v.strip().lower()
+    if isinstance(v, str) and v.strip().isdigit():
+        v = int(v.strip())
+    if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+        return v
+    raise ValueError("seed must be 'random', 'off' or an integer >= 0")
+
+
+def _check_temperature(v: Any) -> Any:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+        raise ValueError("temperature must be a number >= 0")
+    return float(v)
+
+
+def _check_range_pct(v: Any) -> Any:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+        raise ValueError("temperature_range_pct must be a number >= 0")
+    if v > 10:
+        log.warning("consultants config: temperature_range_pct %s clamped "
+                    "to 10 (the fork's margin)", v)
+    return min(10.0, float(v))
+
+
+#: Sampling diversity (plan B4). Defaults: seed "random",
+#: temperature_range_pct 2 (consultants.engine.sampling_diversity).
+SAMPLING_KEYS: dict[str, Any] = {
+    "seed": _check_seed,
+    "temperature": _check_temperature,
+    "temperature_range_pct": _check_range_pct,
+}
+
 #: Keys a ``[role.X.models."<model>"]`` table takes.
-MODEL_OVERRIDE_KEYS: dict[str, Any] = {**BUDGET_KEYS, "think": check_think}
+MODEL_OVERRIDE_KEYS: dict[str, Any] = {**BUDGET_KEYS, **SAMPLING_KEYS,
+                                       "think": check_think}
 
 
 def validate_settings(raw: Any, keys: dict[str, Any], *,
@@ -935,8 +970,9 @@ class ConsultantsConfig:
     })
     endpoints: dict[str, EndpointConfig] = field(default_factory=dict)
     protocol: ProtocolConfig = field(default_factory=ProtocolConfig)
-    # Plan B: ``[budget]`` — only the keys a layer set.
+    # Plan B: ``[budget]`` / ``[sampling]`` — only the keys a layer set.
     budget: dict[str, Any] = field(default_factory=dict)
+    sampling: dict[str, Any] = field(default_factory=dict)
 
     def role(self, name: str) -> RoleConfig:
         if name not in ROLES:
@@ -1005,11 +1041,15 @@ def _merge_role(base: RoleConfig, override: dict) -> RoleConfig:
         routes_by_language=dict(base.routes_by_language),
         default_route=base.default_route,
         budget=dict(base.budget),
+        sampling=dict(base.sampling),
         model_overrides={m: dict(v) for m, v in base.model_overrides.items()},
     )
     if "budget" in override:
         out.budget.update(validate_settings(
             override["budget"], BUDGET_KEYS, where="role budget"))
+    if "sampling" in override:
+        out.sampling.update(validate_settings(
+            override["sampling"], SAMPLING_KEYS, where="role sampling"))
     if isinstance(override.get("models"), dict):
         for m, table in override["models"].items():
             if not isinstance(m, str) or not m.strip():
@@ -1364,6 +1404,9 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
     if "budget" in raw:
         base.budget.update(validate_settings(raw["budget"], BUDGET_KEYS,
                                              where="budget"))
+    if "sampling" in raw:
+        base.sampling.update(validate_settings(raw["sampling"], SAMPLING_KEYS,
+                                               where="sampling"))
 
     # protocol (plan G)
     proto = raw.get("protocol") or {}
@@ -1754,6 +1797,16 @@ def _render(cfg: ConsultantsConfig, *,
         if k in cfg.budget:
             L.append(f"{k} = {_toml_value(cfg.budget[k])}")
     L.append("")
+    L.append("[sampling]")
+    L.append("# Sampling diversity (plan B4). Unset keys use the defaults: "
+             "seed = \"random\" (per instance, never shared by same-model "
+             "instances in a run; an integer s gives s + i; \"off\" sends "
+             "none), temperature = the model's own, temperature_range_pct "
+             "= 2 (max 10). Per role: [role.X.sampling].")
+    for k in SAMPLING_KEYS:
+        if k in cfg.sampling:
+            L.append(f"{k} = {_toml_value(cfg.sampling[k])}")
+    L.append("")
     L.append("[protocol]")
     L.append("# typed: roles hand typed records to each other (plan G); the "
              "synthesizer stays prose. Off until benched.")
@@ -1819,6 +1872,11 @@ def _render(cfg: ConsultantsConfig, *,
         if rc.budget:
             L.append(f"[role.{role}.budget]")
             for k, v in rc.budget.items():
+                L.append(f"{k} = {_toml_value(v)}")
+            L.append("")
+        if rc.sampling:
+            L.append(f"[role.{role}.sampling]")
+            for k, v in rc.sampling.items():
                 L.append(f"{k} = {_toml_value(v)}")
             L.append("")
         for m in sorted(rc.model_overrides):
@@ -2102,6 +2160,40 @@ def set_budget(values: Optional[dict] = None, *,
             target = rc.budget
     else:
         target = cfg.budget
+    target.update(checked)
+    for k in clear or []:
+        target.pop(k, None)
+    if role and model and not target:
+        cfg.roles[role].model_overrides.pop(model, None)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_sampling(values: Optional[dict] = None, *,
+                 clear: Optional[list[str]] = None,
+                 role: Optional[str] = None, model: Optional[str] = None,
+                 scope: str = "user",
+                 cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set or clear sampling-diversity keys (plan B4) in ``[sampling]``,
+    ``[role.<role>.sampling]`` or ``[role.<role>.models."<model>"]``."""
+    if model and not role:
+        raise ValueError("--model needs --role: per-model settings belong "
+                         "to a role")
+    checked = {}
+    for k, v in (values or {}).items():
+        if k not in SAMPLING_KEYS:
+            raise ValueError(f"unknown sampling key {k!r} "
+                             f"(keys: {', '.join(SAMPLING_KEYS)})")
+        checked[k] = SAMPLING_KEYS[k](v)
+    for k in clear or []:
+        if k not in SAMPLING_KEYS:
+            raise ValueError(f"unknown sampling key {k!r}")
+    cfg = _load_for_edit(scope, cwd)
+    if role:
+        rc = cfg.role(role)
+        target = (rc.model_overrides.setdefault(model, {}) if model
+                  else rc.sampling)
+    else:
+        target = cfg.sampling
     target.update(checked)
     for k in clear or []:
         target.pop(k, None)

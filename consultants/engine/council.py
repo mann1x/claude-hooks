@@ -1164,16 +1164,36 @@ def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
     return messages, plan
 
 
-def _budget_options(options: Optional[dict], plan: "budget.Budget") -> dict:
-    """``options`` with the plan's ``num_predict`` and, for local Ollama,
-    its ``num_ctx`` (plan B2). An explicit ``num_ctx`` the caller set
-    wins."""
+def _budget_options(options: Optional[dict], plan: "budget.Budget",
+                    sampling: Optional[dict] = None) -> dict:
+    """``options`` with the plan's ``num_predict``, for local Ollama its
+    ``num_ctx`` (plan B2), and the instance's seed / temperature (plan
+    B4). Anything the caller already set wins."""
     opts = dict(options or {})
     if plan.output_tokens:
         opts["num_predict"] = plan.output_tokens
     if plan.send_num_ctx and "num_ctx" not in opts:
         opts["num_ctx"] = plan.send_num_ctx
+    for k, v in (sampling or {}).items():
+        opts.setdefault(k, v)
     return opts
+
+
+def _instance_sampling(state: Optional[dict], role: str, model: str,
+                       chat_client=None) -> dict:
+    """Seed and temperature for one new instance of ``role`` on ``model``
+    (plan B4, :mod:`consultants.engine.sampling_diversity`). Empty when
+    the run carries no ``sampling_run`` (a run from before B4)."""
+    rc = (state or {}).get("runtime_control") or {}
+    from consultants.engine import sampling_diversity
+    try:
+        return sampling_diversity.allocate(
+            rc.get("sampling_run"), role, model,
+            layers=rc.get("sampling"), chat_client=chat_client)
+    except Exception:  # pragma: no cover — sampling must never fail a call
+        log.exception("sampling allocation failed for %s/%s; provider "
+                      "defaults", role, model)
+        return {}
 
 
 def _think_for(state: Optional[dict], role: str, model: str,
@@ -1242,7 +1262,8 @@ def _budget_knobs(state: Optional[dict], role: Optional[str],
 
 def _loop_payload_budgeter(chat_client, model: str, *,
                            role: Optional[str] = None,
-                           knobs: Optional["budget.Knobs"] = None):
+                           knobs: Optional["budget.Knobs"] = None,
+                           sampling: Optional[dict] = None):
     """``LoopConfig.prepare_payload`` for a role's tool loop: re-plan the
     output budget, compacting first when the history has outgrown the
     window, before every iteration.
@@ -1270,7 +1291,8 @@ def _loop_payload_budgeter(chat_client, model: str, *,
             knobs=knobs, think=payload.get("think"))
         window["ctx"] = plan.context_length
         payload["messages"] = messages
-        payload["options"] = _budget_options(payload.get("options"), plan)
+        payload["options"] = _budget_options(payload.get("options"), plan,
+                                             sampling)
 
     def _observe(payload: dict, response: dict) -> None:
         pt, ct = _usage_from(response or {})
@@ -1365,7 +1387,8 @@ def _single_shot(chat_client, model: str, messages: list[dict],
                  round: int = 1,
                  lane_idx: Optional[int] = None,
                  result: Optional[str] = None,
-                 knobs: Optional["budget.Knobs"] = None
+                 knobs: Optional["budget.Knobs"] = None,
+                 sampling: Optional[dict] = None
                  ) -> tuple[str, int, int]:
     """Run a one-call chat (no tools, no loop). Returns
     (text, prompt_tokens, completion_tokens).
@@ -1415,7 +1438,7 @@ def _single_shot(chat_client, model: str, messages: list[dict],
             "messages": convo,
             "stream": False,
             "think": think,
-            "options": _budget_options(None, plan),
+            "options": _budget_options(None, plan, sampling),
         }
         if result_spec is not None:
             payload["tools"] = [result_spec]
@@ -1795,7 +1818,8 @@ def _role_turn(chat_client, model: str, messages: list[dict],
                cwd: str = "",
                loop_runner=None,
                result: Optional[str] = None,
-               knobs: Optional["budget.Knobs"] = None
+               knobs: Optional["budget.Knobs"] = None,
+               sampling: Optional[dict] = None
                ) -> tuple[str, int, int]:
     """One role turn, returning ``(text, prompt_tokens, completion_tokens)``.
 
@@ -1819,7 +1843,7 @@ def _role_turn(chat_client, model: str, messages: list[dict],
         return _single_shot(
             chat_client, model, messages, think=think,
             recorder=recorder, role=role, round=round, lane_idx=lane_idx,
-            knobs=knobs,
+            knobs=knobs, sampling=sampling,
             result=result,
         )
 
@@ -1833,7 +1857,7 @@ def _role_turn(chat_client, model: str, messages: list[dict],
             return _single_shot(
                 chat_client, model, messages, think=think,
                 recorder=recorder, role=role, round=round,
-                lane_idx=lane_idx, knobs=knobs,
+                lane_idx=lane_idx, knobs=knobs, sampling=sampling,
             )
 
     on_iter_cb = on_tool_cb = None
@@ -1878,7 +1902,7 @@ def _role_turn(chat_client, model: str, messages: list[dict],
     try:
         from claude_hooks.agent_loop.runner import LoopConfig
         _budgeter = _loop_payload_budgeter(chat_client, model, role=role,
-                                           knobs=knobs)
+                                           knobs=knobs, sampling=sampling)
         cfg = LoopConfig(
             **result_kw,
             max_iterations=ROLE_TOOL_MAX_ITERATIONS,
@@ -1914,7 +1938,7 @@ def _role_turn(chat_client, model: str, messages: list[dict],
         return _single_shot(
             chat_client, model, messages, think=think,
             recorder=recorder, role=role, round=round, lane_idx=lane_idx,
-            knobs=knobs,
+            knobs=knobs, sampling=sampling,
         )
 
     pt, ct = _usage_from(final)
@@ -1932,7 +1956,7 @@ def _role_turn(chat_client, model: str, messages: list[dict],
         return _single_shot(
             chat_client, model, messages, think=think,
             recorder=recorder, role=role, round=round, lane_idx=lane_idx,
-            knobs=knobs,
+            knobs=knobs, sampling=sampling,
         )
     return (text, pt, ct)
 
@@ -2082,6 +2106,7 @@ def planner_node(state: dict, *, chat_client, model: str,
             tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
             result=_typed_result_name(state, "planner"),
             knobs=_budget_knobs(state, "planner", model),
+            sampling=_instance_sampling(state, "planner", model, chat_client),
         )
     except Exception as e:
         log.exception("planner_node failed: %s", e)
@@ -2548,6 +2573,7 @@ def researcher_node(state: dict, *,
                 recorder=recorder, role="researcher",
                 round=this_round, lane_idx=lane_idx,
                 knobs=_budget_knobs(state, "researcher", model),
+            sampling=_instance_sampling(state, "researcher", model, chat_client),
             )
         except Exception as e:
             log.exception("researcher_node (M6 mode) failed: %s", e)
@@ -2701,10 +2727,13 @@ def researcher_node(state: dict, *,
     }
 
     cfg = None
+    # One instance per lane (plan B4): the loop and its summary call share it.
+    lane_sampling = _instance_sampling(state, "researcher", model, chat_client)
     if LoopConfig is not None:
         _budgeter = _loop_payload_budgeter(
             chat_client, model, role="researcher",
-            knobs=_budget_knobs(state, "researcher", model))
+            knobs=_budget_knobs(state, "researcher", model),
+            sampling=lane_sampling)
         cfg = LoopConfig(
             **result_kw,
             max_iterations=caps.researcher_loop_iters,
@@ -2912,6 +2941,7 @@ def researcher_node(state: dict, *,
                 recorder=recorder, role="researcher",
                 round=this_round, lane_idx=lane_idx,
                 knobs=_budget_knobs(state, "researcher", model),
+            sampling=lane_sampling,
             )
             pt += pt2
             ct += ct2
@@ -3018,6 +3048,7 @@ def critic_node(state: dict, *, chat_client, model: str,
             tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
             result=_typed_result_name(state, "critic"),
             knobs=_budget_knobs(state, "critic", model),
+            sampling=_instance_sampling(state, "critic", model, chat_client),
         )
     except Exception as e:
         log.exception("critic_node failed: %s", e)
@@ -3167,6 +3198,7 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
             tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
             result=_typed_result_name(state, "meta_critic"),
             knobs=_budget_knobs(state, "meta_critic", model),
+            sampling=_instance_sampling(state, "meta_critic", model, chat_client),
         )
     except Exception as e:
         log.exception("meta_critic_node failed: %s", e)
@@ -3325,6 +3357,7 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                 recorder=recorder, role="synthesizer", round=1,
                 tool_specs=tool_specs, tool_executor=tool_executor,
                 cwd=cwd, knobs=_budget_knobs(state, "synthesizer", try_model),
+            sampling=_instance_sampling(state, "synthesizer", try_model, chat_client),
             )
             if attempt_idx > 0:
                 log.warning(
@@ -3486,6 +3519,7 @@ def adversary_node(state: dict, *, chat_client, model: str,
             tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
             result=_typed_result_name(state, "adversary"),
             knobs=_budget_knobs(state, "adversary", model),
+            sampling=_instance_sampling(state, "adversary", model, chat_client),
         )
     except Exception as e:
         log.exception("adversary_node failed: %s", e)

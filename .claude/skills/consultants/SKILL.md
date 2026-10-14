@@ -805,9 +805,10 @@ and **More…** opens the next batch (ending with **Done**):
     --typed on|off`: planner, researcher, critic and adversary hand in
     typed records (rendered back to their usual text); the synthesizer
     stays prose. Experimental, off by default until benched.
-11. **Output cap & window** — the per-call output ceiling and the
-    context window each role is budgeted against, globally, per role or
-    per (role, model) — see Subflow K
+11. **Output cap, window & sampling** — the per-call output ceiling,
+    the context window each role is budgeted against, and the per-instance
+    seed / temperature jitter, globally, per role or per (role, model) —
+    see Subflow K
 
 Loop back to step 1 after each successful change; exit on **Done**.
 
@@ -841,9 +842,9 @@ AskUserQuestion the role (`planner`/`researcher`/`critic`/
   token count. Then `claude-consultants config set-think <role> <value>`,
   or `--model <m>` for one model only (a role's lanes may run several),
   `--clear` to go back to the default. Thinking is never derived from
-  effort. Levels a cloud model does not accept (`account --model <m>`
-  lists its thinking values) are sent as plain `on`; on opencoti a level
-  becomes a token budget.
+  effort. A cloud model's thinking values are listed by
+  `claude-consultants account --model <m>`; a level outside them is sent
+  as plain `on`. On opencoti a level becomes a token budget.
 - **Back**.
 
 ### Subflow B — Service mode
@@ -1112,6 +1113,22 @@ role on one model** (the model exactly as the role names it, e.g.
   default.
 
 A legacy explicit `ctx_max` on a role still pins that role's window.
+
+**Sampling diversity** (`sampling` / each role's `sampling` and `models`
+in `config show`). Defaults: every role instance (each lane, each role
+turn) gets its own random seed, never shared by same-model instances in a
+run, and a ±2 % jitter around the model's own temperature (none when the
+model declares none). Same scope question, then:
+
+- **Seed** — `claude-consultants config set-sampling [--role R
+  [--model M]] --seed random|off|<n>` (an integer gives the i-th
+  same-model instance `n + i`).
+- **Temperature** — `--temperature <t>` sets the base; the jitter still
+  applies.
+- **Jitter** — `--temperature-range-pct <p>` (0 = none, max 10).
+- **Reset** — `--clear <key>`.
+
+`claude-consultants show <sid>` lists the realized `samplers`.
 
 ### Subflow I — Tool surface
 

@@ -467,8 +467,43 @@ def cmd_show(args, base: str) -> int:
         "metadata": (json.loads(metadata_path.read_text(encoding="utf-8"))
                      if metadata_path.exists() else None),
     }
+    samplers = _session_samplers(sdir / storage.TRANSCRIPT_DB_FILENAME)
+    if samplers:
+        out["samplers"] = samplers
     print(json.dumps(out, indent=2))
     return 0
+
+
+def _session_samplers(db_path: Path) -> list[dict]:
+    """The realized seed / temperature per (role, round, lane, model),
+    from the requests the run sent (plan B4). Empty when the session has
+    no transcript.db or sent none."""
+    if not db_path.exists():
+        return []
+    import sqlite3
+    seen: dict = {}
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                "SELECT role, round, lane_idx, model, request_json FROM events "
+                "WHERE kind = 'llm_call' ORDER BY event_id").fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return []
+    for role, rnd, lane, model, req in rows:
+        try:
+            body = json.loads(req or "{}")
+        except ValueError:
+            continue
+        opts = body.get("options") if isinstance(body.get("options"), dict) else body
+        picked = {k: opts[k] for k in ("seed", "temperature") if k in opts}
+        if picked:
+            seen.setdefault((role, rnd, lane, model),
+                            {"role": role, "round": rnd, "lane_idx": lane,
+                             "model": model, **picked})
+    return list(seen.values())
 
 
 # Whitelist of WHERE-clause columns acceptable from --filter. Anything
@@ -587,6 +622,7 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
         "protocol": {"typed": cfg.protocol.typed},
         # Plan B: only the keys set; unset ones use the shipped defaults.
         "budget": dict(cfg.budget),
+        "sampling": dict(cfg.sampling),
         # Named chat servers roles use as ``@name`` / ``@name/model``.
         # The key is never printed, only whether one is set.
         "endpoints": {
@@ -615,6 +651,7 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
                 "extra_models": list(cfg.roles[r].extra_models),
                 "think": cc.role_think(cfg, r),
                 "budget": dict(cfg.roles[r].budget),
+                "sampling": dict(cfg.roles[r].sampling),
                 "models": {m: dict(v) for m, v
                            in cfg.roles[r].model_overrides.items()},
                 # The coder routes per language. The skill's status
@@ -1235,6 +1272,23 @@ def cmd_config_set_budget(args, base: str) -> int:
     try:
         cfg = cc.set_budget(values, clear=args.clear, role=args.role,
                             model=args.model, **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_config_set_sampling(args, base: str) -> int:
+    values: dict = {}
+    for key in ("seed", "temperature", "temperature_range_pct"):
+        v = getattr(args, key, None)
+        if v is not None:
+            values[key] = v
+    if not values and not args.clear:
+        raise CLIError("set-sampling: name at least one setting or --clear KEY",
+                       exit_code=2)
+    try:
+        cfg = cc.set_sampling(values, clear=args.clear, role=args.role,
+                              model=args.model, **_resolve_active_scope(args))
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
     return _emit_config(cfg, args)
@@ -2671,6 +2725,25 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Remove a setting (repeatable).")
     _add_scope_args(cbu)
     cbu.set_defaults(fn=cmd_config_set_budget)
+
+    csa = cfg_sub.add_parser(
+        "set-sampling",
+        help="Sampling diversity (plan B4): each role instance gets its own "
+             "seed and a small temperature jitter, globally, per role or per "
+             "(role, model). --clear KEY removes a setting.")
+    csa.add_argument("--role", choices=list(cc.ROLES))
+    csa.add_argument("--model", help="Model exactly as the role names it.")
+    csa.add_argument("--seed", help="random (default), off, or an integer "
+                                    "(the i-th same-model instance gets "
+                                    "seed + i).")
+    csa.add_argument("--temperature", type=float,
+                     help="Base temperature (default: the model's own).")
+    csa.add_argument("--temperature-range-pct", dest="temperature_range_pct",
+                     type=float, help="Jitter around the base, percent "
+                                      "(default 2, max 10; 0 = none).")
+    csa.add_argument("--clear", action="append", default=[], metavar="KEY")
+    _add_scope_args(csa)
+    csa.set_defaults(fn=cmd_config_set_sampling)
 
     cth = cfg_sub.add_parser(
         "set-think",

@@ -273,6 +273,42 @@ Measured on 2026-10-14:
 - opencoti `minimal` at `num_predict` 4,000 was sent 250 tokens and
   reasoned about 843 characters.
 
+## Sampling diversity (plan B4)
+
+`consultants/engine/sampling_diversity.py`. The same model often runs as
+several instances in one run: fan-out lanes, critic and meta-critic, a
+synthesizer on the researcher's model. Each instance gets its own
+sampler, as in the fork's `spawn-sampling.ts`. An instance is one role
+turn or one lane; its tool-loop iterations and its summary call reuse
+the instance's values.
+
+- **`seed`**: `"random"` (default) draws from `[0, 2³¹)`. Same-model
+  instances in one run never share one: a per-run allocator, keyed by
+  `runtime_control.sampling_run`, redraws on a collision. An integer `s`
+  gives the i-th same-model instance `s + i`. `"off"` sends none.
+- **`temperature`**: the base is an explicit setting, else the model
+  template, else the Modelfile / `/props` temperature. With none known it
+  is not sent.
+- **`temperature_range_pct`** (default 2, clamped to 10):
+  `T = base × (1 + u × pct/100)`, `u ∈ [-1, 1]`, 3 decimals, `≥ 0`.
+- With `seed = "off"` and `temperature_range_pct = 0` nothing is added
+  to a request (the parity cohort).
+- An option a caller set explicitly wins.
+- The realized values are in `timings.sampler` (mirrored on the
+  `llm_call` event) and in `claude-consultants show <sid>` as `samplers`.
+
+Layers: `[sampling]` → `[role.X.sampling]` → `[role.X.models."<m>"]`.
+
+```bash
+claude-consultants config set-sampling --temperature-range-pct 5
+claude-consultants config set-sampling --role critic --seed off
+```
+
+Live 2026-10-14: three researcher instances on opencoti (`/props`
+temperature 1.0) got seeds 1761893359 / 1629654338 / 2145521065 and
+temperatures 0.985 / 1.001 / 0.983, and gave three different answers to
+one prompt.
+
 ## Sampler fields
 
 `config/model-sampling.json` templates may also set `num_keep`, `stop`,

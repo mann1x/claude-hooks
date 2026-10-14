@@ -219,6 +219,8 @@ Exact algorithm in 01 §6.
 
 ### B4. Sampling diversity — every role (owner: CRITICAL)
 
+**Built 2026-10-14.** See `docs/consultants-providers.md` "Sampling diversity".
+
 The same model will often run in several pooled sessions and must produce
 different outputs. The mechanism is the fork's (`spawn-sampling.ts:54-60,
 223-433`; 01 §7, 05 #5, 03 §4), applied to **every role**, not only researcher
