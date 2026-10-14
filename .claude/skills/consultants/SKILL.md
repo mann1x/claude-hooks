@@ -780,7 +780,7 @@ per-language entry the same way. The routes only matter when
 
 ### 2. Top-level menu (loop until Done)
 
-The menu has nine areas; AskUserQuestion caps at 4 options, so
+The menu has ten areas; AskUserQuestion caps at 4 options, so
 present it in rounds — round 1 offers the first three plus **More…**,
 and **More…** opens the next batch (ending with **Done**):
 
@@ -801,6 +801,10 @@ and **More…** opens the next batch (ending with **Done**):
    one needs before it runs — see Subflow I
 9. **Endpoints** — named opencoti / llama.cpp / xOllama / Ollama
    servers a role can use as `@name` or `@name/<model>` — see Subflow J
+10. **Typed messages** — `claude-consultants config set-protocol
+    --typed on|off`: planner, researcher, critic and adversary hand in
+    typed records (rendered back to their usual text); the synthesizer
+    stays prose. Experimental, off by default until benched.
 
 Loop back to step 1 after each successful change; exit on **Done**.
 

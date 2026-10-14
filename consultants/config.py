@@ -740,6 +740,17 @@ class CoderLimitsConfig:
     max_files: int = 16
 
 
+@dataclass
+class ProtocolConfig:
+    """How roles hand results to each other (plan Milestone G).
+
+    ``typed``: planner, researcher, critic, meta-critic and adversary
+    hand in a typed record through a result tool, rendered back to the
+    prose each role writes today; the synthesizer stays prose. Off by
+    default until the paired prose-vs-typed bench (G6) decides."""
+    typed: bool = False
+
+
 #: Backends an ``[endpoints.<name>]`` entry may name. ``opencoti`` and
 #: ``llamacpp`` speak OpenAI ``/v1/chat/completions``; ``xollama`` and
 #: ``ollama`` speak Ollama's native ``/api/chat``.
@@ -797,6 +808,7 @@ class ConsultantsConfig:
         r: _default_role_config(r) for r in ROLES
     })
     endpoints: dict[str, EndpointConfig] = field(default_factory=dict)
+    protocol: ProtocolConfig = field(default_factory=ProtocolConfig)
 
     def role(self, name: str) -> RoleConfig:
         if name not in ROLES:
@@ -1205,6 +1217,11 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
             if isinstance(v, int) and v > 0:
                 setattr(base.coder_limits, k, v)
 
+    # protocol (plan G)
+    proto = raw.get("protocol") or {}
+    if isinstance(proto, dict) and isinstance(proto.get("typed"), bool):
+        base.protocol.typed = proto["typed"]
+
     # endpoints (plan A1): ``[endpoints.<name>] url, backend, model, api_key``
     eps = raw.get("endpoints") or {}
     if isinstance(eps, dict):
@@ -1563,6 +1580,11 @@ def _render(cfg: ConsultantsConfig, *,
     L.append(f"max_total_bytes = {cfg.coder_limits.max_total_bytes}")
     L.append(f"max_files = {cfg.coder_limits.max_files}")
     L.append("")
+    L.append("[protocol]")
+    L.append("# typed: roles hand typed records to each other (plan G); the "
+             "synthesizer stays prose. Off until benched.")
+    L.append(f"typed = {'true' if cfg.protocol.typed else 'false'}")
+    L.append("")
     for name, ep in sorted(cfg.endpoints.items()):
         L.append(f"[endpoints.{name}]")
         L.append(f"url = {_toml_str(ep.url)}")
@@ -1845,6 +1867,14 @@ def set_endpoint(name: str, *, url: Optional[str] = None,
     if api_key is not None:
         ep.api_key = api_key.strip() or None
     cfg.endpoints[name] = ep
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_protocol(*, typed: Optional[bool] = None, scope: str = "user",
+                 cwd: Optional[Path] = None) -> ConsultantsConfig:
+    cfg = _load_for_edit(scope, cwd)
+    if typed is not None:
+        cfg.protocol.typed = bool(typed)
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 

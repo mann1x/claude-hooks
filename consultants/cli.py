@@ -584,6 +584,7 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
             "mode": cfg.service.mode,
             "http_port": cfg.service.http_port,
         },
+        "protocol": {"typed": cfg.protocol.typed},
         # Named chat servers roles use as ``@name`` / ``@name/model``.
         # The key is never printed, only whether one is set.
         "endpoints": {
@@ -1198,6 +1199,17 @@ def cmd_config_set_endpoint(args, base: str) -> int:
         cfg = cc.set_endpoint(args.name, url=args.url, backend=args.backend,
                               model=args.model, api_key=args.api_key,
                               **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_config_set_protocol(args, base: str) -> int:
+    typed = None
+    if args.typed is not None:
+        typed = args.typed.lower() in ("on", "true", "yes", "1")
+    try:
+        cfg = cc.set_protocol(typed=typed, **_resolve_active_scope(args))
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
     return _emit_config(cfg, args)
@@ -2581,6 +2593,15 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Bearer key, if the server wants one ('' clears).")
     _add_scope_args(cep)
     cep.set_defaults(fn=cmd_config_set_endpoint)
+
+    cpr = cfg_sub.add_parser(
+        "set-protocol",
+        help="How roles hand results to each other: --typed on makes "
+             "planner, researcher, critic and adversary hand in typed "
+             "records (plan G); the synthesizer stays prose.")
+    cpr.add_argument("--typed", choices=["on", "off"])
+    _add_scope_args(cpr)
+    cpr.set_defaults(fn=cmd_config_set_protocol)
 
     crep = cfg_sub.add_parser("remove-endpoint",
                               help="Remove a named chat server.")

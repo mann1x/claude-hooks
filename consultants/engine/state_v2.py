@@ -262,6 +262,7 @@ class RuntimeControl(TypedDict, total=False):
     max_reroutes: int           # critic re-routes
     # ---- topology gates ----
     enabled_roles: list[str]    # subset of the project's roles
+    typed_protocol: bool        # plan G: roles hand in typed records
     # ---- quality thresholds ----
     confidence_target: float    # synthesizer self-rating cutoff
     # M4 dynamic critic dial. ``adversarial`` is reachable only via a

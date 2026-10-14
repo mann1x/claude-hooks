@@ -539,6 +539,61 @@ panel (which does the same thing across multiple claims in parallel).
 
 ---
 
+## Typed messages between roles (opt-in)
+
+Plan: [`PLAN-council-cerebriline.md`](PLAN-council-cerebriline.md)
+Milestone G. Off by default; with it off, every prompt and request is
+byte-identical to before.
+
+```toml
+[protocol]
+typed = true
+```
+
+```bash
+claude-consultants config set-protocol --typed on   # or off
+```
+
+The `/consultants config` menu has a **Typed messages** entry.
+
+With it on, each role except the synthesizer sends its result as a
+structured call to a result tool. The engine answers that tool itself
+(`consultants/engine/typed_results.py`):
+
+| role | result tool | carries |
+|---|---|---|
+| planner | `council_plan` | numbered steps |
+| researcher | `council_report` | summary + claims with `path:line` citations |
+| critic, meta_critic | `council_verdict` | decision, why, named gap, corrections, confidence |
+| adversary | `council_refutation` | the refutation |
+
+- A record counts only when it is the turn's **only** call. A result
+  call beside other tool calls is answered "call it on its own"; the
+  other calls run as usual.
+- Invalid or cut arguments are re-asked once. After that the role
+  **falls back to prose**, so a model that can't produce the record
+  still finishes.
+- Each record is rendered back into the prose the downstream parsers
+  already read (`DECISION:`, `gap_named:`, `CORRECTIONS:`,
+  `CONFIDENCE:`, numbered plan, `path:line` bullets, `REFUTATION:`).
+  Escalation, rerouting and citation linting behave the same in both
+  modes.
+- When typed mode is on, reader roles (critic, meta_critic, synthesizer,
+  adversary) are told that the findings they receive are claims to
+  check, not facts.
+- Schemas set item counts but no `maxLength`. Text is cut when rendered
+  (2000 chars for summaries, 600 per field).
+- The flag reaches the graph as `runtime_control.typed_protocol`, which
+  is seeded only when the flag is on.
+- On opencoti or llama.cpp, a `format` becomes `response_format`. A
+  server that refuses it gets the call again without it.
+
+Verified live on 2026-10-14: the critic on opencoti (`@bs2`) returned a
+`council_verdict` as its only call, which rendered as `DECISION: ready`.
+Measuring the effect on token use and quality is G6.
+
+---
+
 ## See also
 
 - [`docs/consultants.md`](consultants.md) — the engine driver doc:

@@ -103,6 +103,34 @@ class LoopConfig:
     # logged and ignored. None = no callback (caliber / advisor).
     on_response: Optional[Callable[[dict, dict], None]] = None
 
+    # Result tools: calls the loop answers itself instead of executing.
+    # A result call that is the turn's only call ends the loop; its
+    # arguments travel back as ``final["_result_call"]`` and are never
+    # run. Beside other calls it is not taken: the others run and the
+    # result call is answered with ``result_not_alone_message``. Arguments
+    # that don't parse as JSON are answered with ``result_invalid_message``
+    # once. When the loop strips tools to force an answer, the result
+    # tools stay, so the forced answer can still be a record. Both
+    # messages take ``{name}`` (and the second ``{what}``). Empty = none
+    # (caliber / advisor).
+    result_tools: tuple[str, ...] = ()
+    result_not_alone_message: str = (
+        "Not taken yet: call {name} on its own, after you have read what "
+        "your other calls returned.")
+    result_invalid_message: str = (
+        "Your {name} call was {what}. Call {name} again, smaller: shorter "
+        "fields and fewer items.")
+
+
+def _json_args(tc: dict) -> bool:
+    args = (tc.get("function") or {}).get("arguments")
+    if isinstance(args, dict):
+        return True
+    try:
+        return isinstance(json.loads(args or ""), dict)
+    except (TypeError, json.JSONDecodeError):
+        return False
+
 
 # Type aliases.
 ToolExecutor = Callable[[str, str, str], str]
@@ -451,6 +479,7 @@ def run_loop(
     force_first = (config.force_first_tool_call
                    if config.tools_available else False)
     force_first_retried = False
+    result_invalid_sent = False
     seen_calls: dict[str, str] = {}
 
     if config.tools_available and preseed_builder is not None:
@@ -477,8 +506,15 @@ def run_loop(
                 "force-answer: stripping tools at iter %d (after=%d)",
                 i, force_after,
             )
-            payload.pop("tools", None)
-            payload.pop("tool_choice", None)
+            kept = [t for t in (payload.get("tools") or [])
+                    if ((t.get("function") or {}).get("name")
+                        in config.result_tools)]
+            if kept:
+                payload["tools"] = kept
+                payload["tool_choice"] = "auto"
+            else:
+                payload.pop("tools", None)
+                payload.pop("tool_choice", None)
             tools_stripped = True
         if config.tools_available and not tools_stripped:
             if force_first and not has_called_tool:
@@ -564,6 +600,33 @@ def run_loop(
             )
         tool_calls = uniq
 
+        results_called = [tc for tc in tool_calls
+                          if ((tc.get("function") or {}).get("name")
+                              in config.result_tools)]
+        if results_called and len(tool_calls) == 1:
+            tc = results_called[0]
+            if _json_args(tc):
+                final = dict(final)
+                final["_result_call"] = {
+                    "name": (tc.get("function") or {}).get("name"),
+                    "arguments": (tc.get("function") or {}).get("arguments"),
+                }
+                break
+            if not result_invalid_sent:
+                result_invalid_sent = True
+                cut = (choice.get("done_reason") or final.get("done_reason")) == "length"
+                name = (tc.get("function") or {}).get("name") or ""
+                payload["messages"] = list(payload["messages"]) + [
+                    {"role": "assistant", "content": None, "tool_calls": [tc]},
+                    {"role": "tool", "tool_call_id": tc.get("id") or "",
+                     "name": name,
+                     "content": config.result_invalid_message.format(
+                         name=name, what="cut off at the output limit" if cut
+                         else "not valid JSON")},
+                ]
+                continue
+            break
+
         clean_msg = dict(msg)
         clean_msg["content"] = None
         clean_msg["tool_calls"] = tool_calls
@@ -583,12 +646,20 @@ def run_loop(
         if note:
             clean_msg["content"] = note
         payload["messages"] = list(payload["messages"]) + [clean_msg]
+        runnable = [tc for tc in tool_calls if tc not in results_called]
         payload["messages"].extend(
             execute_tool_calls(
-                tool_calls, cwd, seen_calls, tool_executor,
+                runnable, cwd, seen_calls, tool_executor,
                 on_tool=on_tool,
             )
         )
+        for tc in results_called:
+            name = (tc.get("function") or {}).get("name") or ""
+            payload["messages"].append({
+                "role": "tool", "tool_call_id": tc.get("id") or "",
+                "name": name,
+                "content": config.result_not_alone_message.format(name=name),
+            })
     else:
         log.warning("agent loop hit max_iterations=%d", config.max_iterations)
     # Attach the final conversation transcript to the response so

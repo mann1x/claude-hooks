@@ -159,6 +159,11 @@ def _learn_ceiling(base_url: str, model: str, body: str) -> Optional[int]:
     return None
 
 
+#: A refusal that is about the requested output format.
+_FORMAT_REFUSED_RX = re.compile(
+    r"\bformat\b|response_format|json_schema|structured output|grammar",
+    re.I)
+
 #: ``Retry-After`` is honoured up to this many seconds per wait; a longer
 #: ask is answered with this, and the next attempt asks again.
 RETRY_AFTER_MAX_S = 30.0
@@ -789,6 +794,7 @@ class ChatClient:
         last_exc: Optional[Exception] = None
         attempts, outage = _Attempts(self.max_retries), {}
         ceiling_retried = False
+        format_dropped = False
         empty_retries = 0
         sent = 0
         for attempt in attempts:
@@ -900,6 +906,22 @@ class ChatClient:
                     body = self._prepare(payload, strip_think=True,
                                          stream=stream)
                     encoded = json.dumps(body).encode()
+                    continue
+                # Structured output the server refuses (a backend without
+                # it, or a schema its grammar compiler cannot parse):
+                # asked once more without the format, never failed.
+                if (e.code in (400, 422, 500) and payload.get("format")
+                        and not format_dropped
+                        and _FORMAT_REFUSED_RX.search(err_body or "")):
+                    format_dropped = True
+                    log.warning("%s: %s refused the output format (HTTP %d); "
+                                "asking once more without it: %s",
+                                what, model_tag, e.code, err_body[:200])
+                    payload = {k: v for k, v in payload.items() if k != "format"}
+                    body = self._prepare(payload, strip_think=strip_think,
+                                         stream=stream)
+                    encoded = json.dumps(body).encode()
+                    attempts.hold()
                     continue
                 # A refusal naming the provider's real output maximum:
                 # retry once at that value and remember it.
@@ -1096,6 +1118,9 @@ class ChatClient:
         # models). Accepts bool or "low" | "medium" | "high".
         if "think" in payload and not strip_think:
             body["think"] = payload["think"]
+        # Structured output: ``"json"`` or a JSON schema, passed through.
+        if payload.get("format"):
+            body["format"] = payload["format"]
         return body
 
     def _from_ollama(self, data: dict) -> dict:
@@ -1280,6 +1305,13 @@ class OpenAICompatChatClient(ChatClient):
         think = payload.get("think")
         if self.backend == "opencoti" and think is False and not strip_think:
             body["reasoning_budget_tokens"] = 0
+        fmt = payload.get("format")
+        if fmt == "json":
+            body["response_format"] = {"type": "json_object"}
+        elif isinstance(fmt, dict):
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "result", "schema": fmt}}
         if stream:
             body["stream_options"] = {"include_usage": True}
         return body

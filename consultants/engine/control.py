@@ -198,6 +198,11 @@ def runtime_control_defaults(
         "xauto_tier": starting_tier,  # type: ignore[typeddict-item]
         "xauto_escalations": 0,
     }
+    # Plan G: present only when on, so a default run's record is
+    # byte-identical to before (M12 parity); readers treat absent as off.
+    protocol = getattr(cfg, "protocol", None)
+    if protocol is not None and getattr(protocol, "typed", False):
+        rc["typed_protocol"] = True
     return rc
 
 
