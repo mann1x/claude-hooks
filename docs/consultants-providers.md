@@ -2,9 +2,59 @@
 
 How the council's chat clients learn what a backend can do, talk to it,
 and record what each call cost. Plan: [`PLAN-council-cerebriline.md`](PLAN-council-cerebriline.md)
-Milestone A. Status: the Ollama (local and cloud) half is built; xOllama
-and opencoti probes are implemented against fixtures and wait on live
-endpoints.
+Milestone A. Status: built for Ollama (local and cloud) and opencoti
+(verified against a live opencoti with PolyKV, 2026-10-14). The xOllama
+probe and client path are built and tested against fixtures; they wait
+on a live endpoint.
+
+## Endpoints: using opencoti, llama.cpp or xOllama for a role
+
+Named servers live in the consultants config. There are no host
+defaults: an endpoint exists only where a user configured it.
+
+```toml
+[endpoints.bs2]
+url = "http://192.168.178.2:8240"
+backend = "opencoti"        # opencoti | llamacpp | xollama | ollama
+# model = "..."             # served model when a reference names none
+# api_key = "..."           # bearer key, if the server wants one
+```
+
+```bash
+claude-consultants config set-endpoint bs2 --url http://192.168.178.2:8240 --backend opencoti
+claude-consultants config set-role researcher --model @bs2
+claude-consultants config remove-endpoint bs2
+```
+
+- A role's model is `@name` (the endpoint's served model, or the first
+  id its `/v1/models` lists) or `@name/<model>`. `@` never occurs in an
+  Ollama tag, so references can't collide with tags.
+- `opencoti` / `llamacpp` go through `OpenAICompatChatClient`
+  (`/v1/chat/completions`, SSE streaming). `xollama` / `ollama` go
+  through the native `ChatClient` at that URL.
+- A role whose primary and extra models span several backends gets a
+  `ModelRoutingChatClient`: fan-out lanes and fallbacks reuse the role's
+  client and only change `model`, so each call is routed by its model.
+  A role whose models share one backend keeps the plain client.
+- `config show` lists endpoints with `api_key_set`, never the key. The
+  `/consultants config` menu has an **Endpoints** entry (Subflow J).
+
+### opencoti translation
+
+| ours | opencoti wire |
+|---|---|
+| `options.num_predict` | `max_tokens` (clamped to a learned ceiling) |
+| `options.num_keep` | `n_keep` |
+| `options.think_budget_message` | `reasoning_budget_message` |
+| sampler fields | same names (`temperature`, `top_k`, `min_p`, `seed`, `stop`, …) |
+| `think: false` | `reasoning_budget_tokens: 0`; levels wait on Milestone B3 |
+| reply `reasoning_content` | kept on the message (the council reads it) |
+| `timings.cache_n` | `timings.cached_prompt_tokens` |
+| `X-Context-Window` | `timings.granted_window` |
+
+With no `num_ctx` sent, opencoti grants each request only what it needs
+(the dynamic mode): `X-Context-Window` was 83 on a 21-token call. Budgets
+must not read that header as the session's window (Milestone B2).
 
 ## Capabilities: `claude_hooks/provider_caps.py`
 

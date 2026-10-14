@@ -584,6 +584,13 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
             "mode": cfg.service.mode,
             "http_port": cfg.service.http_port,
         },
+        # Named chat servers roles use as ``@name`` / ``@name/model``.
+        # The key is never printed, only whether one is set.
+        "endpoints": {
+            n: {"url": e.url, "backend": e.backend, "model": e.model,
+                "api_key_set": bool(e.api_key)}
+            for n, e in sorted(cfg.endpoints.items())
+        },
         "smart_start": {
             "enabled": bool(smart_block.get("enabled", False)),
             "idle_timeout_seconds": int(
@@ -1184,6 +1191,24 @@ def _add_scope_args(p) -> None:
                    help="Force the user-global config, ignoring any active "
                         "per-project file.")
     p.add_argument("--cwd", help="Project root (default: current dir).")
+
+
+def cmd_config_set_endpoint(args, base: str) -> int:
+    try:
+        cfg = cc.set_endpoint(args.name, url=args.url, backend=args.backend,
+                              model=args.model, api_key=args.api_key,
+                              **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_config_remove_endpoint(args, base: str) -> int:
+    try:
+        cfg = cc.remove_endpoint(args.name, **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
 
 
 def cmd_config_coder_set(args, base: str) -> int:
@@ -2542,6 +2567,26 @@ def build_parser() -> argparse.ArgumentParser:
                           "0.0 disables. Sliced 0.5 s for shutdown.")
     _add_scope_args(csd)
     csd.set_defaults(fn=cmd_config_set_store_distillation)
+
+    cep = cfg_sub.add_parser(
+        "set-endpoint",
+        help="Add or update a named chat server (opencoti, llama.cpp, "
+             "xOllama, Ollama) that roles use as @name or @name/<model>.")
+    cep.add_argument("name")
+    cep.add_argument("--url", help="Server root, e.g. http://host:8240.")
+    cep.add_argument("--backend", choices=list(cc.ENDPOINT_BACKENDS))
+    cep.add_argument("--model", help="Served model when a reference names "
+                                     "none ('' clears).")
+    cep.add_argument("--api-key", dest="api_key",
+                     help="Bearer key, if the server wants one ('' clears).")
+    _add_scope_args(cep)
+    cep.set_defaults(fn=cmd_config_set_endpoint)
+
+    crep = cfg_sub.add_parser("remove-endpoint",
+                              help="Remove a named chat server.")
+    crep.add_argument("name")
+    _add_scope_args(crep)
+    crep.set_defaults(fn=cmd_config_remove_endpoint)
 
     clm = cfg_sub.add_parser("list-models",
                              help="Available Ollama tags.")

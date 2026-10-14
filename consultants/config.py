@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -739,6 +740,30 @@ class CoderLimitsConfig:
     max_files: int = 16
 
 
+#: Backends an ``[endpoints.<name>]`` entry may name. ``opencoti`` and
+#: ``llamacpp`` speak OpenAI ``/v1/chat/completions``; ``xollama`` and
+#: ``ollama`` speak Ollama's native ``/api/chat``.
+ENDPOINT_BACKENDS = ("opencoti", "llamacpp", "xollama", "ollama")
+_ENDPOINT_NAME_RX = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+@dataclass
+class EndpointConfig:
+    """A named chat server a role can use as ``@name`` or
+    ``@name/<model>``. Nothing here is a host default: endpoints exist
+    only where a user configured them."""
+    url: str
+    backend: str = "opencoti"
+    #: The served model when the reference names none; else the first
+    #: id the server lists (OpenAI-compatible backends).
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+
+
+def valid_endpoint_name(name: str) -> bool:
+    return bool(_ENDPOINT_NAME_RX.match(name or ""))
+
+
 @dataclass
 class ConsultantsConfig:
     topology: str = DEFAULT_TOPOLOGY
@@ -771,6 +796,7 @@ class ConsultantsConfig:
     roles: dict[str, RoleConfig] = field(default_factory=lambda: {
         r: _default_role_config(r) for r in ROLES
     })
+    endpoints: dict[str, EndpointConfig] = field(default_factory=dict)
 
     def role(self, name: str) -> RoleConfig:
         if name not in ROLES:
@@ -1179,6 +1205,25 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
             if isinstance(v, int) and v > 0:
                 setattr(base.coder_limits, k, v)
 
+    # endpoints (plan A1): ``[endpoints.<name>] url, backend, model, api_key``
+    eps = raw.get("endpoints") or {}
+    if isinstance(eps, dict):
+        for name, ep in eps.items():
+            if not isinstance(ep, dict) or not valid_endpoint_name(name):
+                continue
+            url = ep.get("url")
+            if not isinstance(url, str) or not url.strip():
+                continue
+            backend = str(ep.get("backend") or "opencoti").lower()
+            if backend not in ENDPOINT_BACKENDS:
+                log.warning("consultants config: endpoint %r has unknown "
+                            "backend %r; skipped", name, backend)
+                continue
+            base.endpoints[name] = EndpointConfig(
+                url=url.strip().rstrip("/"), backend=backend,
+                model=(ep.get("model") or None),
+                api_key=(ep.get("api_key") or None))
+
     # roles
     roles = raw.get("role") or {}
     if isinstance(roles, dict):
@@ -1518,6 +1563,15 @@ def _render(cfg: ConsultantsConfig, *,
     L.append(f"max_total_bytes = {cfg.coder_limits.max_total_bytes}")
     L.append(f"max_files = {cfg.coder_limits.max_files}")
     L.append("")
+    for name, ep in sorted(cfg.endpoints.items()):
+        L.append(f"[endpoints.{name}]")
+        L.append(f"url = {_toml_str(ep.url)}")
+        L.append(f"backend = {_toml_str(ep.backend)}")
+        if ep.model:
+            L.append(f"model = {_toml_str(ep.model)}")
+        if ep.api_key:
+            L.append(f"api_key = {_toml_str(ep.api_key)}")
+        L.append("")
     for role in ROLES:
         rc = cfg.roles[role]
         L.append(f"[role.{role}]")
@@ -1760,6 +1814,47 @@ def _validate_lang_id(lang: str) -> str:
             "([a-z][a-z0-9_+-]*)"
         )
     return s
+
+
+def set_endpoint(name: str, *, url: Optional[str] = None,
+                 backend: Optional[str] = None,
+                 model: Optional[str] = None,
+                 api_key: Optional[str] = None,
+                 scope: str = "user",
+                 cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Add or update ``[endpoints.<name>]``. ``url`` is required for a
+    new endpoint; on an update unset arguments keep their value and an
+    empty string clears ``model`` / ``api_key``."""
+    if not valid_endpoint_name(name):
+        raise ValueError(f"endpoint name {name!r} must match [A-Za-z0-9_.-]+")
+    cfg = _load_for_edit(scope, cwd)
+    ep = cfg.endpoints.get(name)
+    if ep is None and not (url and url.strip()):
+        raise ValueError(f"endpoint {name!r} does not exist; --url is required")
+    if backend is not None and backend.lower() not in ENDPOINT_BACKENDS:
+        raise ValueError(f"backend must be one of {', '.join(ENDPOINT_BACKENDS)}")
+    if url is not None and not url.strip().startswith(("http://", "https://")):
+        raise ValueError("url must start with http:// or https://")
+    ep = ep or EndpointConfig(url=url.strip())
+    if url:
+        ep.url = url.strip().rstrip("/")
+    if backend:
+        ep.backend = backend.lower()
+    if model is not None:
+        ep.model = model.strip() or None
+    if api_key is not None:
+        ep.api_key = api_key.strip() or None
+    cfg.endpoints[name] = ep
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def remove_endpoint(name: str, *, scope: str = "user",
+                    cwd: Optional[Path] = None) -> ConsultantsConfig:
+    cfg = _load_for_edit(scope, cwd)
+    if name not in cfg.endpoints:
+        raise ValueError(f"endpoint {name!r} is not configured")
+    del cfg.endpoints[name]
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 
 def set_coder_route(language: str, *, primary: Optional[str] = None,

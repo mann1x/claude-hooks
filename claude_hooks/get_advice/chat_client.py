@@ -16,7 +16,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 from claude_hooks import ollama_slots
 
 log = logging.getLogger("claude_hooks.get_advice.chat_client")
@@ -224,6 +224,9 @@ def _timings(data: dict, *, wall_s: float, queue_s: float,
         out["ttft_ms"] = round(ttft_s * 1000)
     if empty_retries:
         out["empty_retries"] = empty_retries
+    cached = data.get("cached_prompt_tokens")
+    if isinstance(cached, int) and cached >= 0:
+        out["cached_prompt_tokens"] = cached
     for src, dst in (("load_duration", "load_ms"),
                      ("prompt_eval_duration", "prompt_eval_ms"),
                      ("eval_duration", "eval_ms"),
@@ -422,6 +425,9 @@ class ChatClient:
         # Sent as a bearer token only when one is configured (ollama.com
         # direct, a keyed xOllama). A local server needs none.
         self.api_key = api_key or None
+        # Set when this client serves a configured endpoint
+        # (``@name/model``): the model the server actually knows.
+        self.served_model: Optional[str] = None
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.retry_base_delay_s = retry_base_delay_s
@@ -486,6 +492,7 @@ class ChatClient:
         ``model`` on this server: window, output max, thinking values,
         cloud marker, Modelfile temperature, xOllama features."""
         from claude_hooks import provider_caps
+        model = self._real(model)
         if model not in self._show and model not in self._probed_think:
             self._probe_supports_think(model)
         auth = ({"Authorization": f"Bearer {self.api_key}"}
@@ -496,7 +503,7 @@ class ChatClient:
 
     def learned_output_ceiling(self, model: str) -> Optional[int]:
         """An output maximum this server's refusal named for ``model``."""
-        return learned_output_ceiling(self.base_url, model)
+        return learned_output_ceiling(self.base_url, self._real(model))
 
     def _wait_out_outage(self, e: BaseException, body: str,
                          attempts: "_Attempts", state: dict, *,
@@ -619,6 +626,7 @@ class ChatClient:
         back truncated, so this is a necessary input to a budget
         decision, never sufficient on its own.
         """
+        model = self._real(model)
         if model not in self._context_length:
             # Populates both caches; the think verdict is a side effect
             # we already wanted.
@@ -634,6 +642,7 @@ class ChatClient:
         there is no marker to find, and the detector falls back to the
         proximity ratio alone.
         """
+        model = self._real(model)
         if model not in self._budget_message:
             self._probe_supports_think(model)
         return self._budget_message.get(model)
@@ -693,6 +702,30 @@ class ChatClient:
         return self._call(payload, stream=True, on_token=on_token,
                           cancel_check=cancel_check, on_admitted=on_admitted)
 
+    #: Path of the chat route under the server root.
+    _chat_path = "/api/chat"
+    #: Ask ``/api/show`` whether the model thinks before sending ``think``.
+    _probe_think_before_call = True
+
+    def _decode(self, data: dict) -> dict:
+        """A non-streamed reply in Ollama's shape (identity here; the
+        OpenAI-compatible subclass translates)."""
+        return data
+
+    def _real(self, model: str) -> str:
+        """The served model behind a configured endpoint reference
+        (``@name`` / ``@name/model``); any other name unchanged."""
+        if self.served_model and model and model.startswith("@"):
+            return self.served_model
+        return model
+
+    def _with_served_model(self, payload: dict) -> dict:
+        model = (payload or {}).get("model") or ""
+        real = self._real(model)
+        if real != model:
+            payload = {**payload, "model": real}
+        return payload
+
     def _prepare(self, payload: dict, *, strip_think: bool,
                  stream: bool) -> dict:
         body = self._to_ollama(payload, strip_think=strip_think)
@@ -737,9 +770,11 @@ class ChatClient:
         # probe says ``thinking`` is not in capabilities -> strip;
         # (3) probe says yes or is unknown -> send and rely on the
         # reactive 400 path as a safety net.
+        payload = self._with_served_model(payload)
         model_tag = (payload or {}).get("model") or ""
         strip_think = model_tag in self._unsupported_think
-        if (not strip_think
+        if (self._probe_think_before_call
+                and not strip_think
                 and "think" in (payload or {})
                 and model_tag
                 and model_tag not in self._probed_think):
@@ -748,7 +783,7 @@ class ChatClient:
                 strip_think = True
 
         body = self._prepare(payload, strip_think=strip_think, stream=stream)
-        url = f"{self.base_url}/api/chat"
+        url = f"{self.base_url}{self._chat_path}"
         encoded = json.dumps(body).encode()
 
         last_exc: Optional[Exception] = None
@@ -792,7 +827,7 @@ class ChatClient:
                                 cancel_check=cancel_check, clock=clock,
                             )
                         else:
-                            data = json.loads(resp.read())
+                            data = self._decode(json.loads(resp.read()))
                 finally:
                     admitted.__exit__(None, None, None)
                 wall_s = time.monotonic() - attempt_start
@@ -1154,6 +1189,258 @@ class ChatClient:
 
 
 # --------------------------------------------------------------------- #
+# OpenAI-compatible llama.cpp-family servers (opencoti, llama.cpp)
+# --------------------------------------------------------------------- #
+
+#: Ollama option name -> llama.cpp wire name. Unset fields are never sent,
+#: so a server that ignores a field sees the same body as before.
+_LLAMACPP_OPTION_NAMES = {
+    "temperature": "temperature", "top_p": "top_p", "top_k": "top_k",
+    "min_p": "min_p", "typical_p": "typical_p",
+    "repeat_penalty": "repeat_penalty", "repeat_last_n": "repeat_last_n",
+    "presence_penalty": "presence_penalty",
+    "frequency_penalty": "frequency_penalty", "seed": "seed",
+    "stop": "stop", "num_keep": "n_keep",
+    "mirostat": "mirostat", "mirostat_tau": "mirostat_tau",
+    "mirostat_eta": "mirostat_eta",
+    "think_budget_message": "reasoning_budget_message",
+}
+
+
+class OpenAICompatChatClient(ChatClient):
+    """``/v1/chat/completions`` on opencoti or a plain llama.cpp server.
+
+    Shares :class:`ChatClient`'s retry loop (Retry-After, empty-reply
+    retry, learned ceiling, fault classes, timings): only the request
+    body, the reply and the SSE stream are translated, into and out of
+    the Ollama shape that loop already understands.
+
+    ``think: false`` becomes ``reasoning_budget_tokens: 0`` on opencoti,
+    the engine's own "no thinking" (it discards ``reasoning_effort``
+    levels). Levels map to token budgets in Milestone B3; until then a
+    level leaves the engine's default in force.
+    """
+
+    _chat_path = "/v1/chat/completions"
+    # ``think`` is translated, never stripped, so there is nothing to ask.
+    _probe_think_before_call = False
+
+    def __init__(self, base_url: str, *, backend: str = "opencoti",
+                 served_model: Optional[str] = None, **kwargs):
+        base_url = base_url.rstrip("/")
+        if base_url.endswith("/v1"):
+            base_url = base_url[: -len("/v1")]
+        super().__init__(base_url, **kwargs)
+        self.backend = backend
+        self.served_model = served_model
+
+    # ---- capabilities ------------------------------------------------- #
+
+    def caps(self, model: str, *, refresh: bool = False):
+        from claude_hooks import provider_caps
+        auth = ({"Authorization": f"Bearer {self.api_key}"}
+                if self.api_key else None)
+        return provider_caps.openai_compat_caps(
+            self.base_url, self._real(model), headers=auth, refresh=refresh)
+
+    def _probe_supports_think(self, model: str) -> Optional[bool]:
+        """No ``/api/show`` here: the window comes from ``/props``. The
+        think verdict stays unknown, so ``think`` is never stripped on a
+        guess."""
+        if model in self._probed_think:
+            return self._probed_think[model]
+        caps = self.caps(model)
+        self._context_length[model] = caps.session_ctx_max or caps.declared_num_ctx
+        self._budget_message[model] = None
+        self._probed_think[model] = None
+        return None
+
+    # ---- request ------------------------------------------------------ #
+
+    def _prepare(self, payload: dict, *, strip_think: bool,
+                 stream: bool) -> dict:
+        model = payload.get("model") or ""
+        body: dict = {"model": model,
+                      "messages": list(payload.get("messages") or []),
+                      "stream": bool(stream)}
+        from claude_hooks.model_sampling import sampling_for
+        opts = {**sampling_for(model), **dict(payload.get("options") or {})}
+        opts = {k: v for k, v in opts.items() if v is not None}
+        n_predict = opts.get("num_predict")
+        if isinstance(n_predict, int) and n_predict > 0:
+            ceiling = learned_output_ceiling(self.base_url, model)
+            body["max_tokens"] = min(n_predict, ceiling) if ceiling else n_predict
+        for src, dst in _LLAMACPP_OPTION_NAMES.items():
+            if src in opts and opts[src] not in ("", []):
+                body[dst] = opts[src]
+        if payload.get("tools"):
+            body["tools"] = payload["tools"]
+        if "tool_choice" in payload:
+            body["tool_choice"] = payload["tool_choice"]
+        think = payload.get("think")
+        if self.backend == "opencoti" and think is False and not strip_think:
+            body["reasoning_budget_tokens"] = 0
+        if stream:
+            body["stream_options"] = {"include_usage": True}
+        return body
+
+    # ---- reply -------------------------------------------------------- #
+
+    @staticmethod
+    def _ollama_shape(message: dict, finish_reason: Optional[str],
+                      usage: Optional[dict], timings: Optional[dict]) -> dict:
+        out: dict = {
+            "message": message,
+            "done": True,
+            "done_reason": "length" if finish_reason == "length" else "stop",
+        }
+        usage = usage or {}
+        if usage.get("prompt_tokens") is not None:
+            out["prompt_eval_count"] = int(usage["prompt_tokens"])
+        if usage.get("completion_tokens") is not None:
+            out["eval_count"] = int(usage["completion_tokens"])
+        t = timings or {}
+        for src, dst in (("prompt_ms", "prompt_eval_duration"),
+                         ("predicted_ms", "eval_duration")):
+            if isinstance(t.get(src), (int, float)):
+                out[dst] = float(t[src]) * 1e6
+        if isinstance(t.get("cache_n"), int):
+            out["cached_prompt_tokens"] = t["cache_n"]
+        if "prompt_eval_count" not in out and isinstance(t.get("prompt_n"), int):
+            out["prompt_eval_count"] = t["prompt_n"] + int(t.get("cache_n") or 0)
+        if "eval_count" not in out and isinstance(t.get("predicted_n"), int):
+            out["eval_count"] = t["predicted_n"]
+        return out
+
+    def _decode(self, data: dict) -> dict:
+        choices = data.get("choices") or [{}]
+        ch = choices[0] or {}
+        msg = dict(ch.get("message") or {})
+        msg.setdefault("role", "assistant")
+        if msg.get("content") is None:
+            msg["content"] = ""
+        return self._ollama_shape(msg, ch.get("finish_reason"),
+                                  data.get("usage"), data.get("timings"))
+
+    def _consume_ndjson(self, resp, *,
+                        on_token: Optional[Callable[[str], None]],
+                        cancel_check: Optional[Callable[[], bool]],
+                        clock: Optional[dict] = None) -> dict:
+        """Read an OpenAI SSE stream (``data: {...}`` lines, ``[DONE]``).
+        Tool-call deltas are merged by ``index``; their argument
+        fragments are concatenated. A comment line (``: ping``) is the
+        engine's keepalive and counts as liveness."""
+        from consultants.engine.stall import CancelledByOrchestrator
+
+        content: list[str] = []
+        reasoning: list[str] = []
+        calls: dict[int, dict] = {}
+        finish: Optional[str] = None
+        usage: Optional[dict] = None
+        timings: Optional[dict] = None
+        for raw in resp:
+            if cancel_check is not None and cancel_check():
+                raise CancelledByOrchestrator()
+            line = (raw.decode("utf-8", errors="replace")
+                    if isinstance(raw, bytes) else raw).strip()
+            if not line:
+                continue
+            if line.startswith(":"):
+                if on_token is not None:
+                    try:
+                        on_token("")
+                    except Exception:  # pragma: no cover
+                        log.exception("on_token raised; ignored")
+                continue
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                obj = json.loads(data)
+            except json.JSONDecodeError:
+                log.warning("openai stream: skipping malformed line: %r",
+                            data[:80])
+                continue
+            if isinstance(obj.get("error"), dict) or obj.get("error"):
+                raise OSError(f"stream error from server: {str(obj.get('error'))[:300]}")
+            if obj.get("usage"):
+                usage = obj["usage"]
+            if obj.get("timings"):
+                timings = obj["timings"]
+            for ch in obj.get("choices") or []:
+                delta = ch.get("delta") or {}
+                piece = delta.get("content") or ""
+                think = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                tcs = delta.get("tool_calls") or []
+                if piece:
+                    content.append(piece)
+                if think:
+                    reasoning.append(think)
+                for tc in tcs:
+                    i = int(tc.get("index", len(calls)))
+                    slot = calls.setdefault(i, {"id": None, "type": "function",
+                                                "function": {"name": "",
+                                                             "arguments": ""}})
+                    if tc.get("id"):
+                        slot["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        slot["function"]["name"] += fn["name"]
+                    if fn.get("arguments"):
+                        slot["function"]["arguments"] += fn["arguments"]
+                if ch.get("finish_reason"):
+                    finish = ch["finish_reason"]
+                if piece or think or tcs:
+                    if clock is not None and "first" not in clock:
+                        clock["first"] = time.monotonic()
+                    if on_token is not None:
+                        try:
+                            on_token(piece)
+                        except Exception:  # pragma: no cover
+                            log.exception("on_token raised; ignored")
+        msg: dict = {"role": "assistant", "content": "".join(content)}
+        if reasoning:
+            msg["reasoning_content"] = "".join(reasoning)
+        if calls:
+            msg["tool_calls"] = [
+                {**c, "id": c["id"] or f"tc_{i}"} for i, c in sorted(calls.items())]
+        return self._ollama_shape(msg, finish, usage, timings)
+
+
+def parse_endpoint_ref(model_ref: str) -> Optional[tuple[str, Optional[str]]]:
+    """``@name`` -> ``(name, None)``; ``@name/model`` -> ``(name, model)``;
+    anything else -> ``None``. ``@`` never occurs in an Ollama tag."""
+    if not model_ref or not model_ref.startswith("@"):
+        return None
+    name, _, model = model_ref[1:].partition("/")
+    return (name, model or None) if name else None
+
+
+def served_model_of(base_url: str, *, api_key: Optional[str] = None,
+                    timeout: float = 10.0) -> Optional[str]:
+    """The first model id an OpenAI-compatible server lists, for an
+    endpoint reference that names none."""
+    from claude_hooks import provider_caps
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[: -len("/v1")]
+    hdrs = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    try:
+        status, body = provider_caps._request(f"{root}/v1/models",
+                                              headers=hdrs, timeout=timeout)
+    except (urllib.error.URLError, OSError):
+        return None
+    if status != 200 or not isinstance(body, dict):
+        return None
+    for item in body.get("data") or []:
+        if isinstance(item, dict) and item.get("id"):
+            return str(item["id"])
+    return None
+
+
+# --------------------------------------------------------------------- #
 # v1.5+: llamafile-backed agent ChatClient
 # --------------------------------------------------------------------- #
 
@@ -1375,6 +1662,8 @@ class LlamafileAgentChatClient:
 def make_agent_chat_client(
     model_ref: str,
     ollama_base_url: str,
+    *,
+    endpoints: Optional[dict] = None,
     **kwargs,
 ):
     """Pick an agent-loop-capable ChatClient for ``model_ref``.
@@ -1392,4 +1681,117 @@ def make_agent_chat_client(
         # A local llamafile has no WAN line to wait out.
         kwargs.pop("outage_wait_s", None)
         return LlamafileAgentChatClient(label, **kwargs)
+    ref = parse_endpoint_ref(model_ref)
+    if ref is not None:
+        name, model = ref
+        ep = (endpoints or {}).get(name)
+        if ep is None:
+            raise ValueError(
+                f"model {model_ref!r} names endpoint {name!r}, which is not "
+                f"configured (known: {', '.join(sorted(endpoints or {})) or 'none'})")
+        url = _ep_field(ep, "url")
+        backend = (_ep_field(ep, "backend") or "opencoti").lower()
+        api_key = _ep_field(ep, "api_key")
+        served = model or _ep_field(ep, "model")
+        if backend in ("ollama", "xollama"):
+            client = ChatClient(url, api_key=api_key, **kwargs)
+            client.served_model = served
+            return client
+        client = OpenAICompatChatClient(url, backend=backend,
+                                        api_key=api_key, **kwargs)
+        client.served_model = served or served_model_of(url, api_key=api_key) \
+            or name
+        return client
     return ChatClient(ollama_base_url, **kwargs)
+
+
+def route_key(model_ref: str) -> str:
+    """Which client serves ``model_ref``: one per ``llamafile://`` label,
+    one per endpoint reference, one shared Ollama client for the rest."""
+    if model_ref and model_ref.startswith("llamafile://"):
+        return model_ref
+    if parse_endpoint_ref(model_ref) is not None:
+        return model_ref
+    return "ollama"
+
+
+class ModelRoutingChatClient:
+    """One role's client when its models live on more than one backend.
+
+    Fan-out lanes reuse their role's client and only change ``model`` in
+    the payload, so a role whose extra models include an endpoint
+    reference or a ``llamafile://`` label needs each call routed by the
+    payload's model. Built only for such roles: a role whose models all
+    share a backend keeps the plain client it always had.
+
+    Per-call readouts (``last_usage``, ``last_timings``,
+    ``last_inference_s``) come from the client that served the last
+    call; ``total_inference_s`` is the sum over all of them.
+    """
+
+    def __init__(self, primary: str, factory: Callable[[str], Any]):
+        self._factory = factory
+        self._clients: dict[str, Any] = {}
+        self._primary = primary
+        self._last = self._for(primary)
+
+    def _for(self, model: Optional[str]):
+        key = route_key(model or self._primary)
+        client = self._clients.get(key)
+        if client is None:
+            client = self._factory(model or self._primary)
+            self._clients[key] = client
+        return client
+
+    def chat(self, payload: dict, *args, **kwargs) -> dict:
+        self._last = self._for((payload or {}).get("model"))
+        return self._last.chat(payload, *args, **kwargs)
+
+    def chat_streamed(self, payload: dict, *args, **kwargs) -> dict:
+        self._last = self._for((payload or {}).get("model"))
+        return self._last.chat_streamed(payload, *args, **kwargs)
+
+    def context_length(self, model: str):
+        return self._for(model).context_length(model)
+
+    def thinking_budget_message(self, model: str):
+        return self._for(model).thinking_budget_message(model)
+
+    def caps(self, model: str, **kw):
+        return self._for(model).caps(model, **kw)
+
+    def learned_output_ceiling(self, model: str):
+        return self._for(model).learned_output_ceiling(model)
+
+    def reset_inference_timer(self) -> None:
+        for c in self._clients.values():
+            if hasattr(c, "reset_inference_timer"):
+                c.reset_inference_timer()
+
+    @property
+    def total_inference_s(self) -> float:
+        return sum(getattr(c, "total_inference_s", 0.0)
+                   for c in self._clients.values())
+
+    def __getattr__(self, name: str):
+        return getattr(self._last, name)
+
+
+def make_role_chat_client(models: list[str], ollama_base_url: str, *,
+                          endpoints: Optional[dict] = None, **kwargs):
+    """The client for a role whose primary model is ``models[0]`` and
+    whose fan-out lanes may use the rest: a plain client when they all
+    share a backend, a :class:`ModelRoutingChatClient` otherwise."""
+    models = [m for m in models if m] or [""]
+    def factory(m: str):
+        return make_agent_chat_client(m, ollama_base_url,
+                                      endpoints=endpoints, **kwargs)
+    if len({route_key(m) for m in models}) <= 1:
+        return factory(models[0])
+    return ModelRoutingChatClient(models[0], factory)
+
+
+def _ep_field(ep, key: str):
+    if isinstance(ep, dict):
+        return ep.get(key)
+    return getattr(ep, key, None)

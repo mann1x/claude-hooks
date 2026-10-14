@@ -779,7 +779,7 @@ per-language entry the same way. The routes only matter when
 
 ### 2. Top-level menu (loop until Done)
 
-The menu has eight areas; AskUserQuestion caps at 4 options, so
+The menu has nine areas; AskUserQuestion caps at 4 options, so
 present it in rounds — round 1 offers the first three plus **More…**,
 and **More…** opens the next batch (ending with **Done**):
 
@@ -798,6 +798,8 @@ and **More…** opens the next batch (ending with **Done**):
    per-project `override_user_global` directive — see Subflow H
 8. **Tool surface** — which tools the council can reach and what each
    one needs before it runs — see Subflow I
+9. **Endpoints** — named opencoti / llama.cpp / xOllama / Ollama
+   servers a role can use as `@name` or `@name/<model>` — see Subflow J
 
 Loop back to step 1 after each successful change; exit on **Done**.
 
@@ -1049,6 +1051,22 @@ Always surface which scope a change landed in — read
 `active_config.scope` from the JSON and relay the CLI's stderr notice.
 
 ---
+
+### Subflow J — Endpoints
+
+Read the `endpoints` block from `config show` (keys are never shown,
+only `api_key_set`). Sub-actions:
+
+- **Add / edit** — ask for the name, URL and backend (`opencoti`,
+  `llamacpp`, `xollama`, `ollama`), optionally a served model and a key,
+  then `claude-consultants config set-endpoint <name> --url <u>
+  --backend <b> [--model <m>] [--api-key <k>]`.
+- **Use it for a role** — Subflow A's **Change model**, with
+  `@<name>` (the endpoint's served model) or `@<name>/<model>`. A role's
+  extra models may mix endpoints and Ollama tags; each lane goes to its
+  own server.
+- **Remove** — `claude-consultants config remove-endpoint <name>`.
+  Warn first if a role still names `@<name>`.
 
 ### Subflow I — Tool surface
 

@@ -152,7 +152,7 @@ def make_runner(*, ollama_base_url: str):
         # TracedChat wrapper and agent loop are unchanged.
         chat_clients = {
             r: TracedChat(
-                make_agent_chat_client(cfg.roles[r].model, ollama_base_url),
+                _role_client(cfg, r, ollama_base_url),
                 role=r, tracer=tracer,
             )
             for r in enabled
@@ -183,7 +183,8 @@ def make_runner(*, ollama_base_url: str):
                         coder_clients_by_model[m] = chat_clients["coder"]
                         continue
                     coder_clients_by_model[m] = TracedChat(
-                        make_agent_chat_client(m, ollama_base_url),
+                        make_agent_chat_client(m, ollama_base_url,
+                                               endpoints=cfg.endpoints),
                         role="coder", tracer=tracer,
                     )
 
@@ -672,7 +673,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 # v1.5+: dispatch based on the role's model_ref so
                 # cold-start follow-ups land on the right backend.
                 role_model = cfg.roles[role].model
-                raw = make_agent_chat_client(role_model, ollama_base_url)
+                raw = _role_client(cfg, role, ollama_base_url)
                 log.info(
                     "follow-up %s: cold ChatClient for role=%s "
                     "(no warm parent client; model=%s)",
@@ -708,7 +709,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
                         continue
                     raw = warm_coder_clients.get(m)
                     if raw is None:
-                        raw = make_agent_chat_client(m, ollama_base_url)
+                        raw = make_agent_chat_client(
+                            m, ollama_base_url, endpoints=cfg.endpoints)
                     coder_clients_by_model_fu[m] = TracedChat(
                         raw, role="coder", tracer=tracer,
                     )
@@ -1901,6 +1903,18 @@ def _write_failed_artifacts(state, cwd: str, question: str,
         storage.write_consultation(result, cwd=Path(cwd))
     except Exception as e:  # pragma: no cover
         log.warning("failed-artifact write failed: %s", e)
+
+
+def _role_client(cfg, role: str, ollama_base_url: str):
+    """The chat client for ``role``. Its fan-out lanes and fallbacks
+    reuse it with another ``model``, so when those models live on other
+    backends (an ``@endpoint``, a ``llamafile://`` label) the client
+    routes each call by its model; otherwise it is the plain client."""
+    from claude_hooks.get_advice.chat_client import make_role_chat_client
+    rc = cfg.roles[role]
+    return make_role_chat_client(
+        [rc.model, *(rc.extra_models or [])], ollama_base_url,
+        endpoints=getattr(cfg, "endpoints", None) or {})
 
 
 def default_ollama_url() -> str:
