@@ -142,18 +142,38 @@ def _positive(value: Any) -> bool:
     return isinstance(value, (int, float)) and value > 0
 
 
-def estimate_messages_tokens(messages: list[dict], model: str = "") -> int:
+def estimate_messages_tokens(messages: list[dict], model: str = "", *,
+                             tools: Optional[list] = None,
+                             session: Optional[str] = None) -> int:
     """Estimate the prompt cost of a message list.
 
     Delegates to :mod:`claude_hooks.token_calib` so reasoning is charged
     at its own ratio — the mix of prose and serialized tool output moves
     every turn, and a single ratio is wrong in the direction that lets a
     request be built too large.
+
+    ``tools`` are the schemas sent with the request: the provider counts
+    them, so the whole-request estimate must too. ``session`` anchors the
+    estimate on that conversation's last counted request.
     """
     if not messages:
         return 0
     return token_calib.estimate_request_tokens(
-        [m for m in messages if isinstance(m, dict)], model=model)
+        [m for m in messages if isinstance(m, dict)], tools=tools,
+        model=model, session=session)
+
+
+def estimate_tools_tokens(tools: Optional[list], model: str = "") -> int:
+    """What the tool schemas alone add to a request.
+
+    Compaction measures messages one at a time and cannot shrink the
+    schemas, so the room it aims for is the trigger minus this.
+    """
+    if not tools:
+        return 0
+    with_tools, _ = token_calib.measure_request_chars([], tools=tools)
+    without, _ = token_calib.measure_request_chars([])
+    return token_calib.estimate_tokens(max(0, with_tools - without), model)
 
 
 def observed_output_tokens(
@@ -287,7 +307,9 @@ def context_length_of(chat_client: Any, model: str) -> Optional[int]:
 
 def plan(chat_client: Any, model: str, messages: list[dict], *,
          target_output: Optional[int] = None,
-         retry_cap: Optional[int] = None) -> Budget:
+         retry_cap: Optional[int] = None,
+         tools: Optional[list] = None,
+         session: Optional[str] = None) -> Budget:
     """Decide the output budget for one call, and name what capped it.
 
     ``retry_cap`` is the ceiling a previous truncated attempt reported.
@@ -301,7 +323,8 @@ def plan(chat_client: Any, model: str, messages: list[dict], *,
     that motive is unchanged by not knowing the window. Backends clamp a
     ``num_predict`` larger than they can serve; none of them fail on it.
     """
-    prompt_tokens = estimate_messages_tokens(messages, model)
+    prompt_tokens = estimate_messages_tokens(messages, model, tools=tools,
+                                             session=session)
     ctx = context_length_of(chat_client, model)
     ask = int(target_output) if _positive(target_output) else MAX_OUTPUT_TOKENS
 
@@ -502,7 +525,8 @@ def compact_messages(messages: list[dict], *, keep_tokens: int,
 
 
 __all__ = ["Budget", "CompactionResult", "estimate_tokens",
-           "estimate_messages_tokens", "context_length_of", "plan",
+           "estimate_messages_tokens", "estimate_tools_tokens",
+           "context_length_of", "plan",
            "compact_messages", "observed_output_tokens",
            "preserve_recent_tokens", "compaction_trigger_tokens",
            "MAX_OUTPUT_TOKENS", "MIN_OUTPUT_TOKENS", "TARGET_OUTPUT_TOKENS",

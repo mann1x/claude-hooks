@@ -37,6 +37,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -1032,9 +1033,18 @@ _CONTINUE_INSTRUCTION = (
 )
 
 
+def _calibration_session(kind: str) -> str:
+    """A calibration key for one conversation: a tool loop, or a
+    single-shot call with its continuations. Unique, so two lanes on the
+    same model never read each other's anchor."""
+    return f"{kind}:{uuid.uuid4().hex[:12]}"
+
+
 def _observe_usage(messages: list[dict], response: dict,
                    prompt_tokens: int, completion_tokens: int,
-                   model: str) -> None:
+                   model: str, *, tools: Optional[list] = None,
+                   session: Optional[str] = None,
+                   context_window: Optional[int] = None) -> None:
     """Feed a real provider count back into the token ratios.
 
     Two separate calibrations, because prompt and reasoning do not
@@ -1049,30 +1059,42 @@ def _observe_usage(messages: list[dict], response: dict,
       reasoning — a turn that was mostly a tool call would teach it
       about JSON.
 
+    ``tools`` are the schemas the request carried — the provider counted
+    them, so the characters must include them or the ratio learns that
+    the same text costs more than it does. ``session`` keeps the anchor
+    on this conversation; ``context_window`` drops a count that cannot
+    be a prompt for it.
+
     Never raises: calibration is an optimisation, and a run that dies
     because it tried to get smarter about tokens is a worse outcome than
     one that stays on the conservative default.
     """
     try:
-        chars, reasoning_chars = token_calib.measure_request_chars(messages)
+        chars, reasoning_chars = token_calib.measure_request_chars(
+            messages, tools=tools or None)
         token_calib.observe_request_tokens(
-            chars, prompt_tokens, reasoning_chars, model)
+            chars, prompt_tokens, reasoning_chars, model,
+            session=session, context_window=context_window)
         if completion_tokens > 0:
             msg = ((response.get("choices") or [{}])[0].get("message") or {})
             thinking = capped_thinking.thinking_text(msg)
             produced = capped_thinking.produced_characters(msg)
             # "Mostly reasoning" — the caller's judgement, per
             # observe_thinking_tokens' contract.
-            if thinking and produced and len(thinking) / produced >= 0.6:
+            if (thinking and produced and len(thinking) / produced
+                    > token_calib.MOSTLY_REASONING_SHARE):
                 token_calib.observe_thinking_tokens(
-                    len(thinking), completion_tokens, model)
+                    len(thinking), completion_tokens, model,
+                    session=session)
     except Exception:  # pragma: no cover — never sink a call
         log.debug("token calibration failed; staying on defaults",
                   exc_info=True)
 
 
 def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
-                      role: Optional[str] = None
+                      role: Optional[str] = None,
+                      tools: Optional[list] = None,
+                      session: Optional[str] = None
                       ) -> tuple[list[dict], "budget.Budget"]:
     """Size the next call, compacting the history first if it no longer
     leaves room to answer.
@@ -1086,12 +1108,16 @@ def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
     so a later reader — the truncation verdict, a post-mortem — can ask
     what limited the reply rather than inferring it.
     """
-    plan = budget.plan(chat_client, model, messages)
+    plan = budget.plan(chat_client, model, messages, tools=tools,
+                       session=session)
     if plan.needs_compaction:
         log.warning("role=%s: %s — compacting history", role, plan.detail)
         keep = plan.trigger_tokens or max(
             0, (plan.context_length or 0)
             - budget.MAX_OUTPUT_TOKENS - budget.WINDOW_MARGIN_TOKENS)
+        # Compaction measures messages only and cannot shrink the tool
+        # schemas, so it aims for the trigger minus what they cost.
+        keep = max(0, keep - budget.estimate_tools_tokens(tools, model))
         previous = retrospective.previous_digest(messages)
 
         def _marker(dropped_msgs: list[dict], generation: int) -> dict:
@@ -1120,7 +1146,8 @@ def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
             model=model, make_marker=_marker)
         if result.changed:
             messages = result.messages
-            plan = budget.plan(chat_client, model, messages)
+            plan = budget.plan(chat_client, model, messages, tools=tools,
+                               session=session)
     token_calib.note_output_cap(plan.cap_report(), model)
     return messages, plan
 
@@ -1136,16 +1163,36 @@ def _loop_payload_budgeter(chat_client, model: str, *,
     whose history had grown past what the window could hold alongside
     an answer. Each iteration adds a tool result, so the plan has to be
     made per call, not once before the loop.
+
+    The returned function carries ``.observe``, the matching
+    ``LoopConfig.on_response``: every iteration's real prompt count
+    calibrates this loop's own session (anchor + ratio), and the next
+    ``_prepare`` estimates from that anchor. Before this only
+    ``_single_shot`` calibrated, so a role that spent its whole budget in
+    a tool loop never measured anything.
     """
+    session = _calibration_session(f"loop-{role or 'role'}")
+    window: dict = {}
+
     def _prepare(payload: dict) -> None:
         messages, plan = _plan_and_compact(
             chat_client, model, list(payload.get("messages") or []),
-            role=role)
+            role=role, tools=payload.get("tools") or None, session=session)
+        window["ctx"] = plan.context_length
         payload["messages"] = messages
         if plan.output_tokens:
             opts = dict(payload.get("options") or {})
             opts["num_predict"] = plan.output_tokens
             payload["options"] = opts
+
+    def _observe(payload: dict, response: dict) -> None:
+        pt, ct = _usage_from(response or {})
+        _observe_usage(list(payload.get("messages") or []), response or {},
+                       pt, ct, model, tools=payload.get("tools") or None,
+                       session=session, context_window=window.get("ctx"))
+
+    _prepare.observe = _observe  # type: ignore[attr-defined]
+    _prepare.session = session  # type: ignore[attr-defined]
     return _prepare
 
 
@@ -1178,8 +1225,9 @@ def _single_shot(chat_client, model: str, messages: list[dict],
     Token counts returned are summed across continuations, so a
     caller's accounting stays true.
     """
+    session = _calibration_session(f"single-{role or 'role'}")
     convo, plan = _plan_and_compact(chat_client, model, list(messages),
-                                    role=role)
+                                    role=role, session=session)
 
     text_parts: list[str] = []
     total_pt = total_ct = 0
@@ -1216,7 +1264,8 @@ def _single_shot(chat_client, model: str, messages: list[dict],
         # the provider just answered the question. Cheap, and it is the
         # difference between a ratio that drifts 1.7x high all session and
         # one that converges after the first call.
-        _observe_usage(convo, response, pt, ct, model)
+        _observe_usage(convo, response, pt, ct, model, session=session,
+                       context_window=plan.context_length)
         if recorder is not None and role is not None:
             try:
                 recorder.record_llm(
@@ -1604,6 +1653,7 @@ def _role_turn(chat_client, model: str, messages: list[dict],
                "stream": False, "think": think}
     try:
         from claude_hooks.agent_loop.runner import LoopConfig
+        _budgeter = _loop_payload_budgeter(chat_client, model, role=role)
         cfg = LoopConfig(
             max_iterations=ROLE_TOOL_MAX_ITERATIONS,
             max_tool_calls_per_turn=ROLE_TOOL_MAX_CALLS_PER_TURN,
@@ -1614,8 +1664,8 @@ def _role_turn(chat_client, model: str, messages: list[dict],
             # answer immediately. Forcing a first tool call would make
             # a critic that has nothing to verify burn a call proving it.
             force_first_tool_call=False,
-            prepare_payload=_loop_payload_budgeter(
-                chat_client, model, role=role),
+            prepare_payload=_budgeter,
+            on_response=_budgeter.observe,
         )
         loop_kwargs = dict(config=cfg, tool_specs=tool_specs,
                            chat_fn=chat_client.chat,
@@ -2403,14 +2453,16 @@ def researcher_node(state: dict, *,
 
     cfg = None
     if LoopConfig is not None:
+        _budgeter = _loop_payload_budgeter(chat_client, model,
+                                           role="researcher")
         cfg = LoopConfig(
             max_iterations=caps.researcher_loop_iters,
             force_answer_after=caps.researcher_force_answer_after,
             tools_available=True,
             think=think,
             force_first_tool_call=False,
-            prepare_payload=_loop_payload_budgeter(
-                chat_client, model, role="researcher"),
+            prepare_payload=_budgeter,
+            on_response=_budgeter.observe,
         )
 
     # Bind recorder callbacks to the loop_runner so per-iteration LLM
