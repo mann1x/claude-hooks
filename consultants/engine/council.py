@@ -38,6 +38,7 @@ import os
 import re
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -1091,6 +1092,57 @@ def _observe_usage(messages: list[dict], response: dict,
                   exc_info=True)
 
 
+#: Plan C5: sessions whose output cap went thin against the window and
+#: already forced one compaction for it (latched once per descent), and
+#: sessions whose last reply showed a silently truncated prompt.
+_STARVED_LATCH: "OrderedDict[str, bool]" = OrderedDict()
+_FORCE_NEXT: "OrderedDict[str, str]" = OrderedDict()
+_LATCH_MAX = 1024
+
+#: Ollama truncates an overflowing prompt instead of refusing it (fork
+#: ``f76029582``: a sub-agent ran 34 requests past its window). A provider
+#: count this close to the window that falls this far short of our
+#: estimate is read as that truncation.
+SILENT_TRUNCATION_EDGE = 0.85
+SILENT_TRUNCATION_SHORTFALL = 1.15
+
+
+def _bounded_set(book: "OrderedDict", key: str, value) -> None:
+    book[key] = value
+    book.move_to_end(key)
+    while len(book) > _LATCH_MAX:
+        book.popitem(last=False)
+
+
+def _starved_cap(plan: "budget.Budget", knobs: "budget.Knobs",
+                 session: Optional[str]) -> bool:
+    """Whether a thin, window-bound cap should force a compaction (plan C5,
+    fork ``247e72ce3``): once per descent — latched until the cap recovers."""
+    key = session or "-"
+    thin = (plan.window_bound and not plan.needs_compaction
+            and plan.output_tokens < int(knobs.output_room_min))
+    if not thin:
+        _STARVED_LATCH.pop(key, None)
+        return False
+    if key in _STARVED_LATCH:
+        return False
+    _bounded_set(_STARVED_LATCH, key, True)
+    return True
+
+
+def silently_truncated(estimate: int, prompt_tokens: int,
+                       context_length: Optional[int]) -> bool:
+    return bool(context_length and prompt_tokens
+                and prompt_tokens >= SILENT_TRUNCATION_EDGE * context_length
+                and estimate >= SILENT_TRUNCATION_SHORTFALL * prompt_tokens)
+
+
+class ContextOverflowUnrecovered(RuntimeError):
+    """The provider refused the request for its size again after a forced
+    compaction (plan C5). Named, so the role's failure says what happened."""
+    fault_class = "context_overflow"
+
+
 def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
                       role: Optional[str] = None,
                       tools: Optional[list] = None,
@@ -1099,6 +1151,7 @@ def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
                       think: Any = None,
                       recorder=None, round: int = 1,
                       lane_idx: Optional[int] = None,
+                      force: str = "",
                       ) -> tuple[list[dict], "budget.Budget"]:
     """Size the next call, compacting the history first if it no longer
     leaves room to answer.
@@ -1117,20 +1170,36 @@ def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
     stated in its system prompt once (``# Output Budget``).
     """
     knobs = knobs or budget.DEFAULT_KNOBS
+    from consultants.engine import compaction, history
+    settings = knobs.compaction or compaction.DEFAULT_SETTINGS
     plan = budget.plan(chat_client, model, messages, tools=tools,
                        session=session, knobs=knobs)
-    if plan.needs_compaction:
-        log.warning("role=%s: %s — compacting history", role, plan.detail)
+    # Plan C5: oversized tool results are middle-truncated and superseded
+    # reads rewritten (past 40% of the window) before anything is sized.
+    tidied = history.tidy(messages, context_length=plan.context_length,
+                          settings=settings)
+    if tidied is not messages:
+        messages = tidied
+        plan = budget.plan(chat_client, model, messages, tools=tools,
+                           session=session, knobs=knobs)
+    if not force and session and session in _FORCE_NEXT:
+        force = _FORCE_NEXT.pop(session)
+    if not force and _starved_cap(plan, knobs, session):
+        force = "starved-cap"
+    if plan.needs_compaction or force:
+        log.warning("role=%s: %s — compacting history", role,
+                    f"forced ({force})" if force and not plan.needs_compaction
+                    else plan.detail)
         # Plan C: the digest is written on this role's own client and
         # model (Scope has no other), serially, stall-protected under
         # phase=compaction, and aimed at a quarter of the free content.
-        from consultants.engine import compaction
         scope = compaction.Scope(
             chat_client=chat_client, model=model, role=role or "",
             recorder=recorder, round=round, lane_idx=lane_idx,
-            settings=knobs.compaction or compaction.DEFAULT_SETTINGS)
+            settings=settings)
         outcome = compaction.compact(scope, messages, plan=plan, tools=tools,
-                                     session=session)
+                                     session=session, reason=force or "trigger",
+                                     require_smaller=force == "overflow")
         if outcome.changed:
             messages = outcome.messages
             plan = budget.plan(chat_client, model, messages, tools=tools,
@@ -1140,7 +1209,6 @@ def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
             messages, plan.role_cap, plan.context_length,
             _stated_think_share(chat_client, model, think, plan.role_cap,
                                 plan.context_length))
-    token_calib.note_output_cap(plan.cap_report(), model)
     return messages, plan
 
 
@@ -1273,6 +1341,25 @@ def _budget_knobs(state: Optional[dict], role: Optional[str],
     return knobs
 
 
+def _reasoning_replay(chat_client, model: str,
+                      knobs: Optional["budget.Knobs"]) -> str:
+    """Past-turn reasoning on the wire for ``(role, model)`` (plan C4):
+    the setting, with ``all`` resolved against the server (a template
+    that drops the field gets ``inline``). ``none`` asks nothing."""
+    from consultants.engine import compaction
+    settings = (knobs.compaction if knobs is not None else None) \
+        or compaction.DEFAULT_SETTINGS
+    if settings.reasoning_replay == "none":
+        return "none"
+    from claude_hooks import reasoning_replay
+    try:
+        return reasoning_replay.resolve(settings.reasoning_replay,
+                                        chat_client, model)
+    except Exception:  # pragma: no cover — a probe never fails a role
+        log.exception("reasoning replay resolution failed; dropping reasoning")
+        return "none"
+
+
 def _loop_payload_budgeter(chat_client, model: str, *,
                            role: Optional[str] = None,
                            knobs: Optional["budget.Knobs"] = None,
@@ -1312,11 +1399,60 @@ def _loop_payload_budgeter(chat_client, model: str, *,
 
     def _observe(payload: dict, response: dict) -> None:
         pt, ct = _usage_from(response or {})
-        _observe_usage(list(payload.get("messages") or []), response or {},
-                       pt, ct, model, tools=payload.get("tools") or None,
+        msgs = list(payload.get("messages") or [])
+        estimate = budget.estimate_messages_tokens(
+            msgs, model, tools=payload.get("tools") or None, session=session)
+        if silently_truncated(estimate, pt, window.get("ctx")):
+            # Plan C5: never calibrate on a truncated count; fold before the
+            # next iteration instead.
+            log.warning("role=%s: prompt counted %d tok against an estimate "
+                        "of %d at a %s window — silently truncated; the next "
+                        "call compacts first", role, pt, estimate,
+                        window.get("ctx"))
+            _bounded_set(_FORCE_NEXT, session, "silent-truncation")
+            return
+        _observe_usage(msgs, response or {}, pt, ct, model,
+                       tools=payload.get("tools") or None,
                        session=session, context_window=window.get("ctx"))
 
+    def _recover(chat_fn):
+        """``chat_fn`` that survives one provider-refused overflow (plan
+        C5): compact with a smaller request required and send again; a
+        second refusal raises :class:`ContextOverflowUnrecovered`."""
+        def fn(payload: dict) -> dict:
+            try:
+                return chat_fn(payload)
+            except Exception as exc:
+                if getattr(exc, "fault_class", "") != "context_overflow":
+                    raise
+                before = list(payload.get("messages") or [])
+                messages, plan = _plan_and_compact(
+                    chat_client, model, before, role=role,
+                    tools=payload.get("tools") or None, session=session,
+                    knobs=knobs, think=payload.get("think"), recorder=recorder,
+                    round=round, lane_idx=lane_idx, force="overflow")
+                if messages == before:
+                    raise ContextOverflowUnrecovered(
+                        f"role={role}: the provider refused the request for "
+                        f"its size and nothing could be compacted: {exc}"
+                    ) from exc
+                payload["messages"] = messages
+                payload["options"] = _budget_options(payload.get("options"),
+                                                     plan, sampling)
+                try:
+                    return chat_fn(payload)
+                except Exception as exc2:
+                    if getattr(exc2, "fault_class", "") == "context_overflow":
+                        raise ContextOverflowUnrecovered(
+                            f"role={role}: the provider refused the request "
+                            f"for its size again after a forced compaction: "
+                            f"{exc2}") from exc2
+                    raise
+        fn.__wrapped__ = chat_fn  # type: ignore[attr-defined]
+        return fn
+
     _prepare.observe = _observe  # type: ignore[attr-defined]
+    _prepare.recover = _recover  # type: ignore[attr-defined]
     _prepare.session = session  # type: ignore[attr-defined]
     return _prepare
 
@@ -1397,6 +1533,37 @@ def _render_result_call(name: Optional[str], final: dict) -> Optional[str]:
     return typed_results.render(name, rec)
 
 
+def _single_shot_capped_note(chat_client, model: str, response: dict,
+                             payload: dict) -> Optional[str]:
+    """The condensed note for a single-shot turn whose reasoning ran to
+    its allowance (plan C4): the server's enforced budget, else the one
+    sent, else the whole output cap. ``None`` when the turn reasoned
+    within it, or the condenser produced nothing usable."""
+    try:
+        msg = ((response.get("choices") or [{}])[0].get("message") or {})
+        timings = response.get("timings") or {}
+        allowance = timings.get("think_budget_tokens")
+        if not (isinstance(allowance, int) and allowance > 0):
+            allowance = (payload.get("options") or {}).get("num_predict")
+        capped, _ = capped_thinking.detect(
+            msg, budget_tokens=allowance,
+            budget_message=_think_budget_message(chat_client, model),
+            completion_tokens=_usage_from(response)[1])
+        if capped is None:
+            return None
+        note, reason = capped_thinking.condense(
+            capped, chat_client=chat_client, model=model, tool_outcomes=[])
+        if note is None:
+            log.info("capped thinking on a single shot: no usable note (%s)",
+                     reason)
+            return None
+        return capped_thinking.as_thinking_block(note)
+    except Exception:  # pragma: no cover — a note never fails the call
+        log.exception("capped-thinking condensation failed; continuing "
+                      "without a note")
+        return None
+
+
 def _single_shot(chat_client, model: str, messages: list[dict],
                  *, think: Any = True,
                  recorder=None, role: Optional[str] = None,
@@ -1449,32 +1616,75 @@ def _single_shot(chat_client, model: str, messages: list[dict],
         from consultants.engine import typed_results
         result_spec = typed_results.result_tool_spec(result)
 
+    recompact = dict(role=role, session=session, knobs=knobs, think=think,
+                     recorder=recorder, round=round, lane_idx=lane_idx)
+    overflow_recovered = False
     for attempt in range(MAX_CONTINUATIONS + 1):
-        payload = {
-            "model": model,
-            "messages": convo,
-            "stream": False,
-            "think": think,
-            "options": _budget_options(None, plan, sampling),
-        }
-        if result_spec is not None:
-            payload["tools"] = [result_spec]
-            payload["tool_choice"] = "auto"
-        t0 = time.monotonic()
-        try:
-            response = chat_client.chat(payload)
-        except Exception as exc:
-            if recorder is not None and role is not None:
-                try:
-                    recorder.record_llm(
-                        role=role, round=round, lane_idx=lane_idx,
-                        model=model, request=payload, response=None,
-                        duration_ms=int((time.monotonic() - t0) * 1000),
-                        error=f"{type(exc).__name__}: {exc}",
-                    )
-                except Exception:  # pragma: no cover — must not mask
-                    log.exception("recorder.record_llm raised; ignored")
-            raise
+        while True:
+            payload = {
+                "model": model,
+                "messages": convo,
+                "stream": False,
+                "think": think,
+                "options": _budget_options(None, plan, sampling),
+            }
+            if result_spec is not None:
+                payload["tools"] = [result_spec]
+                payload["tool_choice"] = "auto"
+            estimate = budget.estimate_messages_tokens(
+                convo, model, tools=payload.get("tools"), session=session)
+            t0 = time.monotonic()
+            try:
+                response = chat_client.chat(payload)
+            except Exception as exc:
+                if recorder is not None and role is not None:
+                    try:
+                        recorder.record_llm(
+                            role=role, round=round, lane_idx=lane_idx,
+                            model=model, request=payload, response=None,
+                            duration_ms=int((time.monotonic() - t0) * 1000),
+                            error=f"{type(exc).__name__}: {exc}",
+                        )
+                    except Exception:  # pragma: no cover — must not mask
+                        log.exception("recorder.record_llm raised; ignored")
+                if getattr(exc, "fault_class", "") != "context_overflow":
+                    raise
+                # Plan C5: the provider refused the request for its size.
+                # Compact with a smaller request required and send once
+                # more; a second refusal is a named failure.
+                if overflow_recovered:
+                    raise ContextOverflowUnrecovered(
+                        f"role={role}: the provider refused the request for "
+                        f"its size again after a forced compaction: {exc}"
+                    ) from exc
+                overflow_recovered = True
+                new, plan = _plan_and_compact(chat_client, model, convo,
+                                              force="overflow", **recompact)
+                if new == convo:
+                    raise ContextOverflowUnrecovered(
+                        f"role={role}: the provider refused the request for "
+                        f"its size and nothing could be compacted: {exc}"
+                    ) from exc
+                convo = new
+                continue
+            pt, _ = _usage_from(response)
+            if (not overflow_recovered
+                    and silently_truncated(estimate, pt, plan.context_length)):
+                # Ollama cut the prompt instead of refusing it. The count is
+                # not a measurement of this request (never calibrated on),
+                # and the answer was written from a truncated history.
+                log.warning("role=%s: prompt counted %d tok against an "
+                            "estimate of %d at a %s window — silently "
+                            "truncated; compacting and asking again",
+                            role, pt, estimate, plan.context_length)
+                overflow_recovered = True
+                new, plan = _plan_and_compact(chat_client, model, convo,
+                                              force="silent-truncation",
+                                              **recompact)
+                if new != convo:
+                    convo = new
+                    continue
+            break
         dt_ms = int((time.monotonic() - t0) * 1000)
         pt, ct = _usage_from(response)
         total_pt += pt
@@ -1484,8 +1694,9 @@ def _single_shot(chat_client, model: str, messages: list[dict],
         # the provider just answered the question. Cheap, and it is the
         # difference between a ratio that drifts 1.7x high all session and
         # one that converges after the first call.
-        _observe_usage(convo, response, pt, ct, model, session=session,
-                       context_window=plan.context_length)
+        if not silently_truncated(estimate, pt, plan.context_length):
+            _observe_usage(convo, response, pt, ct, model, session=session,
+                           context_window=plan.context_length)
         if recorder is not None and role is not None:
             try:
                 recorder.record_llm(
@@ -1545,9 +1756,17 @@ def _single_shot(chat_client, model: str, messages: list[dict],
         # without a separator is deliberate: the model was told to
         # resume mid-sentence, so any inserted whitespace would land in
         # the middle of a word.
+        # Plan C4: a cut answer whose thinking ran to its allowance would
+        # reason the same ground again; its reasoning is condensed into a
+        # note handed back with the request to continue.
+        instruction = _CONTINUE_INSTRUCTION
+        block = _single_shot_capped_note(chat_client, model, response, payload)
+        if block:
+            instruction += ("\n\n"
+                            + capped_thinking.as_discarded_turn_note(block))
         convo = convo + [
             {"role": "assistant", "content": "".join(text_parts)},
-            {"role": "user", "content": _CONTINUE_INSTRUCTION},
+            {"role": "user", "content": instruction, "_harness": True},
         ]
         # What capped the turn decides what happens next.
         #
@@ -1938,9 +2157,10 @@ def _role_turn(chat_client, model: str, messages: list[dict],
             prepare_payload=_budgeter,
             on_response=_budgeter.observe,
             thinking_budget_message=_think_budget_message(chat_client, model),
+            reasoning_replay=_reasoning_replay(chat_client, model, knobs),
         )
         loop_kwargs = dict(config=cfg, tool_specs=tool_specs,
-                           chat_fn=chat_client.chat,
+                           chat_fn=_budgeter.recover(chat_client.chat),
                            tool_executor=tool_executor)
         if on_iter_cb is not None:
             try:
@@ -2766,6 +2986,8 @@ def researcher_node(state: dict, *,
             prepare_payload=_budgeter,
             on_response=_budgeter.observe,
             thinking_budget_message=_think_budget_message(chat_client, model),
+            reasoning_replay=_reasoning_replay(
+                chat_client, model, _budget_knobs(state, "researcher", model)),
         )
 
     # Bind recorder callbacks to the loop_runner so per-iteration LLM
@@ -2870,10 +3092,12 @@ def researcher_node(state: dict, *,
         # Tests pass a stub loop_runner; inspect its signature so we
         # only forward the new callbacks when the runner accepts them.
         # Default `claude_hooks.agent_loop.runner.run_loop` does.
+        recover = getattr(getattr(cfg, "prepare_payload", None), "recover",
+                          None)
         loop_kwargs = dict(
             config=cfg,
             tool_specs=tool_specs,
-            chat_fn=chat_fn,
+            chat_fn=recover(chat_fn) if callable(recover) else chat_fn,
             tool_executor=tool_executor,
         )
         if on_iter_cb is not None or on_tool_cb is not None:

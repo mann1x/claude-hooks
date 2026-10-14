@@ -148,8 +148,6 @@ class _Calibration:
     #: share of them) of the request ``request_tokens`` was counted for.
     request_chars: Optional[int] = None
     request_reasoning_chars: int = 0
-    output_cap: Optional["OutputCapReport"] = None
-    context_overflow: Optional["ContextOverflowReport"] = None
 
 
 #: One calibration per model. ``""`` is the entry for a caller that
@@ -268,41 +266,6 @@ class ContextOverflowReport:
             "remaining_context": self.remaining_context,
             "min_output_tokens": self.min_output_tokens,
         }
-
-
-def note_output_cap(report: OutputCapReport, model: str = "") -> None:
-    """Record which term capped the reply on the request going out.
-
-    Read rather than consumed, unlike an overflow report: this is a
-    standing fact about the last request, overwritten by the next. A
-    reader asking "was the cap that just truncated this turn the
-    window's?" wants the answer to survive being asked.
-    """
-    _for(model).output_cap = report
-
-
-def last_output_cap(model: str = "") -> Optional[OutputCapReport]:
-    return _for(model).output_cap
-
-
-def note_context_overflow(report: ContextOverflowReport,
-                          model: str = "") -> None:
-    _for(model).context_overflow = report
-
-
-def consume_context_overflow(
-        model: str = "") -> Optional[ContextOverflowReport]:
-    """Take the pending overflow report and clear it.
-
-    Consumed rather than read so a single overflow forces a single
-    compaction: left set, it would force one on every following turn,
-    including the ones the compaction it triggered already made room for.
-    """
-    state = _for(model)
-    with _lock:
-        report = state.context_overflow
-        state.context_overflow = None
-        return report
 
 
 # --------------------------------------------------------------------- #
@@ -586,8 +549,6 @@ __all__ = [
     "release_session", "anchored_request_tokens",
     "OUTPUT_CAP_SOURCES", "WINDOW_BOUND_SOURCES",
     "OutputCapReport", "ContextOverflowReport",
-    "note_output_cap", "last_output_cap",
-    "note_context_overflow", "consume_context_overflow",
     "chars_per_token", "thinking_chars_per_token",
     "estimate_tokens", "estimate_thinking_tokens",
     "observe_thinking_tokens", "observe_request_tokens",

@@ -112,24 +112,6 @@ class TestOutputCapAttribution(unittest.TestCase):
                        "uncapped"):
             self.assertFalse(tc.OutputCapReport(source=source).window_bound)
 
-    def test_cap_is_read_not_consumed(self):
-        """A standing fact about the last request, overwritten by the
-        next — a reader asking 'was that cap the window's?' wants the
-        answer to survive being asked."""
-        tc.note_output_cap(tc.OutputCapReport(source="requested"), "m")
-        self.assertIsNotNone(tc.last_output_cap("m"))
-        self.assertIsNotNone(tc.last_output_cap("m"))
-
-    def test_overflow_is_consumed_not_read(self):
-        """Consumed so a single overflow forces a single compaction;
-        left set it would force one on every following turn, including
-        the ones it had already made room for."""
-        tc.note_context_overflow(tc.ContextOverflowReport(
-            context_window=1000, estimated_input_tokens=999,
-            remaining_context=1, min_output_tokens=100), "m")
-        self.assertIsNotNone(tc.consume_context_overflow("m"))
-        self.assertIsNone(tc.consume_context_overflow("m"))
-
 
 class TestRequestMeasurement(unittest.TestCase):
     def test_reasoning_chars_are_counted_under_every_spelling(self):

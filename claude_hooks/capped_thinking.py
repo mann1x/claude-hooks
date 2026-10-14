@@ -436,6 +436,24 @@ def as_thinking_block(note: str) -> str:
     return f"{CONDENSED_THINKING_LEAD_IN}\n\n{note}"
 
 
+#: Said wherever a harness message quotes the model's own past reasoning
+#: (plan C4, fork ``a16e35478``). The reasoning of an earlier turn is not
+#: carried into the next request, so a model told about it went looking
+#: for it, did not find it, and treated the message as suspect.
+REASONING_NOT_CARRIED = (
+    "Your reasoning from that turn is not carried into this request, so "
+    "you will not find it above; this note is the only copy of it you "
+    "have. Take it as given rather than looking for it.")
+
+
+def as_discarded_turn_note(block: str) -> str:
+    """A condensed block (:func:`as_thinking_block`) for a turn the loop
+    is about to throw away (a cut answer being continued, a turn being
+    re-asked): handed back in the request that replaces it, framed as the
+    model's own and said to be the only copy."""
+    return f"{REASONING_NOT_CARRIED}\n\n{block}"
+
+
 __all__ = [
     "CAP_PROXIMITY", "CONDENSED_THINKING_MAX_CHARS",
     "CONDENSED_THINKING_MAX_OUTPUT_TOKENS", "CONDENSED_THINKING_LEAD_IN",
@@ -445,4 +463,5 @@ __all__ = [
     "budget_message_marker", "ends_with_budget_message",
     "is_degenerate_note", "detect", "condense",
     "build_condensation_messages", "as_thinking_block",
+    "REASONING_NOT_CARRIED", "as_discarded_turn_note",
 ]

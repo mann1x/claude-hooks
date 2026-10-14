@@ -686,7 +686,9 @@ def render_marker(digest: Digest, dropped: int, *,
     if digest.retrospective.strip():
         parts.append(
             "Retrospective on the work this summary replaces — your own "
-            "assessment, carried forward:\n\n"
+            "assessment, carried forward. It was written from reasoning "
+            "that is not carried into this request; this is the only record "
+            "of it:\n\n"
             + digest.retrospective.strip() + "\n")
     if digest.summary.strip():
         parts.append("Context summary:\n\n" + digest.summary.strip() + "\n")

@@ -872,8 +872,16 @@ def overhead_tokens(messages: list[dict], tools: Optional[list],
 
 def compact(scope: Scope, messages: list[dict], *, plan: "budget.Budget",
             tools: Optional[list] = None, session: Optional[str] = None,
+            reason: str = "trigger", require_smaller: bool = False,
             ) -> Outcome:
-    """Fold ``messages`` for the next call of ``scope``'s lane."""
+    """Fold ``messages`` for the next call of ``scope``'s lane.
+
+    ``reason`` names why (``trigger``, ``starved-cap``, ``overflow``,
+    ``silent-truncation``). ``require_smaller`` is the provider-refused
+    overflow path (plan C5, fork ``compaction.ts:1633-1767``): the
+    deterministic basic fold is the floor, then one agentic attempt, kept
+    only if it is smaller than the refused request and under the trigger
+    — the model may not survive a digest the basic fold already beats."""
     model = scope.model
     s = scope.settings
     with _lock_for(session):
@@ -887,8 +895,8 @@ def compact(scope: Scope, messages: list[dict], *, plan: "budget.Budget",
             share=float(s.target_share))
         previous = retrospective.previous_digest(messages)
         report: dict = {"flow": s.flow, "placement": s.placement,
-                        "before": before, "target": target, "trigger": trigger,
-                        "context_length": ctx}
+                        "reason": reason, "before": before, "target": target,
+                        "trigger": trigger, "context_length": ctx}
         digests: list = []
 
         def marker_for(tail: bool):
@@ -929,6 +937,18 @@ def compact(scope: Scope, messages: list[dict], *, plan: "budget.Budget",
                     out, after = rescue.messages, r_after
 
         changed = result.changed
+        if require_smaller:
+            basic = budget.compact_messages(
+                messages, keep_tokens=target, context_length=ctx, model=model,
+                overhead_tokens=overhead)
+            b_after = (budget.estimate_messages_tokens(basic.messages, model)
+                       if basic.changed else before)
+            agentic_ok = changed and after < before and after <= trigger
+            report["overflow"] = {"basic_after": b_after,
+                                  "agentic_after": after if changed else None,
+                                  "taken": "agentic" if agentic_ok else "basic"}
+            if not agentic_ok and basic.changed and b_after < before:
+                out, after, changed = basic.messages, b_after, True
         if changed and after >= before:
             log.warning("role=%s: compaction did not shrink the history "
                         "(~%d -> ~%d tok); discarding the fold",

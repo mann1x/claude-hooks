@@ -662,7 +662,6 @@ def plan(chat_client: Any, model: str, messages: list[dict], *,
             remaining_context=max(0, available),
             min_output_tokens=MIN_OUTPUT_TOKENS,
         )
-        token_calib.note_context_overflow(overflow, model)
         return Budget(
             ctx, prompt_tokens, ask, True,
             cap_source="context-overflow",

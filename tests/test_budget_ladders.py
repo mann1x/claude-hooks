@@ -140,11 +140,14 @@ class TestCapAttribution(unittest.TestCase):
         self.assertTrue(p.window_bound)
         self.assertTrue(p.needs_compaction)
 
-    def test_overflow_is_recorded_for_the_next_planner(self):
+    def test_overflow_is_reported_on_the_plan(self):
+        """Plan C5: the overflow rides on the plan the caller acts on, not
+        a per-model global that fan-out lanes on one model would share."""
         big = "x" * (39_000 * 3)
-        budget.plan(_Client(40_000), "m",
-                    [{"role": "user", "content": big}])
-        self.assertIsNotNone(token_calib.consume_context_overflow("m"))
+        p = budget.plan(_Client(40_000), "m",
+                        [{"role": "user", "content": big}])
+        self.assertIsNotNone(p.overflow)
+        self.assertFalse(hasattr(token_calib, "consume_context_overflow"))
 
     def test_past_the_trigger_but_still_fitting_is_window_bound(self):
         """The case the old 'does the prompt fit?' test waved through."""

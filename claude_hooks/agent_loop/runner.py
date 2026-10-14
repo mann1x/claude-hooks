@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from claude_hooks import capped_thinking, truncation
+from claude_hooks import capped_thinking, reasoning_replay, truncation
 
 log = logging.getLogger("claude_hooks.agent_loop")
 
@@ -85,6 +85,12 @@ class LoopConfig:
     # a truncated tool-call turn is discarded by the existing arg-parse
     # guard, which is the correct handling for half-written arguments.
     max_answer_continuations: int = 2
+
+    # Past-turn reasoning on the wire (plan C4): "none" drops it (the
+    # default and the pre-C4 behaviour), "all" keeps the field, "inline"
+    # puts it in the content as <think>…</think>. Callers resolve "all"
+    # against the server first (claude_hooks.reasoning_replay.resolve).
+    reasoning_replay: str = "none"
 
     # Called with the payload before every chat_fn call in the loop, and
     # may rewrite it in place (compact ``messages``, size
@@ -293,9 +299,19 @@ def _continue_truncated_answer(final: dict, payload: dict, chat_fn: ChatFn,
             "agent loop: answer truncated on iter %d (%s) — "
             "continuing (%d/%d)", iter_idx, cut.detail, n + 1, budget,
         )
+        # The discarded-turn path (plan C4): a cut answer is usually a turn
+        # whose reasoning ran to its budget, and the continuation would
+        # otherwise reason the same ground again from nothing.
+        cut_msg = ((result.get("choices") or [{}])[0].get("message") or {})
+        note = _capped_thinking_note(cut_msg, result, payload, config, chat_fn,
+                                     iteration=iter_idx)
+        instruction = CONTINUE_ANSWER_INSTRUCTION
+        if note:
+            instruction = (CONTINUE_ANSWER_INSTRUCTION + "\n\n"
+                           + capped_thinking.as_discarded_turn_note(note))
         messages = messages + [
             {"role": "assistant", "content": "".join(parts)},
-            {"role": "user", "content": CONTINUE_ANSWER_INSTRUCTION},
+            {"role": "user", "content": instruction, "_harness": True},
         ]
         cont_payload = dict(payload)
         cont_payload["messages"] = messages
@@ -358,17 +374,53 @@ def merge_tools(existing: Optional[list[dict]],
     ]
 
 
+#: Every this-many repeats of a stubbed call, the real result is served
+#: again (the fork's ``unchanged-reads.ts``): a model that keeps asking
+#: may no longer have the copy the stub points at.
+RESERVE_EVERY = 4
+
+#: Calls that change something: after one, earlier results may be stale,
+#: so nothing is answered from memory any more.
+_WRITE_PREFIXES = ("write_", "edit_", "apply_", "run_", "delete_", "create_",
+                   "move_", "patch")
+
+
+def is_write_tool(name: str) -> bool:
+    return (name or "").lower().startswith(_WRITE_PREFIXES)
+
+
+def dedup_key(name: str, args: Any) -> str:
+    """``name|arguments`` with the arguments in canonical JSON, so a
+    reordered or re-spaced repeat is still the same call."""
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except (TypeError, ValueError):
+            return f"{name}|{args}"
+    try:
+        return f"{name}|{json.dumps(args, sort_keys=True, separators=(',', ':'))}"
+    except (TypeError, ValueError):
+        return f"{name}|{args}"
+
+
 def execute_tool_calls(tool_calls: list[dict], cwd: str,
                        seen: dict[str, str],
                        tool_executor: ToolExecutor,
                        *,
-                       on_tool: Optional[OnTool] = None) -> list[dict]:
+                       on_tool: Optional[OnTool] = None,
+                       repeats: Optional[dict[str, int]] = None) -> list[dict]:
     """Run each tool and return ``role: tool`` messages.
 
     Duplicate (name+args) calls within a single agent loop return a
     short stub pointing the model back at the prior result. Models
     (notably gemma4-98e) will otherwise loop on the same tool call
     dozens of times, exploding context and wall time.
+
+    Plan C5: the key is the canonical arguments; every
+    :data:`RESERVE_EVERY`-th repeat (counted in ``repeats``) serves the
+    real result again; and a call that writes clears ``seen``, because an
+    earlier result may no longer be true. ``run_loop`` also clears it on
+    compaction, when the result the stub points at was folded away.
 
     When ``on_tool`` is set, it fires once per tool call (real and
     deduped) with ``(name, args_str, output, duration_ms, error)``.
@@ -383,9 +435,13 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
         args_str = fn.get("arguments") or "{}"
         if isinstance(args_str, dict):
             args_str = json.dumps(args_str)
-        key = f"{name}|{args_str}"
+        key = dedup_key(name, args_str)
         err: Optional[str] = None
-        if key in seen:
+        reserve = False
+        if key in seen and repeats is not None:
+            repeats[key] = repeats.get(key, 0) + 1
+            reserve = repeats[key] % RESERVE_EVERY == 0
+        if key in seen and not reserve:
             output = (
                 f"(duplicate: you already called {name}({args_str[:80]}). "
                 "Use that prior result and continue. Do not repeat this call.)"
@@ -411,6 +467,10 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
                 name, args_str[:80], len(output), dt_ms,
             )
             seen[key] = output
+            if is_write_tool(name):
+                seen.clear()
+                if repeats is not None:
+                    repeats.clear()
         if on_tool is not None:
             try:
                 on_tool(name, args_str, output, dt_ms, err)
@@ -487,13 +547,16 @@ def run_loop(
     force_first_retried = False
     result_invalid_sent = False
     seen_calls: dict[str, str] = {}
+    repeats: dict[str, int] = {}
+    compaction_gen = 0
 
     if config.tools_available and preseed_builder is not None:
         preseed = preseed_builder(cwd)
         if preseed is not None:
-            preseed_msgs, dedup_key, dedup_content = preseed
+            preseed_msgs, preseed_key, dedup_content = preseed
             payload["messages"] = list(payload["messages"]) + preseed_msgs
-            seen_calls[dedup_key] = dedup_content
+            name, _, args = str(preseed_key).partition("|")
+            seen_calls[dedup_key(name, args)] = dedup_content
             has_called_tool = True
             log.info(
                 "preseed: injected %d synthetic message(s) (%d chars), "
@@ -533,6 +596,16 @@ def run_loop(
             except Exception:
                 log.exception("prepare_payload raised on iter %d; sending "
                               "the payload unprepared", i)
+            gen = max((int(m.get("_compaction_generation") or 1)
+                       for m in payload.get("messages") or []
+                       if isinstance(m, dict) and m.get("_compaction_marker")),
+                      default=0)
+            if gen > compaction_gen:
+                # The results the duplicate stub points at may be folded
+                # away: answer repeats for real again (plan C5).
+                compaction_gen = gen
+                seen_calls.clear()
+                repeats.clear()
         t_iter = time.monotonic()
         final = chat_fn(payload)
         iter_ms = int((time.monotonic() - t_iter) * 1000)
@@ -568,13 +641,16 @@ def run_loop(
                 )
                 force_first_retried = True
                 prior_content = msg.get("content") or ""
+                retry = config.force_first_retry_message
+                note = _capped_thinking_note(msg, final, payload, config,
+                                             chat_fn, iteration=i)
+                if note:
+                    retry += ("\n\n"
+                              + capped_thinking.as_discarded_turn_note(note))
                 payload = dict(payload)
                 payload["messages"] = list(payload["messages"]) + [
                     {"role": "assistant", "content": prior_content},
-                    {
-                        "role": "user",
-                        "content": config.force_first_retry_message,
-                    },
+                    {"role": "user", "content": retry, "_harness": True},
                 ]
                 continue
             final = _continue_truncated_answer(
@@ -647,16 +723,19 @@ def run_loop(
         # its place; otherwise it goes, as before.
         note = _capped_thinking_note(
             msg, final, payload, config, chat_fn, iteration=i)
-        for k in capped_thinking.token_calib.REASONING_KEYS:
-            clean_msg.pop(k, None)
         if note:
+            for k in capped_thinking.token_calib.REASONING_KEYS:
+                clean_msg.pop(k, None)
             clean_msg["content"] = note
+        else:
+            clean_msg = reasoning_replay.apply(
+                clean_msg, getattr(config, "reasoning_replay", "none"))
         payload["messages"] = list(payload["messages"]) + [clean_msg]
         runnable = [tc for tc in tool_calls if tc not in results_called]
         payload["messages"].extend(
             execute_tool_calls(
                 runnable, cwd, seen_calls, tool_executor,
-                on_tool=on_tool,
+                on_tool=on_tool, repeats=repeats,
             )
         )
         for tc in results_called:

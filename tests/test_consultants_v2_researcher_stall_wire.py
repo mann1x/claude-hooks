@@ -80,7 +80,9 @@ class TestResearcherV1Parity(unittest.TestCase):
         )
         # ``is`` fails on bound methods (fresh wrapper per access);
         # ``==`` compares (instance, func) tuples which is what we want.
-        self.assertEqual(seen["chat_fn"], client.chat)
+        # Plan C5 wraps it in the one-shot overflow recovery only.
+        self.assertEqual(getattr(seen["chat_fn"], "__wrapped__", None),
+                         client.chat)
 
     def test_legacy_client_without_chat_streamed_uses_plain_chat(self):
         """Even with runtime_control on state, a legacy client
@@ -120,7 +122,9 @@ class TestResearcherV1Parity(unittest.TestCase):
         # Pin the current behavior here so a future change is
         # intentional. (``==`` over ``is`` because bound methods get
         # a fresh wrapper per attribute access.)
-        self.assertEqual(seen["chat_fn"], client.chat)
+        # Plan C5 wraps it in the one-shot overflow recovery only.
+        self.assertEqual(getattr(seen["chat_fn"], "__wrapped__", None),
+                         client.chat)
 
 
 class TestResearcherStallProtectionWired(unittest.TestCase):
