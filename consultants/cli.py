@@ -429,6 +429,19 @@ def cmd_list(args, base: str) -> int:
     return 0
 
 
+def cmd_gc(args, base: str) -> int:
+    """Local sweep of a project's council leftovers — does not hit the
+    engine. Removes ``coder-out/`` trees untouched for ``--days`` and
+    empty session subdirectories; never a session's records, never a
+    council still in the in-flight index."""
+    from consultants.server.session_gc import sweep_project
+    cwd = str(Path(args.cwd or os.getcwd()).resolve())
+    actions = sweep_project(cwd, ttl_days=args.days, dry_run=args.dry_run)
+    print(json.dumps({"ok": True, "cwd": cwd, "dry_run": args.dry_run,
+                      "actions": actions}, indent=2))
+    return 0
+
+
 def cmd_show(args, base: str) -> int:
     """Local read of a session's summary.md — does not hit the
     engine. Useful when the service is down.
@@ -1993,6 +2006,18 @@ def build_parser() -> argparse.ArgumentParser:
     l_.add_argument("--cwd", help="Project root (default: cwd).")
     l_.add_argument("--limit", type=int, default=50)
     l_.set_defaults(fn=cmd_list)
+
+    # gc
+    gc_ = sub.add_parser(
+        "gc", help="Remove stale coder-out/ trees and empty session "
+                   "dirs of a project (local; records are kept).")
+    gc_.add_argument("--cwd", help="Project root (default: cwd).")
+    gc_.add_argument("--days", type=float, default=30.0,
+                     help="Age of the newest file in a coder-out/ tree "
+                          "before it is removed (default 30).")
+    gc_.add_argument("--dry-run", action="store_true",
+                     help="Report what would be removed; remove nothing.")
+    gc_.set_defaults(fn=cmd_gc)
 
     # show
     sh = sub.add_parser(

@@ -19,17 +19,32 @@ from typing import Any, Callable, Optional
 log = logging.getLogger("consultants.tool_surface")
 
 
-def _shared(executor, read_only=frozenset()):
+def _shared(executor, read_only=frozenset(), runtime_permissions=None):
     """Put the run's read cache in front of ``executor`` — one per
     ``build_tool_surface`` call, i.e. one per council run, shared by
-    all of its lanes (see ``tool_cache``)."""
+    all of its lanes (see ``tool_cache``).
+
+    A tool the operator pinned to anything but ``auto`` through
+    ``POST /control`` skips the cache, so the gate sees every call."""
     from consultants.server.tool_cache import SharedReadCache
-    return SharedReadCache(executor, read_only=frozenset(read_only))
+    uncached_when = None
+    if runtime_permissions is not None:
+        def uncached_when(name: str) -> bool:
+            level = (runtime_permissions() or {}).get(name)
+            return level is not None and level not in ("auto", "allow")
+    return SharedReadCache(executor, read_only=frozenset(read_only),
+                           uncached_when=uncached_when)
 
 
 def build_tool_surface(cfg: Any, *, extra_roots: tuple[str, ...] = (),
-                       approval_fn: Optional[Callable] = None):
+                       approval_fn: Optional[Callable] = None,
+                       runtime_permissions: Optional[Callable[[], dict]] = None):
     """Build ``(tool_specs, tool_executor, registry)`` for one session.
+
+    ``runtime_permissions`` is read on every tool call (normally
+    ``RunControl.tool_permissions``), so ``POST /control`` reaches the
+    gate of a council that is already running. Without it the gate
+    never sees ``runtime_control.tool_permissions`` at all.
 
     ``approval_fn`` is the hook the interrupt wiring plugs into. Until
     it is supplied the registry refuses any ``ask_*`` tool rather than
@@ -97,8 +112,10 @@ def build_tool_surface(cfg: Any, *, extra_roots: tuple[str, ...] = (),
         log.info("tool surface: %d tools from %d provider(s): %s",
                  len(registry.tool_names()), len(providers),
                  ", ".join(p.name for p in providers))
-        return registry.specs(), _shared(registry.as_executor(),
-                                          registry.gate.read_only_tools), registry
+        return registry.specs(), _shared(
+            registry.as_executor(runtime_permissions=runtime_permissions),
+            registry.gate.read_only_tools,
+            runtime_permissions=runtime_permissions), registry
     except Exception:
         log.exception(
             "tool registry construction failed; falling back to the "

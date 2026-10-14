@@ -178,16 +178,32 @@ class ToolRegistry:
             return False
 
     # ------------------------------------------------------------------ #
-    def as_executor(self, *, runtime_permissions: Optional[dict] = None):
+    def as_executor(self, *, runtime_permissions=None):
         """Adapt to the ``(name, args, cwd) -> str`` executor signature
         that ``agent_loop.runner`` and every existing call site expect.
 
         This is what keeps M-A a drop-in: callers keep passing an
         executor callable and never learn the registry exists.
+
+        ``runtime_permissions`` is a dict, or a zero-argument callable
+        returning one. A callable is read on every call, which is what
+        lets ``POST /control`` tighten a council that is already
+        running; a dict is fixed when the executor is built.
         """
         def _executor(name: str, raw_args: str, cwd: str) -> str:
+            perms = runtime_permissions
+            if callable(perms):
+                try:
+                    perms = perms()
+                except Exception:
+                    # A broken source must not silently drop an
+                    # operator's deny: refuse instead.
+                    log.exception("runtime permission source raised; "
+                                  "refusing %s", name)
+                    return (f"error: tool {name!r} refused: the live "
+                            f"permission source failed")
             return self.dispatch(name, raw_args, cwd,
-                                 runtime_permissions=runtime_permissions)
+                                 runtime_permissions=perms)
         return _executor
 
     def close(self) -> None:

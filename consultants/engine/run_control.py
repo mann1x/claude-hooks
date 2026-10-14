@@ -109,6 +109,28 @@ class RunControl:
         #: for tests that need to prove the gate actually fired.
         self.skipped: list[str] = []
         self.paused_roles: list[str] = []
+        # Live copy of ``runtime_control.tool_permissions``. The graph
+        # channel cannot be read from inside a running ``invoke``
+        # (``update_state`` never reaches it), so the tool gate reads
+        # this instead; ``POST /control`` writes both.
+        self._tool_permissions: dict[str, str] = {}
+
+    # ------------------------------------------------------------------ #
+    # Tool permissions (HTTP thread writes, executor threads read)
+    # ------------------------------------------------------------------ #
+    def set_tool_permissions(self, perms: Optional[dict]) -> None:
+        """Merge ``perms`` into the live map, the same deep-merge the
+        ``runtime_control`` reducer applies to the graph channel."""
+        if not perms:
+            return
+        with self._lock:
+            self._tool_permissions.update(
+                {str(k): str(v) for k, v in perms.items()})
+
+    def tool_permissions(self) -> dict:
+        """A snapshot for one gate decision."""
+        with self._lock:
+            return dict(self._tool_permissions)
 
     # ------------------------------------------------------------------ #
     # Requests (HTTP thread)
