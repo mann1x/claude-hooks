@@ -468,6 +468,21 @@ on the repo's ext4. The P0 probe in section 6 does exactly that. If confirmed,
 a one-option fix restores overlayfs on this host, and the L2 ptrace fallback is
 unnecessary for it.
 
+**Measured 2026-10-14 (`scripts/sandbox_probe.py --overlay`, Milestone E1):
+the hypothesis is refuted.**
+
+- As real root, every overlay variant works.
+- Inside a user namespace, with the lower layer on the host filesystem (ext4 here):
+  - an upper on tmpfs fails copy-up with EOVERFLOW under `xino=auto` and `xino=off` alike, with or without `inode32`;
+  - an upper on the host filesystem refuses to mount ("cannot mount overlay read-only").
+- With both lower and upper on tmpfs inside the namespace, it works.
+- So the trigger is a host-filesystem lower inside a user namespace, not `XINO_AUTO`/`TMPFS_INODE64` and not quotas.
+- Consequence for E3: an unprivileged overlay over a repo is not a usable lane view on this kernel. Lane views use:
+  - a git worktree;
+  - a reflink clone (XFS `backup_models`: works; ext4 repo: no reflink);
+  - a capped copy;
+  - or an overlay mounted by a privileged helper before the namespace drops capabilities.
+
 ### 3.2 pandorum (Windows)
 
 `ver`: Windows 10 **19045** (22H2). C: is **NTFS**. Dev Drive / ReFS block

@@ -69,6 +69,7 @@ after `/consultants`:
 | `accept`     | accept     | Drop the verb; mark the consultancy (rest = sid) ACCEPTED.     |
 | `grant`      | grant      | Drop the verb; rest = `[sid] [N]`; raise that consultancy's cap by N now. |
 | `config`     | config     | Drop the verb; run **config** flow with the rest as sub-args.  |
+| `gc`         | gc         | Run `claude-consultants gc [--days N] [--dry-run]`: remove `coder-out/` trees untouched for N days (default 30) and empty session dirs. Use `--dry-run` first and show the list. |
 | `account`    | account    | Run `claude-consultants account [--model M ...]`; show the plan and, per cloud model, window / max output / thinking values, flagging `plan_ok: false`. |
 | anything else (incl. empty) | ask | Implicit ask: treat the **entire** arg as the question. |
 

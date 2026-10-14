@@ -411,7 +411,7 @@ Chosen per root, by what its filesystem supports (probed, never assumed):
 | read-only + scratch dir | default for `shell=read` | none |
 | **git worktree** from a snapshot commit of the current state (including uncommitted changes), kept under `refs/claude-hooks/council/<sid>` | git roots | cheap; ignored dirs bound read-only, or overlaid for write builds |
 | **reflink clone** of a declared write scope | non-git roots on XFS/Btrfs (e.g. `backup_models` is XFS with reflink) | O(metadata) |
-| **overlay** mounted only inside the command's namespace, with a sparse-image upper for a hard quota | non-git roots where overlay copy-up works (E1 probe) | O(changed files) |
+| **overlay** mounted only inside the command's namespace, with a sparse-image upper for a hard quota | non-git roots where overlay copy-up works. E1 probe (2026-10-14): an unprivileged overlay with a host-filesystem lower fails copy-up (EOVERFLOW) inside a user namespace, so it needs a privileged mount step before capabilities drop; see report 04 | O(changed files) |
 | capped copy | last resort | bounded by quota |
 
 - Snapshots for non-git dirs replace the fork's in-RAM copies. Those are capped at 5,000 files / 128 MB, which is useless on a tree whose `scripts/` alone is 136 GiB.
