@@ -196,7 +196,13 @@ def _capped_thinking_note(msg: dict, response: dict, payload: dict,
     """
     if getattr(config, "capped_thinking_enabled", True) is not True:
         return None
-    budget = (payload.get("options") or {}).get("num_predict")
+    # The real thinking allowance first (plan B3): what the server says it
+    # enforced, or the budget the request stated. Only without either is
+    # the whole output cap the bound — thinking counts toward it.
+    timings = response.get("timings") or {}
+    budget = timings.get("think_budget_tokens")
+    if not (isinstance(budget, int) and budget > 0):
+        budget = (payload.get("options") or {}).get("num_predict")
     completion_tokens = int(
         (response.get("usage") or {}).get("completion_tokens") or 0)
     capped, stand_down = capped_thinking.detect(

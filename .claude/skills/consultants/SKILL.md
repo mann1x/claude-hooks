@@ -835,6 +835,15 @@ AskUserQuestion the role (`planner`/`researcher`/`critic`/
 - **Pin context length** — AskUserQuestion `8192` / `32768` /
   `131072` / `Other`. Then `set-role <role> --ctx <chosen>`.
 - **Clear context pin (auto)** — `set-role <role> --ctx auto`.
+- **Thinking** — `config show` lists each role's effective `think`.
+  Offer `off` / `auto` (the model's own budget) / a level
+  (`minimal`, `low`, `medium`, `high`, `max`; `xhigh` = `max`) / a
+  token count. Then `claude-consultants config set-think <role> <value>`,
+  or `--model <m>` for one model only (a role's lanes may run several),
+  `--clear` to go back to the default. Thinking is never derived from
+  effort. Levels a cloud model does not accept (`account --model <m>`
+  lists its thinking values) are sent as plain `on`; on opencoti a level
+  becomes a token budget.
 - **Back**.
 
 ### Subflow B — Service mode

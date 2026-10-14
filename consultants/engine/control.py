@@ -206,6 +206,13 @@ def runtime_control_defaults(
     layers = budget_layers(cfg)
     if layers:
         rc["budget"] = layers  # type: ignore[typeddict-item]
+    think_by_model = {
+        f"{role}@{m}": vals["think"]
+        for role, r in (getattr(cfg, "roles", None) or {}).items()
+        for m, vals in (getattr(r, "model_overrides", None) or {}).items()
+        if "think" in (vals or {})}
+    if think_by_model:
+        rc["think"] = think_by_model  # type: ignore[typeddict-item]
     return rc
 
 

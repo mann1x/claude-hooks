@@ -199,6 +199,8 @@ Exact algorithm in 01 §6.
 
 ### B3. Thinking — per backend, level fixed per (role, model)
 
+**Built 2026-10-14**, except the model-template `think` layer, which waits for a measured per-model value to ship, and the `/api/show` think-budget probe for local builds, which have no read-back yet. xOllama's read-back is fixture-tested only.
+
 - **Level resolution** (owner):
   - fixed per role **and** per model, configurable as `roles.<role>.think` plus `roles.<role>.models.<model>.think`;
   - not derived from effort;

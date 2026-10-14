@@ -1095,7 +1095,8 @@ def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
                       role: Optional[str] = None,
                       tools: Optional[list] = None,
                       session: Optional[str] = None,
-                      knobs: Optional["budget.Knobs"] = None
+                      knobs: Optional["budget.Knobs"] = None,
+                      think: Any = None
                       ) -> tuple[list[dict], "budget.Budget"]:
     """Size the next call, compacting the history first if it no longer
     leaves room to answer.
@@ -1156,7 +1157,9 @@ def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
                                session=session, knobs=knobs)
     if knobs.announce:
         messages = budget.with_output_budget_section(
-            messages, plan.role_cap, plan.context_length)
+            messages, plan.role_cap, plan.context_length,
+            _stated_think_share(chat_client, model, think, plan.role_cap,
+                                plan.context_length))
     token_calib.note_output_cap(plan.cap_report(), model)
     return messages, plan
 
@@ -1171,6 +1174,56 @@ def _budget_options(options: Optional[dict], plan: "budget.Budget") -> dict:
     if plan.send_num_ctx and "num_ctx" not in opts:
         opts["num_ctx"] = plan.send_num_ctx
     return opts
+
+
+def _think_for(state: Optional[dict], role: str, model: str,
+               think: Any) -> Any:
+    """``think`` for ``(role, model)`` (plan B3): a per-model setting
+    (``[role.X.models."<m>"] think``, seeded as
+    ``runtime_control["think"]["<role>@<model>"]``) over the role's own.
+    Never derived from effort."""
+    by_model = ((state or {}).get("runtime_control") or {}).get("think") or {}
+    key = f"{role}@{model}"
+    return by_model[key] if key in by_model else think
+
+
+def _think_budget_message(chat_client, model: str) -> Optional[str]:
+    """The message a capped think ends with: the configured
+    ``think_budget_message`` (model template), else the model's own
+    (``/api/show``). No invented default, as in the fork."""
+    from claude_hooks.model_sampling import sampling_for
+    msg = sampling_for(model).get("think_budget_message")
+    if isinstance(msg, str) and msg.strip():
+        return msg
+    probe = getattr(chat_client, "thinking_budget_message", None)
+    if callable(probe):
+        try:
+            v = probe(model)
+        except Exception:  # pragma: no cover — probing never fails a call
+            return None
+        return v if isinstance(v, str) and v.strip() else None
+    return None
+
+
+def _stated_think_share(chat_client, model: str, think: Any,
+                        cap: Optional[int], ctx: Optional[int]
+                        ) -> Optional[tuple[str, int]]:
+    """``(label, tokens)`` for the ``# Output Budget`` section when the
+    thinking allowance is known before the call: a token count, or a
+    level an opencoti / llama.cpp backend is sent as tokens. Ollama
+    levels are computed server-side and are not stated."""
+    from claude_hooks.get_advice.chat_client import (
+        normalize_think, think_budget_tokens,
+    )
+    t = normalize_think(think)
+    if t is True or t is False or t is None:
+        return None
+    if isinstance(t, str):
+        caps = budget._caps_of(chat_client, model)
+        if caps is None or caps.backend not in ("opencoti", "llamacpp"):
+            return None
+    tokens = think_budget_tokens(t, cap, ctx)
+    return (str(t), tokens) if tokens else None
 
 
 def _budget_knobs(state: Optional[dict], role: Optional[str],
@@ -1214,7 +1267,7 @@ def _loop_payload_budgeter(chat_client, model: str, *,
         messages, plan = _plan_and_compact(
             chat_client, model, list(payload.get("messages") or []),
             role=role, tools=payload.get("tools") or None, session=session,
-            knobs=knobs)
+            knobs=knobs, think=payload.get("think"))
         window["ctx"] = plan.context_length
         payload["messages"] = messages
         payload["options"] = _budget_options(payload.get("options"), plan)
@@ -1345,7 +1398,8 @@ def _single_shot(chat_client, model: str, messages: list[dict],
     """
     session = _calibration_session(f"single-{role or 'role'}")
     convo, plan = _plan_and_compact(chat_client, model, list(messages),
-                                    role=role, session=session, knobs=knobs)
+                                    role=role, session=session, knobs=knobs,
+                                    think=think)
 
     text_parts: list[str] = []
     total_pt = total_ct = 0
@@ -1476,7 +1530,7 @@ def _single_shot(chat_client, model: str, messages: list[dict],
         # would make each continuation shorter than the last and turn a
         # bounded recovery into a guaranteed failure.
         convo, plan = _plan_and_compact(chat_client, model, convo, role=role,
-                                        knobs=knobs)
+                                        knobs=knobs, think=think)
 
     return ("".join(text_parts).strip(), total_pt, total_ct)
 
@@ -1838,6 +1892,7 @@ def _role_turn(chat_client, model: str, messages: list[dict],
             force_first_tool_call=False,
             prepare_payload=_budgeter,
             on_response=_budgeter.observe,
+            thinking_budget_message=_think_budget_message(chat_client, model),
         )
         loop_kwargs = dict(config=cfg, tool_specs=tool_specs,
                            chat_fn=chat_client.chat,
@@ -2022,7 +2077,7 @@ def planner_node(state: dict, *, chat_client, model: str,
             }
     try:
         plan, pt, ct = _role_turn(
-            chat_client, model, msgs, think=think,
+            chat_client, model, msgs, think=_think_for(state, "planner", model, think),
             recorder=recorder, role="planner", round=1,
             tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
             result=_typed_result_name(state, "planner"),
@@ -2489,7 +2544,7 @@ def researcher_node(state: dict, *,
 
         try:
             text, pt, ct = _single_shot(
-                chat_client, model, msgs, think=think,
+                chat_client, model, msgs, think=_think_for(state, "researcher", model, think),
                 recorder=recorder, role="researcher",
                 round=this_round, lane_idx=lane_idx,
                 knobs=_budget_knobs(state, "researcher", model),
@@ -2655,10 +2710,11 @@ def researcher_node(state: dict, *,
             max_iterations=caps.researcher_loop_iters,
             force_answer_after=caps.researcher_force_answer_after,
             tools_available=True,
-            think=think,
+            think=_think_for(state, "researcher", model, think),
             force_first_tool_call=False,
             prepare_payload=_budgeter,
             on_response=_budgeter.observe,
+            thinking_budget_message=_think_budget_message(chat_client, model),
         )
 
     # Bind recorder callbacks to the loop_runner so per-iteration LLM
@@ -2852,7 +2908,7 @@ def researcher_node(state: dict, *,
             # call in the engine, and a hand-rolled call is exactly
             # where a fix like this gets forgotten.
             text2, pt2, ct2 = _single_shot(
-                chat_client, model, summary_msgs, think=think,
+                chat_client, model, summary_msgs, think=_think_for(state, "researcher", model, think),
                 recorder=recorder, role="researcher",
                 round=this_round, lane_idx=lane_idx,
                 knobs=_budget_knobs(state, "researcher", model),
@@ -2955,7 +3011,7 @@ def critic_node(state: dict, *, chat_client, model: str,
     t0 = time.monotonic()
     try:
         text, pt, ct = _role_turn(
-            chat_client, model, msgs, think=think,
+            chat_client, model, msgs, think=_think_for(state, "critic", model, think),
             recorder=recorder, role="critic",
             round=max(rounds_used_pre, 1),
             lane_idx=lane_idx,
@@ -3105,7 +3161,7 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
     t0 = time.monotonic()
     try:
         text, pt, ct = _role_turn(
-            chat_client, model, msgs, think=think,
+            chat_client, model, msgs, think=_think_for(state, "meta_critic", model, think),
             recorder=recorder, role="meta_critic",
             round=this_round,
             tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
@@ -3265,7 +3321,7 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
     for attempt_idx, try_model in enumerate(models_to_try):
         try:
             text, pt, ct = _role_turn(
-                chat_client, try_model, msgs, think=think,
+                chat_client, try_model, msgs, think=_think_for(state, "synthesizer", try_model, think),
                 recorder=recorder, role="synthesizer", round=1,
                 tool_specs=tool_specs, tool_executor=tool_executor,
                 cwd=cwd, knobs=_budget_knobs(state, "synthesizer", try_model),
@@ -3425,7 +3481,7 @@ def adversary_node(state: dict, *, chat_client, model: str,
     t0 = time.monotonic()
     try:
         text, pt, ct = _role_turn(
-            chat_client, model, msgs, think=think,
+            chat_client, model, msgs, think=_think_for(state, "adversary", model, think),
             recorder=recorder, role="adversary", round=1,
             tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
             result=_typed_result_name(state, "adversary"),

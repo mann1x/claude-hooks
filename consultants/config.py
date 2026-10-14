@@ -789,8 +789,36 @@ BUDGET_KEYS: dict[str, Any] = {
     "announce": _budget_bool,
 }
 
+#: ``think`` values (plan B3): off, on (the model's own budget), a level,
+#: or a token count. ``auto`` / ``on`` mean on; ``xhigh`` means ``max``.
+THINK_LEVELS = ("minimal", "low", "medium", "high", "max")
+
+
+def check_think(v: Any) -> Any:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int):
+        if v <= 0:
+            raise ValueError("a token count must be > 0 (use false for off)")
+        return v
+    if isinstance(v, str):
+        t = v.strip().lower()
+        if t in ("auto", "on", "true"):
+            return True
+        if t in ("off", "false", "none"):
+            return False
+        if t == "xhigh":
+            return "max"
+        if t in THINK_LEVELS:
+            return t
+        if t.isdigit():
+            return check_think(int(t))
+    raise ValueError("think must be true/false/auto, a level "
+                     f"({'/'.join(THINK_LEVELS)}, xhigh) or a token count")
+
+
 #: Keys a ``[role.X.models."<model>"]`` table takes.
-MODEL_OVERRIDE_KEYS: dict[str, Any] = dict(BUDGET_KEYS)
+MODEL_OVERRIDE_KEYS: dict[str, Any] = {**BUDGET_KEYS, "think": check_think}
 
 
 def validate_settings(raw: Any, keys: dict[str, Any], *,
@@ -1008,12 +1036,14 @@ def _merge_role(base: RoleConfig, override: dict) -> RoleConfig:
     # the usual "no override").
     if "think" in override:
         v = override["think"]
-        if isinstance(v, bool):
-            out.think = v
-        elif isinstance(v, str) and v.lower() in ("low", "medium", "high"):
-            out.think = v.lower()
-        elif v is None:
+        if v is None:
             out.think = None
+        else:
+            try:
+                out.think = check_think(v)
+            except ValueError as e:
+                log.warning("consultants config: role think = %r ignored: %s",
+                            v, e)
     if "extra_models" in override:
         raw_extras = override["extra_models"]
         if isinstance(raw_extras, list):
@@ -1745,6 +1775,8 @@ def _render(cfg: ConsultantsConfig, *,
         L.append(f"[role.{role}]")
         L.append(f"enabled = {'true' if rc.enabled else 'false'}")
         L.append(f"model = {_toml_str(rc.model)}")
+        if rc.think is not None:
+            L.append(f"think = {_toml_value(rc.think)}")
         if rc.ctx_max is not None:
             L.append(f"ctx_max = {int(rc.ctx_max)}")
         L.append(f"ctx_max_explicit = "
@@ -2075,6 +2107,27 @@ def set_budget(values: Optional[dict] = None, *,
         target.pop(k, None)
     if role and model and not target:
         cfg.roles[role].model_overrides.pop(model, None)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_think(role: str, value: Any = None, *, model: Optional[str] = None,
+              clear: bool = False, scope: str = "user",
+              cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set or clear a role's ``think`` (plan B3), or its per-model one
+    (``[role.<role>.models."<model>"] think``)."""
+    checked = None if clear else check_think(value)
+    cfg = _load_for_edit(scope, cwd)
+    rc = cfg.role(role)
+    if model:
+        table = rc.model_overrides.setdefault(model, {})
+        if clear:
+            table.pop("think", None)
+            if not table:
+                rc.model_overrides.pop(model, None)
+        else:
+            table["think"] = checked
+    else:
+        rc.think = checked
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 

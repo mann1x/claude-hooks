@@ -232,6 +232,11 @@ def _timings(data: dict, *, wall_s: float, queue_s: float,
     cached = data.get("cached_prompt_tokens")
     if isinstance(cached, int) and cached >= 0:
         out["cached_prompt_tokens"] = cached
+    tb = data.get("think_budget_tokens")
+    if isinstance(tb, int) and not isinstance(tb, bool) and tb >= 0:
+        # xOllama and think-budget Ollama builds report what they enforced.
+        out["think_budget_tokens"] = tb
+        out["think_budget_source"] = "read_back"
     for src, dst in (("load_duration", "load_ms"),
                      ("prompt_eval_duration", "prompt_eval_ms"),
                      ("eval_duration", "eval_ms"),
@@ -256,6 +261,68 @@ def _timings(data: dict, *, wall_s: float, queue_s: float,
             except ValueError:
                 pass
     return out
+
+
+#: Thinking levels, mildest first (plan B3).
+THINK_LEVELS = ("minimal", "low", "medium", "high", "max")
+
+#: Share of ``min(num_predict, num_ctx)`` a level may think in: Ollama's
+#: ``thinkBudgetFraction`` (``api/types.go``), which the fork also applies
+#: client-side for llama.cpp. ``xhigh`` is an alias of ``max``.
+THINK_FRACTIONS = {"max": 4 / 5, "high": 1 / 2, "medium": 1 / 4,
+                   "low": 1 / 8, "minimal": 1 / 16}
+
+
+def normalize_think(value: Any) -> Any:
+    """``think`` as the council states it: ``False``, ``True`` (the
+    model's own budget; also ``"auto"`` / ``"on"``), a level from
+    :data:`THINK_LEVELS` (``"xhigh"`` → ``"max"``) or a token count.
+    Anything else is returned unchanged for the server to judge."""
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return value if value > 0 else False
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("auto", "on", "true"):
+            return True
+        if v in ("off", "none", "false"):
+            return False
+        if v == "xhigh":
+            return "max"
+        if v.isdigit():
+            return normalize_think(int(v))
+        return v
+    return value
+
+
+def think_budget_tokens(think: Any, num_predict: Optional[int],
+                        num_ctx: Optional[int] = None) -> Optional[int]:
+    """Thinking tokens a level or count allows, or ``None`` (no budget:
+    ``True``, ``False``, or nothing to take a share of). The share is of
+    ``min(num_predict, num_ctx)``, of whichever is known, floored."""
+    t = normalize_think(think)
+    if isinstance(t, int) and not isinstance(t, bool):
+        return t
+    frac = THINK_FRACTIONS.get(t) if isinstance(t, str) else None
+    if frac is None:
+        return None
+    bases = [n for n in (num_predict, num_ctx) if isinstance(n, int) and n > 0]
+    if not bases:
+        return None
+    n = int(min(bases) * frac)
+    return n if n > 0 else None
+
+
+def _sent_think_budget(body: dict) -> Optional[int]:
+    """The thinking budget a request body stated, if any."""
+    v = body.get("reasoning_budget_tokens")
+    if isinstance(v, int) and not isinstance(v, bool):
+        return v
+    v = (body.get("options") or {}).get("think_budget")
+    if isinstance(v, int) and not isinstance(v, bool):
+        return v
+    return None
 
 
 class _Attempts:
@@ -512,6 +579,19 @@ class ChatClient:
     def learned_output_ceiling(self, model: str) -> Optional[int]:
         """An output maximum this server's refusal named for ``model``."""
         return learned_output_ceiling(self.base_url, self._real(model))
+
+    def _accepted_level(self, model: str, level: str) -> Any:
+        """``level`` if the service accepts it for ``model``, else bare
+        ``True`` (plan B3). Only an already-probed capability record is
+        consulted, so building a request never costs a round trip; with
+        none, the level is sent as is and a refusal is retried as
+        ``True``."""
+        from claude_hooks import provider_caps
+        caps = provider_caps.cached(self.base_url, model)
+        values = tuple(str(v).lower() for v in (caps.thinking_values if caps else ()))
+        if not values or level in values:
+            return level
+        return True
 
     def _note_grant(self, payload: dict, timings: dict) -> None:
         """Remember ``X-Context-Window`` only for a request that stated a
@@ -888,6 +968,11 @@ class ChatClient:
                     ttft_s=(first - attempt_start) if first else None,
                     attempts=sent, empty_retries=empty_retries,
                     headers=resp_headers)
+                if "think_budget_tokens" not in self.last_timings:
+                    sent_tb = _sent_think_budget(body)
+                    if sent_tb is not None:
+                        self.last_timings["think_budget_tokens"] = sent_tb
+                        self.last_timings["think_budget_source"] = "sent"
                 out["timings"] = self.last_timings
                 self._note_grant(payload, self.last_timings)
                 return out
@@ -916,6 +1001,20 @@ class ChatClient:
                     and any(s in err_body
                             for s in THINK_UNSUPPORTED_4XX_BODY_SUBSTRINGS)
                 )
+                if (think_rejected and body.get("think") not in (True, False)
+                        and payload.get("think") is not True):
+                    # A level (or budget) the model refused is not proof it
+                    # cannot think: ask once with a bare ``think: true``
+                    # before dropping the field (plan B3, report 01 #12).
+                    log.warning("%s: %s refused think=%r (HTTP %d); retrying "
+                                "with think=true: %s", what, model_tag,
+                                body.get("think"), e.code, err_body[:200])
+                    payload = {**payload, "think": True}
+                    body = self._prepare(payload, strip_think=strip_think,
+                                         stream=stream)
+                    encoded = json.dumps(body).encode()
+                    attempts.hold()
+                    continue
                 if think_rejected:
                     log.warning(
                         "%s: model %s rejected 'think' field "
@@ -1139,7 +1238,19 @@ class ChatClient:
         # is known to reject it (graceful degrade for non-reasoning
         # models). Accepts bool or "low" | "medium" | "high".
         if "think" in payload and not strip_think:
-            body["think"] = payload["think"]
+            think = normalize_think(payload["think"])
+            if isinstance(think, int) and not isinstance(think, bool):
+                # A token count: thinking on, the count as the budget
+                # think-budget builds and xOllama enforce.
+                body["think"] = True
+                opts = dict(body.get("options") or {})
+                opts.setdefault("think_budget", think)
+                body["options"] = opts
+            elif isinstance(think, str):
+                body["think"] = self._accepted_level(body.get("model") or "",
+                                                     think)
+            else:
+                body["think"] = think
         # Structured output: ``"json"`` or a JSON schema, passed through.
         if payload.get("format"):
             body["format"] = payload["format"]
@@ -1324,9 +1435,18 @@ class OpenAICompatChatClient(ChatClient):
             body["tools"] = payload["tools"]
         if "tool_choice" in payload:
             body["tool_choice"] = payload["tool_choice"]
-        think = payload.get("think")
-        if self.backend == "opencoti" and think is False and not strip_think:
-            body["reasoning_budget_tokens"] = 0
+        think = normalize_think(payload.get("think"))
+        if self.backend == "opencoti" and not strip_think:
+            if think is False:
+                body["reasoning_budget_tokens"] = 0
+            else:
+                # The engine discards ``reasoning_effort``; a level is
+                # turned into tokens with Ollama's fractions (plan B3).
+                tb = think_budget_tokens(
+                    think, body.get("max_tokens"),
+                    self._context_length.get(model))
+                if tb is not None:
+                    body["reasoning_budget_tokens"] = tb
         fmt = payload.get("format")
         if fmt == "json":
             body["response_format"] = {"type": "json_object"}

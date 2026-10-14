@@ -225,6 +225,54 @@ carries only the keys that were set (`runtime_control.budget`), so a
 default run seeds nothing. The menu entry is **Output cap & window**
 (Subflow K).
 
+## Thinking per backend (plan B3)
+
+A role's `think` is fixed per role and per (role, model), and never
+derived from effort. Precedence: `[role.X.models."<m>"] think` >
+`[role.X] think` > `DEFAULT_THINK_BY_ROLE`.
+
+Values:
+
+- `false` / `off`;
+- `true` / `auto` / `on`: bare `think: true`, so the model's own budget
+  applies;
+- a level: `minimal` / `low` / `medium` / `high` / `max`, with `xhigh`
+  meaning `max`;
+- a token count.
+
+```bash
+claude-consultants config set-think critic high
+claude-consultants config set-think researcher 8192 --model @bs2
+claude-consultants config set-think researcher --model @bs2 --clear
+```
+
+| backend | level | token count |
+|---|---|---|
+| Ollama (cloud / local) | sent only if the model's `thinking_values` (recommendations) accept it, else `think: true`; with no list the level is sent as is | `think: true` + `options.think_budget` |
+| opencoti / llama.cpp | `reasoning_budget_tokens` = share × `min(num_predict, window)`: max 4/5, high 1/2, medium 1/4, low 1/8, minimal 1/16 | `reasoning_budget_tokens` |
+| xOllama / think-budget builds | as Ollama; the enforced budget is read back from `think_budget_tokens` | as Ollama |
+
+- A level the model refuses (a 4xx naming `think`) is retried once as
+  `think: true`. Only a refused `think: true` strips the field.
+- `timings.think_budget_tokens` records the enforced budget, with
+  `think_budget_source` `read_back` or `sent`.
+- Capped-thinking detection compares the think against that allowance,
+  and against `num_predict` only when none is known.
+- The budget message the detector looks for is the template's
+  `think_budget_message`, else the model's own. No default text is
+  invented.
+- When the allowance is known before the call (opencoti, or a token
+  count), the `# Output Budget` section states it.
+
+Measured on 2026-10-14:
+
+- gemma4:31b-cloud accepts only `off` / `on`, so its roles' levels are
+  sent as `true`;
+- deepseek-v4.1-flash accepts `low` / `high` / `max`;
+- glm-5.3:cloud publishes no list;
+- opencoti `minimal` at `num_predict` 4,000 was sent 250 tokens and
+  reasoned about 843 characters.
+
 ## Sampler fields
 
 `config/model-sampling.json` templates may also set `num_keep`, `stop`,

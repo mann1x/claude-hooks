@@ -613,6 +613,7 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
                 # uses presence to decide whether to render the
                 # extras list.
                 "extra_models": list(cfg.roles[r].extra_models),
+                "think": cc.role_think(cfg, r),
                 "budget": dict(cfg.roles[r].budget),
                 "models": {m: dict(v) for m, v
                            in cfg.roles[r].model_overrides.items()},
@@ -1234,6 +1235,17 @@ def cmd_config_set_budget(args, base: str) -> int:
     try:
         cfg = cc.set_budget(values, clear=args.clear, role=args.role,
                             model=args.model, **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_config_set_think(args, base: str) -> int:
+    if args.value is None and not args.clear:
+        raise CLIError("set-think: give a value or --clear", exit_code=2)
+    try:
+        cfg = cc.set_think(args.role, args.value, model=args.model,
+                           clear=args.clear, **_resolve_active_scope(args))
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
     return _emit_config(cfg, args)
@@ -2659,6 +2671,20 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Remove a setting (repeatable).")
     _add_scope_args(cbu)
     cbu.set_defaults(fn=cmd_config_set_budget)
+
+    cth = cfg_sub.add_parser(
+        "set-think",
+        help="A role's thinking (plan B3): off, on/auto (the model's own "
+             "budget), a level (minimal/low/medium/high/max, xhigh = max) "
+             "or a token count. --model sets it for that model only.")
+    cth.add_argument("role", choices=list(cc.ROLES))
+    cth.add_argument("value", nargs="?")
+    cth.add_argument("--model", help="Model exactly as the role names it.")
+    cth.add_argument("--clear", action="store_true",
+                     help="Back to the role default (or, with --model, to "
+                          "the role's own value).")
+    _add_scope_args(cth)
+    cth.set_defaults(fn=cmd_config_set_think)
 
     crep = cfg_sub.add_parser("remove-endpoint",
                               help="Remove a named chat server.")
