@@ -1,25 +1,37 @@
 """Milestone C exit bench: fix-rate by compaction count (plan §3, Exit C).
 
-A small local model (``gemma4:e4b`` by default, pinned to a 32,768-token
+A capable local model (qwen3.6 27B on eleven2go by default: a weak
+model's failure says nothing about compaction), pinned to a 32,768-token
 window) runs the researcher's production tool loop — the real
 ``_loop_payload_budgeter``, ``compaction.compact`` and the builtin
 read-only tools — over a generated project that is several windows
 long. Every trial therefore folds its history several times.
 
-The task plants one bug whose two halves sit at opposite ends of the
-reading order: ``src/config/limits.py`` (read first) says the retry
-window is in **seconds**; ``src/net/backoff.py`` (read last) compares it
-against an elapsed time in **milliseconds**. The correct fix needs the
-fact from the first file to have survived every fold. The grader is
-deterministic (:func:`grade`); a trial is *fixed* when the answer names
-the function, the unit mismatch and a correct conversion.
+Task v2 (2026-10-14). Every fact the fix needs can be learned once only,
+so it has to survive the folds — v1 let the model re-read the file it had
+lost, and ``basic`` (no model call) scored as well as the agentic flows:
+
+- ``src/config/limits.py`` (read first) gives the retry window in
+  **deciseconds** (``RETRY_WINDOW = 450``); nothing else in the project
+  says so, and "ms vs s" intuition gives the wrong fix (×1000, not ×100).
+- That file can be read **once**: later reads answer "locked by a deploy"
+  (:class:`OnceReadable`).
+- After ``FOLLOWUP_AFTER`` tool results the user adds, once, a typed
+  follow-up: cite ticket ``LDG-4471``. Only the user-request block or the
+  replay can carry it past a fold.
+
+``src/net/backoff.py`` (read last) compares the window against an elapsed
+time in **milliseconds**. A trial is *fixed* when the answer names the
+function, the decisecond unit, a ×100 conversion and the ticket
+(:func:`grade`, deterministic).
 
 Arms are ``flow/placement`` pairs: ``reduced`` and ``full`` crossed with
 ``system`` and ``user`` (the §11.2 placement A/B), plus ``basic`` (the
 deterministic fold, no model call) as the floor.
 
     python benchmarks/consultants/compaction_bench.py \\
-        --base http://192.168.178.2:11433 --model gemma4:e4b \\
+        --base http://192.168.178.161:22434 \\
+        --model qwen36-base-mtp_tb:27b-q4km-128k \\
         --arms reduced/system,reduced/user,full/system,full/user,basic/system \\
         --trials 4 --concurrency 2
 
@@ -69,15 +81,16 @@ MODULES = [
 
 LIMITS_HEAD = '''"""Operational limits for ledgerd.
 
-Every duration in this module is expressed in SECONDS. Callers that
-measure time in another unit must convert before comparing.
+Every duration in this module is expressed in DECISECONDS (tenths of a
+second), the unit the scheduler ticks in. Callers that measure time in
+another unit must convert before comparing.
 """
 
-#: How long a request may keep retrying before it gives up, in seconds.
-RETRY_WINDOW = 45
+#: How long a request may keep retrying before it gives up, in deciseconds.
+RETRY_WINDOW = 450
 
-#: Largest single backoff sleep, in seconds.
-BACKOFF_CEILING = 8
+#: Largest single backoff sleep, in deciseconds.
+BACKOFF_CEILING = 80
 
 #: Maximum journal segment size, in bytes.
 SEGMENT_BYTES = 64 * 1024 * 1024
@@ -94,7 +107,7 @@ def should_retry(attempt: int, started_ns: int) -> bool:
 
 
 def next_delay(attempt: int) -> float:
-    base = min(limits.BACKOFF_CEILING, 0.25 * (2 ** attempt))
+    base = min(limits.BACKOFF_CEILING / 10, 0.25 * (2 ** attempt))
     return base * (0.5 + random.random() / 2)
 '''
 
@@ -158,10 +171,19 @@ def build_project(dest: Path, *, seed: int = 7, funcs: int = 7) -> list[str]:
 # Grading
 # --------------------------------------------------------------------------- #
 
+TASK_VERSION = 2
+TICKET = "LDG-4471"
+FOLLOWUP_AFTER = 8
+FOLLOWUP = (f"One more thing from the on-call lead: whatever you find, the "
+            f"answer must cite ticket {TICKET}, which tracks this incident.")
+LOCKED = ("error: src/config/limits.py is locked by a running deploy and "
+          "cannot be read again; use what you already know about it.")
+
+#: A ×100 conversion between deciseconds and milliseconds, either side.
 _CONVERSION = re.compile(
-    r"RETRY_WINDOW\s*\*\s*1[_,]?000|1[_,]?000\s*\*\s*(limits\.)?RETRY_WINDOW"
-    r"|//\s*1[_,]?000[_,]?000[_,]?000|/\s*1e9|elapsed\s*/\s*1[_,]?000"
-    r"|45[_,]?000|monotonic\(\)", re.I)
+    r"RETRY_WINDOW\s*\*\s*100\b|100\s*\*\s*(limits\.)?RETRY_WINDOW"
+    r"|elapsed\s*(//|/)\s*100\b|//\s*100[_,]?000[_,]?000\b"
+    r"|//\s*1e8|45[_,]?000\b", re.I)
 
 
 def grade(answer: str, order: list[str]) -> dict:
@@ -169,14 +191,61 @@ def grade(answer: str, order: list[str]) -> dict:
     low = text.lower()
     names_fn = "should_retry" in text
     names_file = "backoff" in low
-    units = (("millisecond" in low or re.search(r"\bms\b", low) is not None)
-             and re.search(r"(?<!milli)seconds?\b", low) is not None)
+    units = "decisecond" in low or "tenths of a second" in low
     conversion = _CONVERSION.search(text) is not None
+    ticket = TICKET in text
     modules = sum(1 for p in order if Path(p).stem in text)
-    return {"fixed": bool(names_fn and names_file and units and conversion),
+    return {"fixed": bool(names_fn and names_file and units and conversion
+                          and ticket),
             "names_fn": names_fn, "names_file": names_file, "units": units,
-            "conversion": conversion,
+            "conversion": conversion, "ticket": ticket,
             "module_coverage": round(modules / len(order), 3)}
+
+
+class OnceReadable:
+    """The builtin executor, except ``src/config/limits.py`` answers once."""
+
+    def __init__(self, inner, path: str = "src/config/limits.py"):
+        self.inner = inner
+        self.path = path
+        self.reads = 0
+        self.refused = 0
+
+    def __call__(self, name, args, cwd):
+        if name == "read_file":
+            try:
+                target = (json.loads(args) if isinstance(args, str)
+                          else dict(args or {})).get("path") or ""
+            except (TypeError, ValueError, AttributeError):
+                target = ""
+            if str(target).lstrip("./").endswith(self.path):
+                self.reads += 1
+                if self.reads > 1:
+                    self.refused += 1
+                    return LOCKED
+        return self.inner(name, args, cwd)
+
+
+def with_followup(prepare, *, after: int = FOLLOWUP_AFTER):
+    """``prepare`` plus one typed user follow-up once ``after`` tool
+    results are in the history — a typed prompt, not a harness note, so
+    the cut planner treats it as the user's."""
+    sent = {"done": False}
+
+    def wrapped(payload):
+        msgs = payload.get("messages") or []
+        if not sent["done"] and sum(1 for m in msgs
+                                    if m.get("role") == "tool") >= after:
+            msgs.append({"role": "user", "content": FOLLOWUP})
+            payload["messages"] = msgs
+            sent["done"] = True
+        return prepare(payload)
+
+    for attr in ("observe", "recover", "session"):
+        if hasattr(prepare, attr):
+            setattr(wrapped, attr, getattr(prepare, attr))
+    wrapped.sent = sent
+    return wrapped
 
 
 # --------------------------------------------------------------------------- #
@@ -237,10 +306,11 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
     budgeter = council._loop_payload_budgeter(
         client, model, role="researcher", knobs=knobs, recorder=rec,
         round=0, lane_idx=idx)
+    prepare = with_followup(budgeter)
     cfg = LoopConfig(max_iterations=max_iterations,
                      force_answer_after=max_iterations - 2,
                      tools_available=True, think=think,
-                     force_first_tool_call=False, prepare_payload=budgeter,
+                     force_first_tool_call=False, prepare_payload=prepare,
                      on_response=budgeter.observe)
     question = QUESTION.format(order="\n".join(f"{i + 1}. `{p}`"
                                                for i, p in enumerate(order)))
@@ -255,7 +325,7 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
                        request=req, response=resp, prompt_tokens=pt,
                        completion_tokens=ct, duration_ms=ms)
 
-    executor = make_executor((str(project),))
+    executor = OnceReadable(make_executor((str(project),)))
     t0 = time.monotonic()
     error = None
     answer = ""
@@ -289,6 +359,8 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
         "compaction_calls": len(comp_calls),
         "compaction_seconds": round(sum(c["ms"] for c in comp_calls) / 1000, 1),
         "max_prompt_tokens": max((c["pt"] or 0 for c in calls), default=0),
+        "followup_sent": prepare.sent["done"],
+        "limits_reads": executor.reads, "limits_refused": executor.refused,
         "answer": answer, **grade(answer, order),
     }
 
@@ -349,17 +421,28 @@ def render_report(trials: list[dict], meta: dict) -> str:
         if s and u:
             lines.append(f"- **{flow}**: system {_pct(_rate(s))} "
                          f"({len(s)}), user {_pct(_rate(u))} ({len(u)})")
+    lines += ["", "## Facts carried", "",
+              "| arm | decisecond unit | ×100 fix | ticket (follow-up) | "
+              "limits.py re-reads refused |", "|---|---|---|---|---|"]
+    for arm in arms:
+        rows = [t for t in trials if t["arm"] == arm]
+        lines.append(
+            f"| {arm} | {sum(r.get('units', False) for r in rows)}/{len(rows)} | "
+            f"{sum(r.get('conversion', False) for r in rows)}/{len(rows)} | "
+            f"{sum(r.get('ticket', False) for r in rows)}/{len(rows)} | "
+            f"{sum(r.get('limits_refused', 0) for r in rows)} |")
     lines += ["", "## Grader", "",
-              "A trial is fixed when the answer names `should_retry`, "
-              "`backoff`, the seconds/milliseconds mismatch and a correct "
-              "conversion. Partial credit per trial is in `trials.jsonl`.", ""]
+              f"Task v{TASK_VERSION}. A trial is fixed when the answer names "
+              "`should_retry` and `backoff`, the decisecond unit, a ×100 "
+              f"conversion and ticket `{TICKET}`. Each fact is available "
+              "once (see the module docstring).", ""]
     return "\n".join(lines)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--base", default="http://192.168.178.2:11433")
-    p.add_argument("--model", default="gemma4:e4b")
+    p.add_argument("--base", default="http://192.168.178.161:22434")
+    p.add_argument("--model", default="qwen36-base-mtp_tb:27b-q4km-128k")
     p.add_argument("--arms", default="reduced/system,reduced/user,"
                                      "full/system,full/user,basic/system")
     p.add_argument("--trials", type=int, default=4)
@@ -372,12 +455,13 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     date = dt.date.today().isoformat()
     out = args.out or (ROOT / "benchmarks/consultants/results" / date
-                       / "compaction")
+                       / f"compaction-v{TASK_VERSION}")
     out.mkdir(parents=True, exist_ok=True)
     trials_path = out / "trials.jsonl"
     commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
                             capture_output=True, text=True).stdout.strip()
-    meta = {"date": date, "model": args.model, "base": args.base,
+    meta = {"date": date, "task_version": TASK_VERSION,
+            "model": args.model, "base": args.base,
             "window": WINDOW, "think": args.think, "trials": args.trials,
             "arms": args.arms.split(","), "commit": commit,
             "max_iterations": args.max_iterations,

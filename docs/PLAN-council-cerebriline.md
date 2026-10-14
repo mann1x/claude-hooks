@@ -340,6 +340,16 @@ lanes:
 - the same-model test and the single-connection test pass;
 - parity holds with compaction off.
 
+**Exit C status (2026-10-14):**
+- **Model:** the owner moved the bench off the ≤ 8B model to qwen3.6 27B on eleven2go (`qwen36-base-mtp_tb:27b-q4km-128k`), window pinned to 32,768. A weak model's failure (qwen3:8b, gemma4:e4b lost the reading order and never answered) says nothing about compaction.
+- **Trigger fix (`b4c7b15`):** the trigger now leaves the output room after the estimate's reserve. Before, starved-cap fired on every descent, 8 of 12 folds.
+- **Task v1, 10 of 20 trials, stopped to free eleven2go:**
+  - every arm fixed the bug except `reduced/user` #0;
+  - `reduced/user` folded 15 and 11 times against 3 for `reduced/system`. A `user` fold message that opens with the verbatim requests read as the task issued again, and the model restarted the audit after each fold (102 re-reads in 130);
+  - `basic` fixed it too. The model re-read the file it had lost, so v1 cannot separate the flows.
+- **Task v2 (`compaction_bench.py`):** a decisecond unit stated once, in a file that can be read once, plus a mid-run typed follow-up (a ticket) the answer must cite. It is to be run on the owner's go.
+- **Gap noted, not fixed:** a single oversized last turn (one assistant turn with many tool results) cannot be folded, so the prompt sits just over the trigger with no-op folds until the tail grows.
+
 ---
 
 ## 4. Milestone D — Lane robustness (found by the full map)
