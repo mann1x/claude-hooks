@@ -280,3 +280,31 @@ def test_dead_calibration_globals_are_gone():
     for name in ("note_output_cap", "last_output_cap", "note_context_overflow",
                  "consume_context_overflow"):
         assert not hasattr(token_calib, name)
+
+
+def test_the_trigger_leaves_the_output_room_after_the_reserve():
+    # A prompt at the trigger must still get ``output_room_min`` of cap once
+    # the estimate's reserve is taken; otherwise the starved-cap latch fires
+    # on every descent, ~3k before the trigger (seen on the C bench: 8 of
+    # 12 folds on a 32k window were starved-cap, not trigger).
+    class Client:
+        base_url = "x"
+
+        def context_length(self, model):
+            return 32_768
+
+    knobs = budget.Knobs()
+    body = "def x():\n    a = b + 1  # step\n" * 120
+    msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "q"}]
+    seen_below_trigger = 0
+    for i in range(60):
+        msgs += _read(i, f"f{i}.py", size=1)[:1] + [
+            {"role": "tool", "tool_call_id": f"r{i}", "name": "read_file",
+             "content": body}]
+        plan = budget.plan(Client(), "m", msgs)
+        if plan.needs_compaction:
+            break
+        seen_below_trigger += 1
+        assert not council._starved_cap(plan, knobs, f"s{i}"), (
+            plan.prompt_tokens, plan.output_tokens, plan.trigger_tokens)
+    assert seen_below_trigger > 5

@@ -515,7 +515,9 @@ def compaction_trigger_tokens(*, context_length: int,
                               model_max_tokens: Optional[int] = None,
                               observed_output: Optional[int] = None,
                               ratio: float = COMPACTION_TRIGGER_RATIO,
-                              room_min: int = MIN_OUTPUT_ROOM_TOKENS) -> int:
+                              room_min: int = MIN_OUTPUT_ROOM_TOKENS,
+                              reserve_share: float = 0.0,
+                              reserve_min: int = 0) -> int:
     """The largest prompt that still leaves the model room to answer.
 
     Takes the smaller of the ratio trigger and the room trigger, which
@@ -523,6 +525,12 @@ def compaction_trigger_tokens(*, context_length: int,
     turn the binding constraint — which is what it actually is.
     ``ratio`` and ``room_min`` are the ``[budget]`` knobs
     ``trigger_ratio`` / ``output_room_min``.
+
+    The room is what is left *after* the estimate's own reserve
+    (:func:`reserve_tokens`, ``max(reserve_min, share × prompt)``), because
+    that is what :func:`plan` caps the answer at. Without it the cap fell
+    below ``room_min`` ~3k tokens before the trigger on a 32k window, and
+    the starved-cap latch fired on every descent instead of the trigger.
     """
     ratio_trigger = context_length * ratio
     declared_room = (int(model_max_tokens) if _positive(model_max_tokens)
@@ -537,7 +545,9 @@ def compaction_trigger_tokens(*, context_length: int,
         output_room = min(
             declared_room,
             context_length * COLD_START_OUTPUT_ROOM_WINDOW_SHARE)
-    room_trigger = max(context_length - output_room,
+    free = context_length - output_room
+    room_trigger = max(min(free / (1.0 + max(0.0, reserve_share)),
+                           free - max(0, reserve_min)),
                        context_length * MIN_TRIGGER_WINDOW_SHARE)
     return int(min(ratio_trigger, room_trigger))
 
@@ -652,7 +662,9 @@ def plan(chat_client: Any, model: str, messages: list[dict], *,
     observed = observed_output_tokens(messages, model=model)
     trigger = compaction_trigger_tokens(
         context_length=ctx, model_max_tokens=ask, observed_output=observed,
-        ratio=float(knobs.trigger_ratio), room_min=int(knobs.output_room_min))
+        ratio=float(knobs.trigger_ratio), room_min=int(knobs.output_room_min),
+        reserve_share=float(knobs.reserve_share),
+        reserve_min=int(knobs.reserve_min))
     available = ctx - prompt_tokens - reserve_tokens(prompt_tokens, knobs)
 
     if available < MIN_OUTPUT_TOKENS:
