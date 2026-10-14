@@ -123,6 +123,10 @@ class ConsultationResult:
     extra_roots: list[str] = field(default_factory=list)
     cwd_display: Optional[str] = None
     extra_roots_display: list[str] = field(default_factory=list)
+    # Plan H: the decision model's recommendation on the final answer
+    # (``{"choice": accept|followup|research, "confidence", "confident",
+    # "probabilities", "model"}``); ``None`` when the seam is off.
+    decision: Optional[dict] = None
 
 
 # ----------------------- YAML front-matter writer -------------------- #

@@ -117,6 +117,9 @@ class CouncilState(TypedDict, total=False):
     retries_by_role: dict
     error: Optional[str]
     _role_failed: Optional[str]
+    # Plan H: the decision model's accept / followup / research
+    # recommendation on the final answer (the ``review`` seam).
+    decision_review: Optional[dict]
     # Send-injected, per-lane fields. Set on a researcher invocation
     # spawned by the fan-out conditional edge after planner; absent
     # on the single-researcher path used by critic re-routes.

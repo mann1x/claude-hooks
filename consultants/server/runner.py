@@ -519,6 +519,7 @@ def make_runner(*, ollama_base_url: str):
             extra_roots=list(extra_roots),
             cwd_display=cwd_display,
             extra_roots_display=list(extra_roots_display),
+            decision=final_state.get("decision_review") or None,
         )
         storage.write_consultation(result, cwd=Path(cwd))
 
@@ -1055,6 +1056,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
             extra_roots=list(extra_roots),
             cwd_display=cwd_display_fu,
             extra_roots_display=list(extra_roots_display_fu),
+            decision=final_state.get("decision_review") or None,
         )
         storage.write_consultation(result, cwd=Path(cwd))
 

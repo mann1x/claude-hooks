@@ -666,6 +666,52 @@ Not taken: the builder role, broadcast notes, the async review desk, and client-
 
 ---
 
+## 6c. Milestone H — Decision models (owner, 2026-10-14)
+
+Decision models answer typed questions (noul / choice / score) with
+calibrated probabilities and write no text. Two dialects serve one API,
+`POST /v1/systemone`: TypeSafe's **Jev** (`jev-latest`, Bearer key) and
+Ollama ≥ 0.35 / xOllama with local `decision`-capable models (`tev1`,
+`nimble`, `clef-flash`, …). The owner: "they really fit well with the
+consultants skill and the council, a precious addition". Cerebriline
+(`c498e9cf4`, `f535f2035`) is the reference; its knowledge base is
+`/shared/dev/cline/docs/knowledge-base/jev/`.
+
+| # | What | Status |
+|---|---|---|
+| H1 | **Client** `claude_hooks/decision_client.py`: both dialects; root / `/v1` / full path accepted; `/api/version` dialect probe (not cached when unreachable); Ollama 64 KiB body and loaded-window cut-and-retry with the size remembered per server and model; ≤ 26 options on Ollama; 429/529 retried inside one deadline; key from `key_file` or `TYPESAFE_API_KEY`, sent only to the endpoint it belongs to, never logged | done |
+| H2 | **Config** `[decision]` (enabled, url, model, key_file, floor 0.6, high_stakes_floor 0.85, timeout_s 15, seams); off by default, no host defaults; seeded as `runtime_control.decision` only when on, with the key file's path, never the key; `claude-consultants config set-decision`, `claude-consultants decision-models` | done |
+| H3 | **Seams** `consultants/engine/decision.py`, every one a no-op when off or failed: `review` (accept / followup / research on the final answer → `decision_review` state → `ConsultationResult.decision` → `show`), `confidence` (scored p beside the critic's and synthesizer's `CONFIDENCE:` line; the scored value goes on the channel the escalator, low-confidence interrupt and adversary checkpoint read), `struggle` (stuck-vs-progressing every 6 tool results; one harness nudge per lane at the high-stakes floor), `citations` (does the cited code support the claim, after the CitationLinter's existence checks; `[unsupported — …]` annotation) | done |
+| H4 | **Bench** `benchmarks/consultants/decision_bench.py` over `questions/decision/cases.json` (25 council-shaped cases) | done, 2026-10-14 |
+| H5 | The `/consultants` review loop reads `decision` from `show` as one input to accept / follow-up | skill text |
+| H6 | Re-bench on cases mined from real `transcript.db` councils before any default changes; floors tuned per server (TypeSafe's and Ollama's confidence differ in definition) | open |
+
+Owner decisions (2026-10-14): **Jev cloud for every seam for now** ("I
+don't have sensible code that I don't want to leak out", adjust later);
+first cut wires review, confidence, struggle and citations, **not** a
+compaction check. Other Ollama decision models (e.g. clef-flash) are to be
+benched by the owner; the client and bench take any decision-capable tag.
+
+**Bench (2026-10-14, 25 cases × 2 repeats, floor 0.6):**
+
+| target | accuracy | Brier | confident & wrong | median |
+|---|---|---|---|---|
+| Jev `jev-latest` | 50/50 | 0.017 | 0 | 262 ms |
+| Jev `jev-preview` | 50/50 | 0.018 | 0 | 270 ms |
+| `tev1:latest` (xOllama) | 44/50 | 0.114 | 0 | 144 ms warm |
+| `nimble:latest` (xOllama) | 42/50 | 0.144 | 4 | 191 ms warm |
+
+tev1's misses all sat under the floor (gated to "unsure"); nimble was
+confidently wrong on a compaction-kept-a-fact case (p = 0.98). The cases
+are hand-written and cleaner than real council output: Jev's 50/50 is a
+ceiling, not an estimate (H6).
+
+**Exit H:** the seams are inert when off (parity tests); every failure path
+keeps today's behaviour; the bench is recorded; H6 before any default
+changes.
+
+---
+
 ## 7. Order and effort
 
 | Milestone | Effort | Depends on |
@@ -677,6 +723,7 @@ Not taken: the builder role, broadcast notes, the async review desk, and client-
 | E — sandbox + shell | L (E1 S, E2–E4 L, E7 L) | E1 only; can run in parallel with C/D |
 | F — PolyKV | L | A, B, C |
 | G — typed role messages | M (G1–G3 first; the default flips only after G6) | A1 (format probe); independent of C–F, can run beside D |
+| H — decision models (Jev / `/v1/systemone`) | M | independent; the struggle seam joins D2 when it lands |
 
 Releases can cut between milestones; the owner said no release before this
 work starts landing. Each milestone ships with:

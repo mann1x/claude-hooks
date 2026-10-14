@@ -502,6 +502,24 @@ Read it as a skeptical engineer, not a stenographer. Look for:
 
 If you have no material concern, the answer is good enough → **accept**.
 
+**Decision model (when configured).** If the `result` JSON has a
+top-level `decision` block, a decision model (TypeSafe's Jev or a local
+`/v1/systemone` model) already scored the answer:
+
+```json
+"decision": {"choice": "followup", "confidence": 0.71, "confident": true,
+  "probabilities": {"accept": 0.1, "followup": 0.81, "research": 0.09},
+  "model": "jev-1.13.0"}
+```
+
+Treat it as one input, never the verdict. A **confident** `followup` or
+`research` is a reason to look harder for the gap before accepting; name
+it in your rationale ("decision model: followup 0.81 — …"). A confident
+`accept` does not excuse skipping your own review. When `confident` is
+false, ignore it. Cites the engine marked `[unsupported — the cited code
+does not show this]` are claims the decision model found the cited code
+did not support — verify those first.
+
 ### 2. Decide: accept or follow up
 
 **Satisfied →** mark it accepted (terminal) and report:
@@ -812,6 +830,9 @@ and **More…** opens the next batch (ending with **Done**):
 12. **Compaction** — how a role's history is folded when it outgrows the
     window (reduced or full flow, placement, review, ledger, history
     truncation), globally, per role or per (role, model) — see Subflow L
+13. **Decision model** — a scorer (TypeSafe's Jev, or a local
+    `/v1/systemone` model such as tev1) the council asks at four seams:
+    review recommendation, confidence, struggle, citations — see Subflow M
 
 Loop back to step 1 after each successful change; exit on **Done**.
 
@@ -1164,6 +1185,35 @@ first (all roles, one role, one role on one model), then:
 
 The trigger itself is a budget knob: `set-budget --trigger-ratio <r>`
 (default 0.9) and `--output-room-min N` (default 8000).
+
+### Subflow M — Decision model
+
+Read `decision` from `config show`. Off by default. Then ask:
+
+- **Backend** — TypeSafe's Jev (no `--url`; needs a key file) or a local
+  `/v1/systemone` server (`--url http://host:11434`, no key).
+  `claude-consultants decision-models [--url …]` lists what a server has
+  (`jev-latest`, `jev-preview` on TypeSafe; decision-capable tags on
+  Ollama/xOllama).
+- **Key** — `--key-file <path>`: the file holding the key. Never put the
+  key itself in config; the engine reads the file at call time.
+- **Seams** — `--seams review,confidence,struggle,citations` (any
+  subset). `review`: accept / followup / research on the answer, shown
+  as `decision` in `result`; `confidence`: a scored confidence beside the
+  critic's and synthesizer's own; `struggle`: one nudge to a researcher
+  lane that repeats itself; `citations`: flags cites whose code does not
+  show the claim.
+- **Floors / timeout** — `--floor` (0.6), `--high-stakes-floor` (0.85,
+  the struggle nudge), `--timeout-s` (15).
+
+```
+claude-consultants config set-decision --enabled on --key-file ~/jev.key \
+    --model jev-latest --seams review,confidence,struggle,citations
+claude-consultants config set-decision --enabled off
+```
+
+State sent to TypeSafe leaves the machine (zero retention is
+enterprise-only); say so when the user picks Jev for a private repo.
 
 ### Subflow I — Tool surface
 

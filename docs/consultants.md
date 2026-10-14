@@ -1237,90 +1237,154 @@ read as thirty things it thought, and no note simply returns the
 pre-existing behaviour of re-deriving. Set
 `LoopConfig.capped_thinking_enabled = False` to disable it entirely.
 
-### What a compaction leaves behind
+### Compaction — how a long lane keeps working
 
-Compaction used to replace the elided messages with a marker counting
-them. That is honest and carries nothing: every finding, every dead end
-and every stretch of reasoning in that span was gone, and a role that
-continues with no memory of having been wrong makes the same mistakes in
-the same order.
+When a role's history reaches the trigger (0.9 of the window less the
+reply reserve), the span between the question and the recent tail is
+folded into one message. Everything about that fold is in
+`consultants/engine/compaction.py`; the cut is planned by
+`budget.plan_cut()`.
 
-Two passes now run over the span while it still exists — that moment is
-the only one where those turns are still available — and both land in
-the marker:
+**Who writes it.** Every compaction call runs on the lane's own client
+and model — there is no parameter that could name another, and a test
+asserts it — one call after another on one connection, with thinking
+off. The calls are recorded as `<role>:compaction` rows and carry
+`phase: "compaction"` for the stall monitor, which gives them their own
+thresholds (`compaction_stall_threshold_s` / `compaction_hard_s` on
+`POST /control` override them). A refused call (429/503, or a refusal
+fault) is waited out: without bound for the writer, three times on a
+2–30 s backoff for the rest.
 
+**Three flows**, chosen per role (and per model) under `[compaction]`:
+
+| flow | calls | what it is for |
+|---|---|---|
+| `reduced` (default) | writer → retrospective → reviewer | every role, every model |
+| `full` | writer (with a `<<<HALFWAY>>>` mark) → retrospective → critic, first half → critic, second half → synthesizer | small models; opt-in per role |
+| `basic` | none | the deterministic elision note only |
+
+The **writer** is the fork's present-tense replay prompt, verbatim: a
+replay written in the past tense reads as history, which the model feels
+free to doubt. It gets three attempts; an over-long draft is re-asked
+with the measured overrun. Its output is cut where it starts echoing the
+transcript (`Conversation:`, `[Tool result]:` outside a code fence) and
+long fences are trimmed. The **retrospective** is the assessment of
+method — the discarded reasoning paired with what each stretch produced
+— and has no guaranteed floor: the summary writes first. The **reviewer**
+(or, in `full`, the two critics and the synthesizer) fixes tense and
+keeps citations; a revision under half the original is rejected.
+
+**What the fold message carries**, in this order:
+
+1. every typed user request, verbatim — follow-ups included, within a
+   15% share, middle-elided if long, never dropped;
+2. the retrospective;
+3. `Context summary:` — the replay;
+4. the tool ledger entries the summary did not cite (the summary cites
+   `[#N]`; the entries are spliced in after the review, so the critics
+   move four-token citations instead of 400-character entries);
+5. the elision note.
+
+`placement` decides whether that message is a mid-history `system`
+marker or a `user` turn (the fork's and xOllama's order).
+
+**Sizing.** The target is 25% of the free window (window less system
+prompt and tool schemas), always below the trigger. The reply reserve is
+measured from the transcript: the largest of the newest three turns, or
+the second-largest once there are four samples, never below
+`output_room_min` (8,000). The cut never folds the question, the newest
+typed prompt (a follow-up is pinned instead), or less than a quarter of
+the messages, and walks back to a safe boundary so a tool call is never
+separated from its result. If the result is still over the trigger, the
+fold is re-run without a tail and the smaller result kept; a fold that
+does not shrink the history is discarded. One fold at a time per lane.
+
+**Before sizing**, the history is tidied (`consultants/engine/history.py`):
+tool results over 32,000 characters (file reads 50,000) are cut in the
+middle with a marker that says the harness made the gap and the file is
+complete; and once the history fills 40% of the window, every read
+superseded by a later read of the same range becomes
+`[outdated - see the latest file content]` — all at once, because each
+rewrite breaks the server's prefix cache.
+
+**Overflow.** A provider that refuses the request as too long gets one
+forced compaction (the deterministic fold as the floor; the model's
+digest only if it is smaller still and within the trigger) and one
+resend; a second refusal raises `ContextOverflowUnrecovered`. Ollama
+does not refuse, it truncates: a prompt count at the window's edge that
+falls 15% short of our estimate is treated the same way, and that count
+is never used for calibration. A reply cap squeezed below the output
+room by the window forces one compaction per descent.
+
+**Thinking.** `reasoning_replay` (`none` | `all` | `inline`) decides what
+a past turn's reasoning looks like on the wire. `all` is probed once per
+server and model and falls back to `inline` (`<think>` in the content)
+when the template drops the field. Inside a compaction, reasoning enters
+the writer's input cut to 2,000 characters a block. A turn that ran out
+of thinking budget and is thrown away — a continued answer, a forced
+retry, a `_single_shot` re-ask — leaves a condensed note, framed as
+reasoning the model can no longer see so it does not distrust the notice
+quoting it.
+
+**After a fold**, the loop forgets its duplicate-call stubs: a repeat of
+a call whose result was folded away runs again instead of being told to
+"use the prior result". Stubs are keyed on canonical arguments, cleared
+by any write, and the real result is re-served every fourth repeat.
+
+```bash
+claude-consultants config set-compaction --flow full --role researcher
+claude-consultants config set-compaction --placement user
+claude-consultants config set-budget --trigger-ratio 0.85 --output-room-min 6000
+claude-consultants config set-compaction --clear flow --role researcher
 ```
-Retrospective on the work this summary replaces — your own assessment,
-carried forward:
 
-## What did not
-Re-reading the same three files after each failed grep. The file was
-never the problem; the aggregation order was.
-...
+Each run's folds are `compaction` events in `transcript.db` with the
+flow, placement, reason (`trigger` / `overflow` / `silent-truncation` /
+`starved-cap`), tokens before / target / after, and whether the no-tail
+rescue ran. The bench behind the defaults is
+`benchmarks/consultants/compaction_bench.py`.
 
-Context summary:
+### Decision models — Jev and `/v1/systemone`
 
-## Goal
-Find where the metric drops rows before normalisation.
-## Ruled out
-The tokenizer (eval.py:88 counts rows, not tokens).
-...
+A decision model writes no text: it reads a state and answers typed
+questions — *is this true?* (noul), *which option?* (choice), *which
+level?* (score) — with probabilities. The council can ask one at four
+places, each switched on in `[decision] seams` and each a no-op when off
+or when the call fails:
 
-[61 earlier message(s) were elided to fit the model's context window...]
+| seam | where | what changes |
+|---|---|---|
+| `review` | after the synthesizer | an accept / followup / research recommendation on the answer, in `show` as `decision` (and `metadata.json`) for the review loop |
+| `confidence` | critic, meta-critic, synthesizer | a scored p beside the role's `CONFIDENCE:` line; the scored value is what the xauto escalator, the low-confidence interrupt and the adversary checkpoint read |
+| `struggle` | researcher loop | every 6 tool results, *is this lane repeating itself?*; a confident yes (high-stakes floor) adds one harness nudge per lane |
+| `citations` | after the CitationLinter | *does the cited code show what the sentence claims?*; a confident no annotates the cite `[unsupported — the cited code does not show this]` |
+
+Two servers speak the API. **TypeSafe's Jev** (`jev-latest`, about 270
+ms a call) needs a key; `key_file` names the file holding it — the key
+is never written into the config or a run's checkpoint. **Ollama ≥ 0.35 /
+xOllama** serves local decision models at `<root>/v1/systemone` with no
+key; `claude-consultants decision-models --url <root>` lists the ones it
+has. The client handles Ollama's limits itself: a body over 64 KiB or a
+state over the model's loaded window is cut (the state only, never the
+questions), retried, and the size that fitted is remembered.
+
+```bash
+# Jev (TypeSafe), every seam
+claude-consultants config set-decision --enabled on \
+    --key-file ~/jev.key --model jev-latest \
+    --seams review,confidence,struggle,citations
+# a local decision model instead
+claude-consultants config set-decision --url http://localhost:11434 --model tev1:latest
+claude-consultants decision-models
+claude-consultants config set-decision --enabled off
 ```
 
-The **summary** is the hand-over note — goal, done, in progress, ruled
-out, key facts, next — written from the transcript with reasoning
-excluded. The **retrospective** is the assessment of *method*, written
-from the discarded reasoning paired with what each stretch produced.
-That pairing is the point: reasoning on its own reads as a plan, and
-every plan reads as sound; the outcome beside it shows which ones were.
-Tool results are reduced to a verdict (`applied`, `refused as an
-unchanged repeat`, `failed: …`), and each turn carries its reasoning
-cost in tokens — the one thing a model cannot infer from re-reading its
-own thinking is that the stretch which felt thorough was the turn that
-spent eighteen thousand tokens for one refused call.
-
-The retrospective comes first because it is what should be read first:
-how the work went, before what the work was.
-
-Budgets: the summary writes first against 70% of a combined budget that
-grows with **generation** (0.33 → 0.55 of the compaction target across
-five compactions, then flat — a fifth compaction is carrying everything
-the task has learned, and holding it to a first compaction's budget is
-how a long run degrades). The retrospective is then sized from what the
-summary actually cost, so an economical summary buys it room. Each
-digest chains into the next, which revises rather than restates it.
-
-**The summary writes first and takes what it needs; the retrospective
-is capped at what is left to reach the target.** There is no guaranteed
-floor for it: when the summary spends the budget, the retrospective is
-skipped and the skip is logged. The summary is the only record of *what
-happened* — lose it and the next turn cannot continue the work at all,
-whereas the retrospective improves how the work is done.
-
-```
-retrospective skipped: the summary spent 2604 of a 2640 budget,
-leaving 36 — below the 512 floor for a usable assessment
-```
-
-The digest's **input** is bounded too, by a projection rather than a
-character cap (`claude_hooks/budget_projection.py`). A cap can sever an
-assistant's tool call from the result answering it, which is not a
-smaller conversation but an invalid one. The projection degrades in a
-fixed order — reasoning per intent, then text truncation newest-first,
-then whole messages oldest-first **in tool-pair closures** — and never
-drops the first or latest typed user message or the turn in flight. It
-reports what it did:
-
-```
-summary input projection ok: ~7865 tok (33 dropped_field)
-retrospective input projection ok: ~9555 tok (40 dropped_message, 64 truncated_text)
-```
-
-If either phase fails or comes back empty, compaction still happens and
-falls back to the bare elision note — a digest that cannot be written
-must never block the compaction it was meant to enrich.
+Each call is a `decision` event in `transcript.db` (seam, model,
+latency, answers, or the error). What Jev sees is the question and the
+answer, the critic's evidence, a lane's recent call lines, or a cite with
+its code — bounded per part. Zero data retention at TypeSafe is
+enterprise-only. Measured on 25 council-shaped cases:
+[`benchmarks/consultants/results/2026-10-14/decision/report.md`](../benchmarks/consultants/results/2026-10-14/decision/report.md).
 
 ---
 

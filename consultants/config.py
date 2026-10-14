@@ -919,6 +919,44 @@ class ProtocolConfig:
     typed: bool = False
 
 
+#: Where a decision model is asked (plan H). ``review``: an accept /
+#: followup / research recommendation on the council's answer;
+#: ``confidence``: a scored confidence beside the critic's and
+#: synthesizer's self-rating; ``struggle``: a stuck-vs-progressing reading
+#: of a lane's recent calls; ``citations``: whether quoted code supports
+#: the claim citing it.
+DECISION_SEAMS = ("review", "confidence", "struggle", "citations")
+
+
+@dataclass
+class DecisionConfig:
+    """A decision model (TypeSafe's Jev, or a ``/v1/systemone`` server
+    such as xOllama with tev1 / nimble). Off by default; no host defaults.
+
+    ``url`` empty means TypeSafe (``https://api.typesafe.ai/v1``), which
+    needs a key: ``key_file`` names a file holding it (the secret itself
+    never enters this config or the run's checkpoint), else the
+    ``TYPESAFE_API_KEY`` environment variable."""
+    enabled: bool = False
+    url: Optional[str] = None
+    model: str = "jev-latest"
+    key_file: Optional[str] = None
+    floor: float = 0.6
+    high_stakes_floor: float = 0.85
+    timeout_s: float = 15.0
+    seams: list = field(default_factory=lambda: list(DECISION_SEAMS))
+
+
+def check_decision_seams(value: Any) -> list:
+    items = value if isinstance(value, (list, tuple)) else [
+        v.strip() for v in str(value).split(",") if v.strip()]
+    bad = [v for v in items if v not in DECISION_SEAMS]
+    if bad:
+        raise ValueError(f"unknown seam(s) {bad}; seams: "
+                         f"{', '.join(DECISION_SEAMS)}")
+    return list(dict.fromkeys(items))
+
+
 #: Backends an ``[endpoints.<name>]`` entry may name. ``opencoti`` and
 #: ``llamacpp`` speak OpenAI ``/v1/chat/completions``; ``xollama`` and
 #: ``ollama`` speak Ollama's native ``/api/chat``.
@@ -1001,6 +1039,7 @@ class ConsultantsConfig:
     })
     endpoints: dict[str, EndpointConfig] = field(default_factory=dict)
     protocol: ProtocolConfig = field(default_factory=ProtocolConfig)
+    decision: DecisionConfig = field(default_factory=DecisionConfig)
     # Plan B: ``[budget]`` / ``[sampling]`` — only the keys a layer set.
     budget: dict[str, Any] = field(default_factory=dict)
     sampling: dict[str, Any] = field(default_factory=dict)
@@ -1452,6 +1491,39 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
     if isinstance(proto, dict) and isinstance(proto.get("typed"), bool):
         base.protocol.typed = proto["typed"]
 
+    # decision model (plan H)
+    dec = raw.get("decision") or {}
+    if isinstance(dec, dict) and dec:
+        d = base.decision
+        if isinstance(dec.get("enabled"), bool):
+            d.enabled = dec["enabled"]
+        for k in ("url", "key_file"):
+            if k in dec:
+                v = dec[k]
+                setattr(d, k, (str(v).strip().rstrip("/") or None)
+                        if v is not None else None)
+        if isinstance(dec.get("model"), str) and dec["model"].strip():
+            d.model = dec["model"].strip()
+        for k, lo, hi in (("floor", 0.0, 1.0), ("high_stakes_floor", 0.0, 1.0),
+                          ("timeout_s", 0.5, 300.0)):
+            if k in dec:
+                try:
+                    v = float(dec[k])
+                    if not lo <= v <= hi:
+                        raise ValueError(f"must be in [{lo}, {hi}]")
+                    setattr(d, k, v)
+                except (TypeError, ValueError) as e:
+                    log.warning("consultants config: decision.%s = %r "
+                                "ignored: %s", k, dec[k], e)
+        if "seams" in dec:
+            try:
+                d.seams = check_decision_seams(dec["seams"])
+            except ValueError as e:
+                log.warning("consultants config: decision.seams: %s", e)
+        if "api_key" in dec:
+            log.warning("consultants config: decision.api_key is not read; "
+                        "put the key in a file and set decision.key_file")
+
     # endpoints (plan A1): ``[endpoints.<name>] url, backend, model, api_key``
     eps = raw.get("endpoints") or {}
     if isinstance(eps, dict):
@@ -1865,6 +1937,24 @@ def _render(cfg: ConsultantsConfig, *,
              "synthesizer stays prose. Off until benched.")
     L.append(f"typed = {'true' if cfg.protocol.typed else 'false'}")
     L.append("")
+    d = cfg.decision
+    if d != DecisionConfig():
+        L.append("[decision]")
+        L.append("# A decision model (plan H): TypeSafe's Jev when url is "
+                 "unset (key from key_file or TYPESAFE_API_KEY), or a "
+                 "/v1/systemone server such as xOllama. seams: "
+                 + ", ".join(DECISION_SEAMS) + ".")
+        L.append(f"enabled = {'true' if d.enabled else 'false'}")
+        if d.url:
+            L.append(f"url = {_toml_str(d.url)}")
+        L.append(f"model = {_toml_str(d.model)}")
+        if d.key_file:
+            L.append(f"key_file = {_toml_str(d.key_file)}")
+        L.append(f"floor = {d.floor!r}")
+        L.append(f"high_stakes_floor = {d.high_stakes_floor!r}")
+        L.append(f"timeout_s = {d.timeout_s!r}")
+        L.append("seams = [" + ", ".join(_toml_str(x) for x in d.seams) + "]")
+        L.append("")
     for name, ep in sorted(cfg.endpoints.items()):
         L.append(f"[endpoints.{name}]")
         L.append(f"url = {_toml_str(ep.url)}")
@@ -2185,6 +2275,52 @@ def set_protocol(*, typed: Optional[bool] = None, scope: str = "user",
     cfg = _load_for_edit(scope, cwd)
     if typed is not None:
         cfg.protocol.typed = bool(typed)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_decision(*, enabled: Optional[bool] = None,
+                 url: Optional[str] = None, model: Optional[str] = None,
+                 key_file: Optional[str] = None,
+                 floor: Optional[float] = None,
+                 high_stakes_floor: Optional[float] = None,
+                 timeout_s: Optional[float] = None,
+                 seams: Optional[Any] = None, reset: bool = False,
+                 scope: str = "user",
+                 cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set ``[decision]`` (plan H). Unset arguments keep their value; an
+    empty ``url`` / ``key_file`` clears it (TypeSafe / the env key).
+    Bad values raise ``ValueError``; nothing is written then."""
+    if url and not url.strip().startswith(("http://", "https://")):
+        raise ValueError("url must start with http:// or https://")
+    for name, v, lo, hi in (("floor", floor, 0.0, 1.0),
+                            ("high_stakes_floor", high_stakes_floor, 0.0, 1.0),
+                            ("timeout_s", timeout_s, 0.5, 300.0)):
+        if v is not None and not lo <= float(v) <= hi:
+            raise ValueError(f"{name} must be in [{lo}, {hi}]")
+    checked_seams = check_decision_seams(seams) if seams is not None else None
+    if key_file:
+        kp = Path(key_file).expanduser()
+        if not kp.is_file():
+            raise ValueError(f"key_file {key_file!r} is not a file")
+    cfg = _load_for_edit(scope, cwd)
+    d = DecisionConfig() if reset else cfg.decision
+    if enabled is not None:
+        d.enabled = bool(enabled)
+    if url is not None:
+        d.url = url.strip().rstrip("/") or None
+    if model is not None and model.strip():
+        d.model = model.strip()
+    if key_file is not None:
+        d.key_file = key_file.strip() or None
+    if floor is not None:
+        d.floor = float(floor)
+    if high_stakes_floor is not None:
+        d.high_stakes_floor = float(high_stakes_floor)
+    if timeout_s is not None:
+        d.timeout_s = float(timeout_s)
+    if checked_seams is not None:
+        d.seams = checked_seams
+    cfg.decision = d
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 

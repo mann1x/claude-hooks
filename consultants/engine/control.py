@@ -226,11 +226,27 @@ def runtime_control_defaults(
     sampling = sampling_layers(cfg)
     if sampling:
         rc["sampling"] = sampling  # type: ignore[typeddict-item]
+    # Plan H: only when on. The key file's path, never the key: this
+    # record rides the checkpoint to disk.
+    decision = decision_settings(cfg)
+    if decision:
+        rc["decision"] = decision  # type: ignore[typeddict-item]
     # Plan C: layers only when something is set (M12 parity).
     compaction = compaction_layers(cfg)
     if compaction:
         rc["compaction"] = compaction  # type: ignore[typeddict-item]
     return rc
+
+
+def decision_settings(cfg: cc.ConsultantsConfig) -> dict:
+    """``[decision]`` for the run record; empty unless enabled with at
+    least one seam."""
+    d = getattr(cfg, "decision", None)
+    if d is None or not d.enabled or not d.seams:
+        return {}
+    return {"url": d.url, "model": d.model, "key_file": d.key_file,
+            "floor": d.floor, "high_stakes_floor": d.high_stakes_floor,
+            "timeout_s": d.timeout_s, "seams": list(d.seams)}
 
 
 def compaction_layers(cfg: cc.ConsultantsConfig) -> dict:

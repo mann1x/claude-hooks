@@ -516,6 +516,9 @@ class CouncilStateV2(TypedDict, total=False):
     # we keep history for escalation + telemetry; readers use [-1].
     confidence: Annotated[list[float], latest_or_none]
 
+    # Plan H: the decision model's recommendation on the final answer.
+    decision_review: Optional[dict]
+
     # Synthesizer's work-in-progress draft. Overwritten on each
     # iteration. The HITL interrupt-before-synthesis flow shows this
     # to the user.

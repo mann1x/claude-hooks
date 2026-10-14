@@ -478,13 +478,71 @@ def lint_answer(
     return annotated, issues
 
 
+UNSUPPORTED_NOTE = " [unsupported — the cited code does not show this]"
+#: Lines of code around a cite handed to the decision model, each side.
+SEMANTIC_CONTEXT_LINES = 3
+#: Characters of answer text before a cite taken as its claim.
+SEMANTIC_CLAIM_CHARS = 400
+
+
+def semantic_items(answer_text: str, *,
+                   allowed_roots: Sequence[str]) -> list[dict]:
+    """``{"match", "claim", "code"}`` for each cite that resolves to a
+    real line (plan H, ``citations`` seam): the sentence(s) before the
+    cite, and the cited lines with ``SEMANTIC_CONTEXT_LINES`` of context.
+    Cites already annotated, or that do not resolve, are left to
+    :func:`lint_answer`."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for m in CITATION_RE.finditer(answer_text or ""):
+        if _is_url_tail(answer_text, m.start()) or \
+                _already_annotated_at(answer_text, m.end()):
+            continue
+        full = m.group(0)
+        if full in seen:
+            continue
+        resolved = _resolve_path(m.group("path"), allowed_roots)
+        lines = _load_file_lines(resolved) if resolved else None
+        start = int(m.group("line_start"))
+        end = int(m.group("line_end") or start)
+        if not lines or start < 1 or start > len(lines):
+            continue
+        lo = max(1, start - SEMANTIC_CONTEXT_LINES)
+        hi = min(len(lines), max(start, end) + SEMANTIC_CONTEXT_LINES)
+        code = "\n".join(f"{n}: {lines[n - 1]}" for n in range(lo, hi + 1))
+        head = answer_text[max(0, m.start() - SEMANTIC_CLAIM_CHARS):m.end()]
+        # The claim starts at the last sentence or bullet break.
+        cut = max(head.rfind("\n"), head.rfind(". ", 0, len(head) - len(full)))
+        claim = head[cut + 1:].strip() if cut >= 0 else head.strip()
+        seen.add(full)
+        out.append({"match": full, "claim": claim, "code": code})
+    return out
+
+
+def annotate_unsupported(answer_text: str, matches: Sequence[str]) -> str:
+    """Append :data:`UNSUPPORTED_NOTE` after each cite in ``matches``
+    (every occurrence; already-annotated ones are left alone)."""
+    out = answer_text
+    for full in dict.fromkeys(matches):
+        pieces = out.split(full)
+        rebuilt = pieces[0]
+        for piece in pieces[1:]:
+            if piece.startswith((" [unverified", " [in ", " [unsupported")):
+                rebuilt += full + piece
+            else:
+                rebuilt += full + UNSUPPORTED_NOTE + piece
+        out = rebuilt
+    return out
+
+
 def _already_annotated_at(text: str, idx: int) -> bool:
     """True iff a ``[unverified`` or ``[in `` marker immediately
     follows position ``idx`` (the linter's own previous annotation).
     Used to make :func:`lint_answer` idempotent on re-runs.
     """
     suffix = text[idx:idx + 16]
-    return suffix.startswith(" [unverified") or suffix.startswith(" [in ")
+    return (suffix.startswith(" [unverified") or suffix.startswith(" [in ")
+            or suffix.startswith(" [unsupported"))
 
 
 def _verify_symbol_match(

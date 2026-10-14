@@ -467,6 +467,10 @@ def cmd_show(args, base: str) -> int:
         "metadata": (json.loads(metadata_path.read_text(encoding="utf-8"))
                      if metadata_path.exists() else None),
     }
+    if out["metadata"] and out["metadata"].get("decision"):
+        # Plan H: the decision model's accept / followup / research
+        # recommendation, for the review loop.
+        out["decision"] = out["metadata"]["decision"]
     samplers = _session_samplers(sdir / storage.TRANSCRIPT_DB_FILENAME)
     if samplers:
         out["samplers"] = samplers
@@ -620,6 +624,9 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
             "http_port": cfg.service.http_port,
         },
         "protocol": {"typed": cfg.protocol.typed},
+        "decision": {k: getattr(cfg.decision, k) for k in (
+            "enabled", "url", "model", "key_file", "floor",
+            "high_stakes_floor", "timeout_s", "seams")},
         # Plan B: only the keys set; unset ones use the shipped defaults.
         "budget": dict(cfg.budget),
         "sampling": dict(cfg.sampling),
@@ -1259,6 +1266,38 @@ def cmd_config_set_protocol(args, base: str) -> int:
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
     return _emit_config(cfg, args)
+
+
+def cmd_config_set_decision(args, base: str) -> int:
+    enabled = None
+    if args.enabled is not None:
+        enabled = args.enabled == "on"
+    try:
+        cfg = cc.set_decision(
+            enabled=enabled, url=args.url, model=args.model,
+            key_file=args.key_file, floor=args.floor,
+            high_stakes_floor=args.high_stakes_floor,
+            timeout_s=args.timeout_s, seams=args.seams, reset=args.reset,
+            **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_decision_models(args, base: str) -> int:
+    """The decision models the configured (or given) endpoint serves."""
+    from claude_hooks import decision_client as dc
+    cfg = cc.load_config(Path(args.cwd or os.getcwd()).resolve())
+    d = cfg.decision
+    ep = dc.Endpoint(base_url=args.url or d.url or dc.DEFAULT_BASE_URL,
+                     model=d.model, key_file=d.key_file)
+    try:
+        models = dc.list_models(ep)
+    except dc.DecisionError as e:
+        raise CLIError(str(e), exit_code=1) from None
+    print(json.dumps({"ok": True, "url": dc.routes(ep.base_url).systemone,
+                      "models": models}, indent=2))
+    return 0
 
 
 def cmd_config_set_budget(args, base: str) -> int:
@@ -2130,6 +2169,15 @@ def build_parser() -> argparse.ArgumentParser:
                                    "acceptance.")
     ac.set_defaults(fn=cmd_accept)
 
+    dm = sub.add_parser(
+        "decision-models",
+        help="List the decision models the [decision] endpoint (or --url) "
+             "serves: TypeSafe's /v1/models, or Ollama's decision-capable "
+             "tags.")
+    dm.add_argument("--url", help="Ask this server instead.")
+    dm.add_argument("--cwd", help="Project root (default: cwd).")
+    dm.set_defaults(fn=cmd_decision_models)
+
     # grant — consultancy review loop: raise the followup cap now.
     gr = sub.add_parser(
         "grant",
@@ -2724,6 +2772,37 @@ def build_parser() -> argparse.ArgumentParser:
     cpr.add_argument("--typed", choices=["on", "off"])
     _add_scope_args(cpr)
     cpr.set_defaults(fn=cmd_config_set_protocol)
+
+    cde = cfg_sub.add_parser(
+        "set-decision",
+        help="A decision model (plan H): TypeSafe's Jev (no --url; key "
+             "from --key-file or TYPESAFE_API_KEY) or a /v1/systemone "
+             "server such as xOllama (--url). Seams: review, confidence, "
+             "struggle, citations.")
+    cde.add_argument("--enabled", choices=["on", "off"])
+    cde.add_argument("--url", help="Server root, its /v1 or the full "
+                     "/v1/systemone path; '' = TypeSafe.")
+    cde.add_argument("--model", help="jev-latest / jev-preview on "
+                     "TypeSafe; a decision-capable tag (tev1, nimble, …) "
+                     "on Ollama. `claude-consultants decision-models` "
+                     "lists them.")
+    cde.add_argument("--key-file", dest="key_file",
+                     help="File holding the API key (the key itself is "
+                          "never written to config); '' clears.")
+    cde.add_argument("--floor", type=float,
+                     help="Confidence floor (default 0.6).")
+    cde.add_argument("--high-stakes-floor", dest="high_stakes_floor",
+                     type=float, help="Floor for a struggle nudge "
+                                      "(default 0.85).")
+    cde.add_argument("--timeout-s", dest="timeout_s", type=float,
+                     help="Whole-call deadline, retries included "
+                          "(default 15).")
+    cde.add_argument("--seams", help="Comma list of review, confidence, "
+                                     "struggle, citations.")
+    cde.add_argument("--reset", action="store_true",
+                     help="Back to the defaults (off) before applying.")
+    _add_scope_args(cde)
+    cde.set_defaults(fn=cmd_config_set_decision)
 
     cbu = cfg_sub.add_parser(
         "set-budget",

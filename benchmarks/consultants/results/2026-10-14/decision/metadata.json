@@ -1,0 +1,14 @@
+{
+  "date": "2026-10-14",
+  "targets": [
+    "typesafe:jev-latest",
+    "typesafe:jev-preview",
+    "xollama:tev1:latest",
+    "xollama:nimble:latest"
+  ],
+  "cases": 25,
+  "repeats": 2,
+  "xollama": "http://192.168.178.2:11433",
+  "floor": 0.6,
+  "cases_file": "benchmarks/consultants/questions/decision/cases.json"
+}

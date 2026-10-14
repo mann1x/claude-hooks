@@ -1275,11 +1275,17 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                 status_code=404,
                 detail=f"artifacts missing for sid {sid}",
             )
-        return _attach_consultancy(app, sid, {
+        meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+        body = {
             "sid": sid,
             "summary_markdown": summary_path.read_text(encoding="utf-8"),
-            "metadata": json.loads(metadata_path.read_text(encoding="utf-8")),
-        }, cwd_hint=str(cwd))
+            "metadata": meta,
+        }
+        if isinstance(meta, dict) and meta.get("decision"):
+            # Plan H: the decision model's recommendation, for the
+            # review loop. Absent when the seam is off.
+            body["decision"] = meta["decision"]
+        return _attach_consultancy(app, sid, body, cwd_hint=str(cwd))
 
     # ----------------------- list -------------------------------- #
     @app.get("/v1/sessions")
