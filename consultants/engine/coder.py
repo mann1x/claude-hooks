@@ -49,6 +49,7 @@ from typing import Any, Callable, Optional
 
 from consultants.engine.coder_defaults import language_from_path
 from consultants.engine.state_v2 import CoderArtifact, CoderTaskItem
+from consultants.engine.recorder import guard_sink
 
 log = logging.getLogger("consultants.engine.coder")
 
@@ -641,6 +642,8 @@ def coder_node(state: dict,
             tools_available=True,
             think=think,
             force_first_tool_call=False,
+            on_guard=guard_sink(recorder, role="coder",
+                                 round=parent_round, lane_idx=lane_idx),
         )
 
     # Walk the failover chain. Each iteration is a fully-isolated

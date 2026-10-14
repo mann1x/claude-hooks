@@ -1068,6 +1068,11 @@ class ChatClient:
                     if sent_tb is not None:
                         self.last_timings["think_budget_tokens"] = sent_tb
                         self.last_timings["think_budget_source"] = "sent"
+                if data.get("reasoning_loop"):
+                    # Plan D1: the stream was cut on a reasoning loop.
+                    # The record keeps the quantity the guard fired on.
+                    out["reasoning_loop"] = data["reasoning_loop"]
+                    self.last_timings["reasoning_loop"] = data["reasoning_loop"]
                 out["timings"] = self.last_timings
                 self._note_grant(payload, self.last_timings)
                 return out
@@ -1231,12 +1236,15 @@ class ChatClient:
         returns True between lines.
         """
         from consultants.engine.stall import CancelledByOrchestrator
+        from claude_hooks import reasoning_loop_guard as rlg
 
         content_parts: list[str] = []
         tool_calls: list[dict] = []
         last_msg_extra: dict = {}
         final_fields: dict = {}
         role = "assistant"
+        guard = rlg.ReasoningLoopGuard()
+        verdict = None
 
         for raw_line in resp:
             if cancel_check is not None and cancel_check():
@@ -1275,6 +1283,7 @@ class ChatClient:
                         if v:
                             last_msg_extra[k] = last_msg_extra.get(k, "") + v
                             reasoned = True
+                            verdict = guard.push(v)
                     else:
                         last_msg_extra[k] = v
                 # ``on_token`` is the caller's liveness signal (the stall
@@ -1302,6 +1311,11 @@ class ChatClient:
                          "cached_prompt_tokens"):
                     if k in obj:
                         final_fields[k] = obj[k]
+            # A reasoning loop (plan D1): stop reading. Leaving the
+            # ``with urlopen`` block closes the connection, which is what
+            # stops the provider generating — and billing.
+            if verdict is not None:
+                break
 
         merged_message: dict = {"role": role,
                                 "content": "".join(content_parts)}
@@ -1311,6 +1325,10 @@ class ChatClient:
 
         result = {"message": merged_message}
         result.update(final_fields)
+        if verdict is not None:
+            result["done"] = True
+            result["done_reason"] = rlg.DONE_REASON
+            result["reasoning_loop"] = verdict.public_dict()
         return result
 
     def _to_ollama(self, payload: dict, *, strip_think: bool = False) -> dict:
@@ -1566,7 +1584,9 @@ class OpenAICompatChatClient(ChatClient):
         out: dict = {
             "message": message,
             "done": True,
-            "done_reason": "length" if finish_reason == "length" else "stop",
+            "done_reason": (finish_reason
+                            if finish_reason in ("length", "reasoning_loop")
+                            else "stop"),
         }
         usage = usage or {}
         if usage.get("prompt_tokens") is not None:
@@ -1605,6 +1625,7 @@ class OpenAICompatChatClient(ChatClient):
         fragments are concatenated. A comment line (``: ping``) is the
         engine's keepalive and counts as liveness."""
         from consultants.engine.stall import CancelledByOrchestrator
+        from claude_hooks import reasoning_loop_guard as rlg
 
         content: list[str] = []
         reasoning: list[str] = []
@@ -1612,7 +1633,13 @@ class OpenAICompatChatClient(ChatClient):
         finish: Optional[str] = None
         usage: Optional[dict] = None
         timings: Optional[dict] = None
+        guard = rlg.ReasoningLoopGuard()
+        verdict = None
         for raw in resp:
+            if verdict is not None:
+                # Plan D1: stop reading; closing the connection stops
+                # the server generating.
+                break
             if cancel_check is not None and cancel_check():
                 raise CancelledByOrchestrator()
             line = (raw.decode("utf-8", errors="replace")
@@ -1652,6 +1679,7 @@ class OpenAICompatChatClient(ChatClient):
                     content.append(piece)
                 if think:
                     reasoning.append(think)
+                    verdict = guard.push(think)
                 for tc in tcs:
                     i = int(tc.get("index", len(calls)))
                     slot = calls.setdefault(i, {"id": None, "type": "function",
@@ -1680,6 +1708,10 @@ class OpenAICompatChatClient(ChatClient):
         if calls:
             msg["tool_calls"] = [
                 {**c, "id": c["id"] or f"tc_{i}"} for i, c in sorted(calls.items())]
+        if verdict is not None:
+            out = self._ollama_shape(msg, rlg.DONE_REASON, usage, timings)
+            out["reasoning_loop"] = verdict.public_dict()
+            return out
         return self._ollama_shape(msg, finish, usage, timings)
 
 

@@ -745,6 +745,21 @@ class MessageRecorder:
 # disk-loaded and warm code paths symmetric).
 # ---------------------------------------------------------------- #
 
+def guard_sink(recorder: Optional["MessageRecorder"], *, role: str,
+               round: Optional[int] = None,
+               lane_idx: Optional[int] = None):
+    """``LoopConfig.on_guard`` for a role (plan D): each guard trip and
+    stop lands as a ``kind="guard"`` event carrying the quantity it fired
+    on. ``None`` without a recorder — the guards still act, unrecorded."""
+    if recorder is None:
+        return None
+
+    def _sink(event: dict) -> None:
+        recorder.record_event(kind="guard", role=role, round=round,
+                              lane_idx=lane_idx, payload=dict(event))
+    return _sink
+
+
 def load_role_messages(
     db_path: Path | str,
 ) -> tuple[Optional[dict[str, list[dict]]],

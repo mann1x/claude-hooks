@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from claude_hooks import capped_thinking, reasoning_replay, truncation
+from claude_hooks import reasoning_loop_guard as rlg
 
 log = logging.getLogger("claude_hooks.agent_loop")
 
@@ -126,6 +127,16 @@ class LoopConfig:
     result_invalid_message: str = (
         "Your {name} call was {what}. Call {name} again, smaller: shorter "
         "fields and fewer items.")
+
+    # Plan D1: the reasoning-loop guard is always on. A turn whose
+    # reasoning collapsed into repetition is cut (the stream readers stop
+    # reading; a reply that was not streamed is scanned after the fact),
+    # its partial content kept and the loop continued with a note; this
+    # many cut turns in a row end the loop with one forced tool-less
+    # report. ``on_guard`` gets one event dict per trip and per stop —
+    # the quantity the guard fired on included. Exceptions are ignored.
+    reasoning_loop_max_trips: int = rlg.DEFAULT.max_consecutive_trips
+    on_guard: Optional[Callable[[dict], None]] = None
 
 
 def _json_args(tc: dict) -> bool:
@@ -485,6 +496,97 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
     return results
 
 
+REASONING_LOOP_NOTE = (
+    "[SYSTEM MESSAGE] Your last turn was stopped by the harness: {diagnosis} "
+    "That turn's reasoning was cut and is not carried into this request. "
+    "Do not reason through the same ground again. Take the next concrete "
+    "step instead: call a tool, or give your answer.")
+
+REASONING_LOOP_FINAL = (
+    "[SYSTEM MESSAGE] Your reasoning has looped {trips} turns in a row "
+    "({diagnosis}), so the harness is ending this task. Tools are off. "
+    "Write your report now from what you have already established: what "
+    "you found, with its evidence, and what is still open. Keep any "
+    "reasoning short.")
+
+
+def reasoning_loop_verdict(response: dict) -> Optional[dict]:
+    """The guard's verdict on one reply, or ``None``.
+
+    A streamed reply the reader cut carries it already. A reply that was
+    not streamed is scanned after the fact, and counts only when the
+    reasoning ate the turn — no content and no tool call: there the
+    billing already happened, but a loop that left nothing still has to
+    end the lane rather than be asked again forever."""
+    v = response.get("reasoning_loop")
+    if isinstance(v, dict) and v:
+        return v
+    choices = response.get("choices") or [{}]
+    choice = choices[0] or {}
+    if (choice.get("done_reason") or response.get("done_reason")) == rlg.DONE_REASON:
+        return {"kind": "unknown"}
+    msg = choice.get("message") or {}
+    if (msg.get("content") or "").strip() or msg.get("tool_calls"):
+        return None
+    found = rlg.scan(capped_thinking.thinking_text(msg))
+    return found.public_dict() if found is not None else None
+
+
+def _verdict_text(v: dict) -> str:
+    if v.get("kind") not in ("low-uniqueness", "line-cycle", "phrase-cycle"):
+        return "The model's reasoning collapsed into repetition."
+    return rlg.describe(rlg.Verdict(
+        kind=v["kind"], chars=int(v.get("chars") or 0),
+        sample=str(v.get("sample") or ""), period=v.get("period"),
+        cycles=v.get("cycles"), distinct=v.get("distinct")))
+
+
+def _emit_guard(config: "LoopConfig", event: dict) -> None:
+    cb = getattr(config, "on_guard", None)
+    if cb is None:
+        return
+    try:
+        cb(event)
+    except Exception:
+        log.exception("on_guard callback raised; ignored")
+
+
+#: Reasoning handed to the condenser, at most (the part before the loop).
+LOOP_NOTE_INPUT_CHARS = 20_000
+
+
+def _before_loop(thinking: str, verdict: dict) -> str:
+    """The reasoning up to the first occurrence of the repeating unit."""
+    if not thinking:
+        return ""
+    unit = str(verdict.get("sample") or "").split(" / ")[0].strip()[:60]
+    at = thinking.find(unit) if len(unit) >= 4 else -1
+    head = thinking[:at] if at >= 0 else ""
+    return head[-LOOP_NOTE_INPUT_CHARS:]
+
+
+def _reasoning_loop_note(msg: dict, payload: dict, chat_fn: "ChatFn",
+                         verdict: dict) -> Optional[str]:
+    """What the cut reasoning had settled before it looped, condensed —
+    or ``None``. The loop itself is not sent to the condenser: tens of
+    thousands of repeated characters are nothing to summarise, and a
+    condenser fed them tends to repeat them."""
+    thinking = _before_loop(capped_thinking.thinking_text(msg), verdict)
+    if len(thinking.strip()) < 200:
+        return None
+    capped = capped_thinking.CappedThinking(
+        thinking=thinking, thinking_tokens=0, budget_tokens=None,
+        evidence="reasoning-loop")
+    note, reason = capped_thinking.condense(
+        capped, chat_client=_ChatFnClient(chat_fn),
+        model=payload.get("model") or "")
+    if note is None:
+        log.info("reasoning-loop: no usable condensed note (%s)", reason)
+        return None
+    return capped_thinking.as_discarded_turn_note(
+        capped_thinking.as_thinking_block(note))
+
+
 def run_loop(
     payload: dict,
     cwd: str,
@@ -549,6 +651,7 @@ def run_loop(
     seen_calls: dict[str, str] = {}
     repeats: dict[str, int] = {}
     compaction_gen = 0
+    loop_trips = 0
 
     if config.tools_available and preseed_builder is not None:
         preseed = preseed_builder(cwd)
@@ -628,6 +731,65 @@ def run_loop(
             i, finish_reason, len(tool_calls),
             len((msg.get("content") or "")),
         )
+        verdict = reasoning_loop_verdict(final)
+        if verdict is None:
+            loop_trips = 0
+        else:
+            # Plan D1. The turn is cut: its tool calls may be half-written
+            # and its reasoning is the loop, so neither goes back. A
+            # thinking-only re-ask (force_first, truncation continuation)
+            # never applies to it.
+            loop_trips += 1
+            limit = max(1, int(config.reasoning_loop_max_trips))
+            diagnosis = _verdict_text(verdict)
+            event = {
+                "guard": "reasoning_loop", "action": (
+                    "stop" if loop_trips >= limit else "cut"),
+                "iteration": i, "trips": loop_trips, "limit": limit,
+                **verdict}
+            # The realized sampler (plan A5): loops trace back to sampling.
+            sampler = (final.get("timings") or {}).get("sampler")
+            if sampler:
+                event["sampler"] = sampler
+            _emit_guard(config, event)
+            log.warning("reasoning loop on iter %d (%d/%d): %s",
+                        i, loop_trips, limit, diagnosis)
+            partial = (msg.get("content") or "").strip()
+            history = list(payload["messages"])
+            if partial:
+                history.append({"role": "assistant", "content": partial})
+            if loop_trips >= limit:
+                payload = dict(payload)
+                payload.pop("tools", None)
+                payload.pop("tool_choice", None)
+                payload["think"] = False
+                payload["reasoning_effort"] = "none"
+                payload["messages"] = history + [{
+                    "role": "user", "_harness": True,
+                    "content": REASONING_LOOP_FINAL.format(
+                        trips=loop_trips, diagnosis=diagnosis)}]
+                t_iter = time.monotonic()
+                final = chat_fn(payload)
+                _notify_response(config, payload, final)
+                if on_iter is not None:
+                    try:
+                        on_iter(i, payload, final,
+                                int((time.monotonic() - t_iter) * 1000))
+                    except Exception:
+                        log.exception("on_iter callback raised; ignored")
+                final = dict(final or {})
+                final["_stop_reason"] = "reasoning_loop"
+                final["_failure_class"] = "reasoning_loop"
+                final["_reasoning_loop"] = verdict
+                break
+            note = _reasoning_loop_note(msg, payload, chat_fn, verdict)
+            text = REASONING_LOOP_NOTE.format(diagnosis=diagnosis)
+            if note:
+                text += "\n\n" + note
+            payload = dict(payload)
+            payload["messages"] = history + [
+                {"role": "user", "content": text, "_harness": True}]
+            continue
         if finish_reason != "tool_calls" or not tool_calls:
             if (force_first and not has_called_tool
                     and config.tools_available

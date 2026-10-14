@@ -45,6 +45,7 @@ from typing import Any, Optional
 from claude_hooks import capped_thinking, token_calib, truncation
 from consultants.engine import budget
 from consultants.engine.storage import RoleTurn
+from consultants.engine.recorder import guard_sink
 
 log = logging.getLogger("consultants.engine.council")
 
@@ -2158,6 +2159,8 @@ def _role_turn(chat_client, model: str, messages: list[dict],
             on_response=_budgeter.observe,
             thinking_budget_message=_think_budget_message(chat_client, model),
             reasoning_replay=_reasoning_replay(chat_client, model, knobs),
+            on_guard=guard_sink(recorder, role=role, round=round,
+                                 lane_idx=lane_idx),
         )
         loop_kwargs = dict(config=cfg, tool_specs=tool_specs,
                            chat_fn=_budgeter.recover(chat_client.chat),
@@ -2989,6 +2992,8 @@ def researcher_node(state: dict, *,
             thinking_budget_message=_think_budget_message(chat_client, model),
             reasoning_replay=_reasoning_replay(
                 chat_client, model, _budget_knobs(state, "researcher", model)),
+            on_guard=guard_sink(recorder, role="researcher",
+                                 round=this_round, lane_idx=lane_idx),
         )
 
     # Bind recorder callbacks to the loop_runner so per-iteration LLM

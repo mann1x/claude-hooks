@@ -55,6 +55,7 @@ import time
 from typing import Any, Optional
 
 from consultants.engine.state_v2 import ToolPlanItem, ToolResult
+from consultants.engine.recorder import guard_sink
 
 log = logging.getLogger("consultants.engine.tool_executor")
 
@@ -281,6 +282,8 @@ def tool_executor_node(state: dict,
             tools_available=True,
             think=think,
             force_first_tool_call=False,
+            on_guard=guard_sink(recorder, role="tool_executor",
+                                 round=parent_round, lane_idx=lane_idx),
         )
 
     # Recorder callbacks — exactly the researcher pattern, but
