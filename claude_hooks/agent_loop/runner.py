@@ -25,6 +25,7 @@ from typing import Any, Callable, Optional
 
 from claude_hooks import capped_thinking, reasoning_replay, truncation
 from claude_hooks import reasoning_loop_guard as rlg
+from claude_hooks import reasoning_repetition
 
 log = logging.getLogger("claude_hooks.agent_loop")
 
@@ -652,6 +653,7 @@ def run_loop(
     repeats: dict[str, int] = {}
     compaction_gen = 0
     loop_trips = 0
+    nudger = reasoning_repetition.RepetitionNudger()
 
     if config.tools_available and preseed_builder is not None:
         preseed = preseed_builder(cwd)
@@ -907,6 +909,16 @@ def run_loop(
                 "name": name,
                 "content": config.result_not_alone_message.format(name=name),
             })
+        # Plan D1: a turn that re-derives the same conclusion paragraph
+        # after paragraph while still calling tools reads as productive to
+        # every turn-level check. One rationed nudge; it never cuts.
+        nudge = nudger.inspect(capped_thinking.thinking_text(msg), i)
+        if nudge:
+            payload["messages"].append(
+                {"role": "user", "content": nudge, "_harness": True})
+            _emit_guard(config, {"guard": "reasoning_repetition",
+                                 "action": "nudge", "iteration": i,
+                                 **nudger.last.public_dict()})
     else:
         log.warning("agent loop hit max_iterations=%d", config.max_iterations)
     # Attach the final conversation transcript to the response so
