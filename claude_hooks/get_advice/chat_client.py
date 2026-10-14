@@ -485,6 +485,9 @@ class ChatClient:
         # Per-call timings of the last successful call (plan A5); also
         # attached to the returned response as ``timings``.
         self.last_timings: dict = {}
+        # Windows granted to requests that stated one (plan B2); a booking
+        # never shrinks, so the first grant is kept.
+        self._granted: dict[str, int] = {}
 
     def _headers(self, **extra) -> dict:
         h = {"Content-Type": "application/json", **extra}
@@ -509,6 +512,24 @@ class ChatClient:
     def learned_output_ceiling(self, model: str) -> Optional[int]:
         """An output maximum this server's refusal named for ``model``."""
         return learned_output_ceiling(self.base_url, self._real(model))
+
+    def _note_grant(self, payload: dict, timings: dict) -> None:
+        """Remember ``X-Context-Window`` only for a request that stated a
+        window (``options.num_ctx`` / ``num_ctx``). Without one, an
+        opencoti request is a per-request allocation and the header is
+        that request's settlement (83 tokens on a 21-token call), not a
+        window later calls can budget against (plan B2)."""
+        win = (timings or {}).get("granted_window")
+        stated = (payload.get("num_ctx")
+                  or (payload.get("options") or {}).get("num_ctx"))
+        if win and stated:
+            self._granted.setdefault(self._real(payload.get("model") or ""),
+                                     int(win))
+
+    def granted_window(self, model: str) -> Optional[int]:
+        """The window the engine granted a request that stated one, or
+        ``None`` (:meth:`_note_grant`)."""
+        return self._granted.get(self._real(model))
 
     def _wait_out_outage(self, e: BaseException, body: str,
                          attempts: "_Attempts", state: dict, *,
@@ -868,6 +889,7 @@ class ChatClient:
                     attempts=sent, empty_retries=empty_retries,
                     headers=resp_headers)
                 out["timings"] = self.last_timings
+                self._note_grant(payload, self.last_timings)
                 return out
             except cancelled_exc:
                 # Cooperative abort — propagate without retrying. The

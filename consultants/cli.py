@@ -585,11 +585,13 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
             "http_port": cfg.service.http_port,
         },
         "protocol": {"typed": cfg.protocol.typed},
+        # Plan B: only the keys set; unset ones use the shipped defaults.
+        "budget": dict(cfg.budget),
         # Named chat servers roles use as ``@name`` / ``@name/model``.
         # The key is never printed, only whether one is set.
         "endpoints": {
             n: {"url": e.url, "backend": e.backend, "model": e.model,
-                "api_key_set": bool(e.api_key)}
+                "api_key_set": bool(e.api_key), "window": e.window}
             for n, e in sorted(cfg.endpoints.items())
         },
         "smart_start": {
@@ -611,6 +613,9 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
                 # uses presence to decide whether to render the
                 # extras list.
                 "extra_models": list(cfg.roles[r].extra_models),
+                "budget": dict(cfg.roles[r].budget),
+                "models": {m: dict(v) for m, v
+                           in cfg.roles[r].model_overrides.items()},
                 # The coder routes per language. The skill's status
                 # block renders `coder.default_route` and each
                 # per-language entry from THIS output, so leaving them
@@ -1198,6 +1203,7 @@ def cmd_config_set_endpoint(args, base: str) -> int:
     try:
         cfg = cc.set_endpoint(args.name, url=args.url, backend=args.backend,
                               model=args.model, api_key=args.api_key,
+                              window=args.window,
                               **_resolve_active_scope(args))
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
@@ -1210,6 +1216,24 @@ def cmd_config_set_protocol(args, base: str) -> int:
         typed = args.typed.lower() in ("on", "true", "yes", "1")
     try:
         cfg = cc.set_protocol(typed=typed, **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_config_set_budget(args, base: str) -> int:
+    values: dict = {}
+    for key in ("output_ceiling", "output_window_share", "reserve_min",
+                "reserve_share", "num_ctx", "announce"):
+        v = getattr(args, key, None)
+        if v is not None:
+            values[key] = v
+    if not values and not args.clear:
+        raise CLIError("set-budget: name at least one setting or --clear KEY",
+                       exit_code=2)
+    try:
+        cfg = cc.set_budget(values, clear=args.clear, role=args.role,
+                            model=args.model, **_resolve_active_scope(args))
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
     return _emit_config(cfg, args)
@@ -2589,6 +2613,12 @@ def build_parser() -> argparse.ArgumentParser:
     cep.add_argument("--backend", choices=list(cc.ENDPOINT_BACKENDS))
     cep.add_argument("--model", help="Served model when a reference names "
                                      "none ('' clears).")
+    cep.add_argument("--window", choices=["dynamic", "assured"],
+                     help="PolyKV window mode. dynamic (default): no fixed "
+                          "context; each agent's request is its own "
+                          "allocation up to the engine's session_ctx_max. "
+                          "assured (booked window per agent session) "
+                          "arrives with Milestone F.")
     cep.add_argument("--api-key", dest="api_key",
                      help="Bearer key, if the server wants one ('' clears).")
     _add_scope_args(cep)
@@ -2602,6 +2632,33 @@ def build_parser() -> argparse.ArgumentParser:
     cpr.add_argument("--typed", choices=["on", "off"])
     _add_scope_args(cpr)
     cpr.set_defaults(fn=cmd_config_set_protocol)
+
+    cbu = cfg_sub.add_parser(
+        "set-budget",
+        help="Output cap and context window (plan B): globally, per role "
+             "(--role) or per (role, model) (--role --model). Unset keys "
+             "use the shipped defaults; --clear KEY removes a setting.")
+    cbu.add_argument("--role", choices=list(cc.ROLES))
+    cbu.add_argument("--model", help="Model exactly as the role names it.")
+    cbu.add_argument("--output-ceiling", dest="output_ceiling", type=int,
+                     help="Largest output any call may request (96000).")
+    cbu.add_argument("--output-window-share", dest="output_window_share",
+                     type=float, help="Share of the window a call asks for "
+                                      "(0.75).")
+    cbu.add_argument("--reserve-min", dest="reserve_min", type=int,
+                     help="Minimum room kept for estimate error (1024).")
+    cbu.add_argument("--reserve-share", dest="reserve_share", type=float,
+                     help="Room kept for estimate error, as a share of the "
+                          "prompt estimate (0.12).")
+    cbu.add_argument("--num-ctx", dest="num_ctx",
+                     help="'model' (resolve from the backend) or a window "
+                          "in tokens.")
+    cbu.add_argument("--announce", choices=["on", "off"],
+                     help="State the cap in the role's prompt (on).")
+    cbu.add_argument("--clear", action="append", default=[], metavar="KEY",
+                     help="Remove a setting (repeatable).")
+    _add_scope_args(cbu)
+    cbu.set_defaults(fn=cmd_config_set_budget)
 
     crep = cfg_sub.add_parser("remove-endpoint",
                               help="Remove a named chat server.")

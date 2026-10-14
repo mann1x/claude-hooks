@@ -59,7 +59,7 @@ class TestPlan(unittest.TestCase):
         p = budget.plan(_NoProbeClient(), "m",
                         [{"role": "user", "content": "hi"}])
         self.assertIsNone(p.context_length)
-        self.assertEqual(p.output_tokens, budget.TARGET_OUTPUT_TOKENS)
+        self.assertEqual(p.output_tokens, budget.UNKNOWN_WINDOW_OUTPUT_TOKENS)
         self.assertFalse(p.needs_compaction)
 
     def test_budget_shrinks_to_fit_a_small_window(self):
@@ -74,7 +74,10 @@ class TestPlan(unittest.TestCase):
         p = budget.plan(_Client(40000), "m",
                         [{"role": "user", "content": big}])
         self.assertTrue(p.needs_compaction)
-        self.assertEqual(p.output_tokens, budget.MIN_OUTPUT_TOKENS)
+        # Plan B1: an overflowing request keeps its own cap (0.75 × 40k)
+        # and is flagged; it no longer drops to the 4,096 floor.
+        self.assertEqual(p.output_tokens, 30000)
+        self.assertEqual(p.cap_source, "context-overflow")
 
     def test_token_estimate_is_conservative(self):
         """Biased to over-count, so the error leaves headroom rather

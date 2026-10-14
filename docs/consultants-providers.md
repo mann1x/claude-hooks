@@ -18,6 +18,7 @@ url = "http://192.168.178.2:8240"
 backend = "opencoti"        # opencoti | llamacpp | xollama | ollama
 # model = "..."             # served model when a reference names none
 # api_key = "..."           # bearer key, if the server wants one
+# window = "dynamic"        # PolyKV window mode, see below
 ```
 
 ```bash
@@ -52,9 +53,33 @@ claude-consultants config remove-endpoint bs2
 | `timings.cache_n` | `timings.cached_prompt_tokens` |
 | `X-Context-Window` | `timings.granted_window` |
 
-With no `num_ctx` sent, opencoti grants each request only what it needs
-(the dynamic mode): `X-Context-Window` was 83 on a 21-token call. Budgets
-must not read that header as the session's window (Milestone B2).
+### PolyKV window mode (`window`)
+
+One PolyKV connection carries many sessions, one per agent (council
+lane). Each session is bounded by the engine's `session_ctx_max`: the
+model's window (262,144 on bs2), or more with DCA. The KV pool
+(`kv_pool_cells`, 2,097,152 on bs2) is shared across sessions and is not
+any one session's window.
+
+- **`dynamic`** (default, and the only mode today): no fixed context.
+  The council sends no `num_ctx`, so each agent request is its own
+  allocation. The engine asks for `session_ctx_max`, settles no lower
+  than the request's peak, and releases it at completion. Every lane is
+  budgeted against `session_ctx_max`. `X-Context-Window` is that one
+  request's settlement (83 on a 21-token call), so it is never read as a
+  window (`ChatClient.granted_window` keeps a grant only from a request
+  that stated `num_ctx`). A full pool answers 429 with `Retry-After`,
+  which the transport waits out.
+- **`assured`**: a window booked per agent session (`num_ctx` /
+  `num_ctx_min`, gated on `elastic_guaranteed_alloc_v1` /
+  `ctx_min_negotiation_v1`, the grant re-sent on every later request, the
+  session closed when its work ends). It needs Milestone F's session
+  manager, so `set-endpoint --window assured` is refused until then.
+
+`/props` `opencoti.dca` (`enabled`, `yarn_factor`) is recorded on the
+capability record (`dca_enabled`, `dca_yarn_factor`). It is never used to
+compute a window; `session_ctx_max` stays the authority. bs2 runs with
+DCA off, so a DCA-extended `session_ctx_max` has not been observed yet.
 
 ## Capabilities: `claude_hooks/provider_caps.py`
 
@@ -130,6 +155,75 @@ mirrors it on the `llm_call` runtime event.
 | `prefill_tok_s`, `decode_tok_s` | from evaluated tokens only |
 | `granted_window` | `X-Context-Window`, when an opencoti or xOllama engine sends it |
 | `attempts`, `empty_retries` | requests sent for this call |
+
+## Budgets: output cap and window (plan B1/B2)
+
+`consultants/engine/budget.py`. Every role call is planned by `plan()`.
+
+**Window** (`resolve_window`), first that answers:
+
+1. a window the engine granted to a request that stated one;
+2. a pinned `num_ctx`;
+3. per backend:
+   - opencoti / llama.cpp: `/props` `opencoti.kv.session_ctx_max`, then `n_ctx`;
+   - cloud Ollama: the recommendations window, then the trained context;
+   - local Ollama: the Modelfile `num_ctx`, **never** the trained context, which is not what the model loads with;
+4. 32,768.
+
+Local Ollama is sent the resolved window as `options.num_ctx`, with the
+same value on every call, so the model loads once. Nothing else is sent
+one: cloud ignores it, xOllama reloads on it, and opencoti's window
+modes are Milestone F's.
+
+On bs2 (opencoti) the 2,097,152-cell KV pool is shared by 4 slots, and
+one session can take at most 262,144 (`session_ctx_max` =
+`largest_admissible`), which is what calls are budgeted against.
+
+**Output cap**: `min(0.75 × window, 96,000, the model's max)`. With no
+window it is `min(32,000, …)`. The model's max comes from the cloud
+recommendations, then a ceiling a refusal named.
+
+- Beside the prompt the planner keeps `max(1,024, ⌈0.12 × estimate⌉)`
+  free for estimate error.
+- A prompt that leaves less than 4,096 tokens **keeps its cap** and is
+  flagged for compaction, instead of dropping to 4,096.
+- The role's cap is stated once in its system prompt (`# Output Budget`,
+  the fork's wording). The stated number is the role's resolved cap, not
+  the room one call has left, so the prompt and its prefix cache stay
+  the same from call to call.
+
+**Hard cap follows the cap.** The per-call hard caps
+(`PRODUCTION_HARD_CAPS_BY_MODEL`, 300–900 s) were measured on calls
+capped at 32,768 tokens. Measured decode across 140 `transcript.db`
+files (2026-10-14) was 5–30 tok/s at p10 and 15–110 tok/s at p50, so a
+96,000-token turn needs 15–100 min. A hard cap is never retried, so
+without a change a long turn that used to be cut and continued would be
+killed instead. The researcher's tuned cap is therefore scaled by
+`num_predict / 32,768` (`stall_chat.scaled_hard_cap`). An operator's
+`per_lane_hard_s` is used as set. The run deadlines (20 / 60 / 90 min)
+are unchanged: a long single turn replaces the continuations that used
+to carry the same output.
+
+**Knobs**: shipped defaults, then `[budget]`, then `[role.X.budget]`,
+then `[role.X.models."<model>"]`, most specific last. Keys:
+
+- `output_ceiling`
+- `output_window_share`
+- `reserve_min`
+- `reserve_share`
+- `num_ctx` (`"model"` or tokens)
+- `announce`
+
+```bash
+claude-consultants config set-budget --output-ceiling 64000
+claude-consultants config set-budget --role researcher --model @bs2 --num-ctx 131072
+claude-consultants config set-budget --role researcher --clear num_ctx
+```
+
+A legacy explicit `ctx_max` pins that role's window. The run's record
+carries only the keys that were set (`runtime_control.budget`), so a
+default run seeds nothing. The menu entry is **Output cap & window**
+(Subflow K).
 
 ## Sampler fields
 

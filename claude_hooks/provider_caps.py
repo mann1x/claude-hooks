@@ -91,6 +91,11 @@ class ProviderCaps:
     session_ctx_max: Optional[int] = None
     largest_admissible: Optional[int] = None
     total_slots: Optional[int] = None
+    #: opencoti ``/props`` ``opencoti.dca``: whether dual-chunk attention
+    #: extends the window, and its YaRN factor. Recorded, never used to
+    #: compute a window: ``session_ctx_max`` is the engine's own ceiling.
+    dca_enabled: Optional[bool] = None
+    dca_yarn_factor: Optional[float] = None
     probed_at: float = field(default_factory=time.time)
 
     @property
@@ -243,6 +248,12 @@ def caps_fields_from_props(data: dict) -> dict:
         out["total_slots"] = slots
     oc = data.get("opencoti")
     kv = oc.get("kv") if isinstance(oc, dict) and isinstance(oc.get("kv"), dict) else {}
+    dca = oc.get("dca") if isinstance(oc, dict) and isinstance(oc.get("dca"), dict) else {}
+    if isinstance(dca.get("enabled"), bool):
+        out["dca_enabled"] = dca["enabled"]
+        f = _float(dca.get("yarn_factor"))
+        if f is not None:
+            out["dca_yarn_factor"] = f
     for src, dst in (("kv_pool_cells", "kv_pool_cells"),
                      ("session_ctx_max", "session_ctx_max"),
                      ("largest_admissible", "largest_admissible")):

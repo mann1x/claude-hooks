@@ -1094,7 +1094,8 @@ def _observe_usage(messages: list[dict], response: dict,
 def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
                       role: Optional[str] = None,
                       tools: Optional[list] = None,
-                      session: Optional[str] = None
+                      session: Optional[str] = None,
+                      knobs: Optional["budget.Knobs"] = None
                       ) -> tuple[list[dict], "budget.Budget"]:
     """Size the next call, compacting the history first if it no longer
     leaves room to answer.
@@ -1107,9 +1108,14 @@ def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
     The cap that wins is recorded on the process-wide calibration state
     so a later reader — the truncation verdict, a post-mortem — can ask
     what limited the reply rather than inferring it.
+
+    ``knobs`` are the (role, model)'s budget settings (plan B1/B2,
+    :func:`_budget_knobs`). Unless ``announce`` is off, the role's cap is
+    stated in its system prompt once (``# Output Budget``).
     """
+    knobs = knobs or budget.DEFAULT_KNOBS
     plan = budget.plan(chat_client, model, messages, tools=tools,
-                       session=session)
+                       session=session, knobs=knobs)
     if plan.needs_compaction:
         log.warning("role=%s: %s — compacting history", role, plan.detail)
         keep = plan.trigger_tokens or max(
@@ -1147,13 +1153,43 @@ def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
         if result.changed:
             messages = result.messages
             plan = budget.plan(chat_client, model, messages, tools=tools,
-                               session=session)
+                               session=session, knobs=knobs)
+    if knobs.announce:
+        messages = budget.with_output_budget_section(
+            messages, plan.role_cap, plan.context_length)
     token_calib.note_output_cap(plan.cap_report(), model)
     return messages, plan
 
 
+def _budget_options(options: Optional[dict], plan: "budget.Budget") -> dict:
+    """``options`` with the plan's ``num_predict`` and, for local Ollama,
+    its ``num_ctx`` (plan B2). An explicit ``num_ctx`` the caller set
+    wins."""
+    opts = dict(options or {})
+    if plan.output_tokens:
+        opts["num_predict"] = plan.output_tokens
+    if plan.send_num_ctx and "num_ctx" not in opts:
+        opts["num_ctx"] = plan.send_num_ctx
+    return opts
+
+
+def _budget_knobs(state: Optional[dict], role: Optional[str],
+                  model: str) -> "budget.Knobs":
+    """The budget knobs for ``(role, model)`` from the run's seeded
+    ``runtime_control["budget"]`` (:func:`consultants.engine.control.
+    budget_layers`): ``*`` (``[budget]``), then the role
+    (``[role.X.budget]``, ``ctx_max``), then ``role@model``
+    (``[role.X.models."<m>"]``). Shipped defaults when nothing is set."""
+    layers = ((state or {}).get("runtime_control") or {}).get("budget") or {}
+    if not layers:
+        return budget.DEFAULT_KNOBS
+    return budget.knobs_from(layers.get("*"), layers.get(role or ""),
+                             layers.get(f"{role}@{model}"))
+
+
 def _loop_payload_budgeter(chat_client, model: str, *,
-                           role: Optional[str] = None):
+                           role: Optional[str] = None,
+                           knobs: Optional["budget.Knobs"] = None):
     """``LoopConfig.prepare_payload`` for a role's tool loop: re-plan the
     output budget, compacting first when the history has outgrown the
     window, before every iteration.
@@ -1177,13 +1213,11 @@ def _loop_payload_budgeter(chat_client, model: str, *,
     def _prepare(payload: dict) -> None:
         messages, plan = _plan_and_compact(
             chat_client, model, list(payload.get("messages") or []),
-            role=role, tools=payload.get("tools") or None, session=session)
+            role=role, tools=payload.get("tools") or None, session=session,
+            knobs=knobs)
         window["ctx"] = plan.context_length
         payload["messages"] = messages
-        if plan.output_tokens:
-            opts = dict(payload.get("options") or {})
-            opts["num_predict"] = plan.output_tokens
-            payload["options"] = opts
+        payload["options"] = _budget_options(payload.get("options"), plan)
 
     def _observe(payload: dict, response: dict) -> None:
         pt, ct = _usage_from(response or {})
@@ -1277,7 +1311,9 @@ def _single_shot(chat_client, model: str, messages: list[dict],
                  recorder=None, role: Optional[str] = None,
                  round: int = 1,
                  lane_idx: Optional[int] = None,
-                 result: Optional[str] = None) -> tuple[str, int, int]:
+                 result: Optional[str] = None,
+                 knobs: Optional["budget.Knobs"] = None
+                 ) -> tuple[str, int, int]:
     """Run a one-call chat (no tools, no loop). Returns
     (text, prompt_tokens, completion_tokens).
 
@@ -1309,7 +1345,7 @@ def _single_shot(chat_client, model: str, messages: list[dict],
     """
     session = _calibration_session(f"single-{role or 'role'}")
     convo, plan = _plan_and_compact(chat_client, model, list(messages),
-                                    role=role, session=session)
+                                    role=role, session=session, knobs=knobs)
 
     text_parts: list[str] = []
     total_pt = total_ct = 0
@@ -1325,7 +1361,7 @@ def _single_shot(chat_client, model: str, messages: list[dict],
             "messages": convo,
             "stream": False,
             "think": think,
-            "options": {"num_predict": plan.output_tokens},
+            "options": _budget_options(None, plan),
         }
         if result_spec is not None:
             payload["tools"] = [result_spec]
@@ -1439,7 +1475,8 @@ def _single_shot(chat_client, model: str, messages: list[dict],
         # model writes only what is left, so cutting the budget each time
         # would make each continuation shorter than the last and turn a
         # bounded recovery into a guaranteed failure.
-        convo, plan = _plan_and_compact(chat_client, model, convo, role=role)
+        convo, plan = _plan_and_compact(chat_client, model, convo, role=role,
+                                        knobs=knobs)
 
     return ("".join(text_parts).strip(), total_pt, total_ct)
 
@@ -1703,7 +1740,9 @@ def _role_turn(chat_client, model: str, messages: list[dict],
                tool_executor=None,
                cwd: str = "",
                loop_runner=None,
-               result: Optional[str] = None) -> tuple[str, int, int]:
+               result: Optional[str] = None,
+               knobs: Optional["budget.Knobs"] = None
+               ) -> tuple[str, int, int]:
     """One role turn, returning ``(text, prompt_tokens, completion_tokens)``.
 
     ``result`` (typed protocol, plan G): the role's result tool. Its
@@ -1726,6 +1765,7 @@ def _role_turn(chat_client, model: str, messages: list[dict],
         return _single_shot(
             chat_client, model, messages, think=think,
             recorder=recorder, role=role, round=round, lane_idx=lane_idx,
+            knobs=knobs,
             result=result,
         )
 
@@ -1739,7 +1779,7 @@ def _role_turn(chat_client, model: str, messages: list[dict],
             return _single_shot(
                 chat_client, model, messages, think=think,
                 recorder=recorder, role=role, round=round,
-                lane_idx=lane_idx,
+                lane_idx=lane_idx, knobs=knobs,
             )
 
     on_iter_cb = on_tool_cb = None
@@ -1783,7 +1823,8 @@ def _role_turn(chat_client, model: str, messages: list[dict],
             result_invalid_message=typed_results.CUT_OR_INVALID)
     try:
         from claude_hooks.agent_loop.runner import LoopConfig
-        _budgeter = _loop_payload_budgeter(chat_client, model, role=role)
+        _budgeter = _loop_payload_budgeter(chat_client, model, role=role,
+                                           knobs=knobs)
         cfg = LoopConfig(
             **result_kw,
             max_iterations=ROLE_TOOL_MAX_ITERATIONS,
@@ -1818,6 +1859,7 @@ def _role_turn(chat_client, model: str, messages: list[dict],
         return _single_shot(
             chat_client, model, messages, think=think,
             recorder=recorder, role=role, round=round, lane_idx=lane_idx,
+            knobs=knobs,
         )
 
     pt, ct = _usage_from(final)
@@ -1835,6 +1877,7 @@ def _role_turn(chat_client, model: str, messages: list[dict],
         return _single_shot(
             chat_client, model, messages, think=think,
             recorder=recorder, role=role, round=round, lane_idx=lane_idx,
+            knobs=knobs,
         )
     return (text, pt, ct)
 
@@ -1983,6 +2026,7 @@ def planner_node(state: dict, *, chat_client, model: str,
             recorder=recorder, role="planner", round=1,
             tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
             result=_typed_result_name(state, "planner"),
+            knobs=_budget_knobs(state, "planner", model),
         )
     except Exception as e:
         log.exception("planner_node failed: %s", e)
@@ -2448,6 +2492,7 @@ def researcher_node(state: dict, *,
                 chat_client, model, msgs, think=think,
                 recorder=recorder, role="researcher",
                 round=this_round, lane_idx=lane_idx,
+                knobs=_budget_knobs(state, "researcher", model),
             )
         except Exception as e:
             log.exception("researcher_node (M6 mode) failed: %s", e)
@@ -2602,8 +2647,9 @@ def researcher_node(state: dict, *,
 
     cfg = None
     if LoopConfig is not None:
-        _budgeter = _loop_payload_budgeter(chat_client, model,
-                                           role="researcher")
+        _budgeter = _loop_payload_budgeter(
+            chat_client, model, role="researcher",
+            knobs=_budget_knobs(state, "researcher", model))
         cfg = LoopConfig(
             **result_kw,
             max_iterations=caps.researcher_loop_iters,
@@ -2680,6 +2726,7 @@ def researcher_node(state: dict, *,
             # stall_defaults.runtime_stall_thresholds); a value set on
             # runtime_control is an operator override and wins.
             from consultants.engine.stall_defaults import (
+                HARD_CAP_REFERENCE_OUTPUT_TOKENS,
                 runtime_stall_thresholds,
             )
             tuned = runtime_stall_thresholds(model)
@@ -2692,6 +2739,11 @@ def researcher_node(state: dict, *,
                     rc.get("per_lane_hard_s") or tuned.hard_cap_s),
                 retries=int(rc.get("stall_retries") or 1),
                 on_event=stall_event_sink,
+                # The tuned cap stretches with the call's output budget
+                # (plan B1); an operator's per_lane_hard_s is used as set.
+                hard_cap_reference_output=(
+                    None if rc.get("per_lane_hard_s")
+                    else HARD_CAP_REFERENCE_OUTPUT_TOKENS),
             )
         except Exception:  # pragma: no cover
             # Never break the researcher because of stall-wrapper
@@ -2803,6 +2855,7 @@ def researcher_node(state: dict, *,
                 chat_client, model, summary_msgs, think=think,
                 recorder=recorder, role="researcher",
                 round=this_round, lane_idx=lane_idx,
+                knobs=_budget_knobs(state, "researcher", model),
             )
             pt += pt2
             ct += ct2
@@ -2908,6 +2961,7 @@ def critic_node(state: dict, *, chat_client, model: str,
             lane_idx=lane_idx,
             tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
             result=_typed_result_name(state, "critic"),
+            knobs=_budget_knobs(state, "critic", model),
         )
     except Exception as e:
         log.exception("critic_node failed: %s", e)
@@ -3056,6 +3110,7 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
             round=this_round,
             tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
             result=_typed_result_name(state, "meta_critic"),
+            knobs=_budget_knobs(state, "meta_critic", model),
         )
     except Exception as e:
         log.exception("meta_critic_node failed: %s", e)
@@ -3213,7 +3268,7 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                 chat_client, try_model, msgs, think=think,
                 recorder=recorder, role="synthesizer", round=1,
                 tool_specs=tool_specs, tool_executor=tool_executor,
-                cwd=cwd,
+                cwd=cwd, knobs=_budget_knobs(state, "synthesizer", try_model),
             )
             if attempt_idx > 0:
                 log.warning(
@@ -3374,6 +3429,7 @@ def adversary_node(state: dict, *, chat_client, model: str,
             recorder=recorder, role="adversary", round=1,
             tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
             result=_typed_result_name(state, "adversary"),
+            knobs=_budget_knobs(state, "adversary", model),
         )
     except Exception as e:
         log.exception("adversary_node failed: %s", e)

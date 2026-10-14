@@ -157,6 +157,8 @@ Exact algorithm in 01 §6.
 
 ### B1. Output cap — fully automatic, 96k ceiling (owner)
 
+**Built 2026-10-14.** The re-check found the per-call hard caps would kill long turns, so they now scale with `num_predict`. Deadlines are unchanged. See `docs/consultants-providers.md` "Budgets".
+
 - `resolve_output_budget(ctx, model_max, user_max) = min(0.75×ctx, 96_000, model_max, user_max)`, replacing the flat 32,768 (01 #3; fork `output-budget.ts:36-102`).
   - `model_max` comes from the probe/recommendations (A1/A3), then the learned ceiling (A2).
   - Unknown ctx → 32,000.
@@ -176,6 +178,8 @@ Exact algorithm in 01 §6.
 - **Must re-check:** stall thresholds and the 20/60/90-min deadlines against 96k-token turns. Do this from `transcript.db`, never the toy bench (consultants-runtime rule).
 
 ### B2. Context window — a knob, defaulting to the model
+
+**Built 2026-10-14.** The PolyKV `dynamic` mode (owner: sessions start without a fixed context; one connection carries many agent sessions, each up to `session_ctx_max`, the model's window or more with DCA) is `[endpoints.X] window = "dynamic"`, the default. `assured` is refused until F3's session manager can book and close per-agent sessions. A granted window is honoured only from a request that stated one.
 
 - `[budget] num_ctx = "model"` by default. The window is then resolved in this order:
   1. Modelfile `num_ctx` (local);

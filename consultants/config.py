@@ -218,6 +218,11 @@ class RoleConfig:
     # ``None`` means "no global default route — fall through to
     # legacy ``model`` field with no failover (v1 back-compat)".
     default_route: Optional[CoderLanguageRoute] = None
+    # Plan B: ``[role.X.budget]`` (only the keys set) and
+    # ``[role.X.models."<model>"]`` (per-model settings, keyed by the
+    # model string exactly as the role names it).
+    budget: dict[str, Any] = field(default_factory=dict)
+    model_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 # Per-role think defaults. Tuned from the 2026-05-07 trace
@@ -740,6 +745,75 @@ class CoderLimitsConfig:
     max_files: int = 16
 
 
+def _budget_int(v: Any, lo: int) -> Any:
+    if isinstance(v, bool) or not isinstance(v, int) or v < lo:
+        raise ValueError(f"must be an integer >= {lo}")
+    return v
+
+
+def _budget_share(v: Any, lo: float, hi: float, *, lo_open: bool) -> Any:
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise ValueError("must be a number")
+    v = float(v)
+    if (v <= lo if lo_open else v < lo) or v > hi:
+        raise ValueError(f"must be in {'(' if lo_open else '['}{lo}, {hi}]")
+    return v
+
+
+def _budget_num_ctx(v: Any) -> Any:
+    if isinstance(v, str) and v.strip().lower() == "model":
+        return "model"
+    if isinstance(v, str) and v.strip().isdigit():
+        v = int(v.strip())
+    return _budget_int(v, 1)
+
+
+def _budget_bool(v: Any) -> Any:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str) and v.lower() in ("on", "true", "yes", "1"):
+        return True
+    if isinstance(v, str) and v.lower() in ("off", "false", "no", "0"):
+        return False
+    raise ValueError("must be true or false")
+
+
+#: Budget knobs (plan B1/B2) and their validators. Defaults live in
+#: ``consultants.engine.budget.Knobs``; a config holds only what was set.
+BUDGET_KEYS: dict[str, Any] = {
+    "output_ceiling": lambda v: _budget_int(v, 1),
+    "output_window_share": lambda v: _budget_share(v, 0.0, 1.0, lo_open=True),
+    "reserve_min": lambda v: _budget_int(v, 0),
+    "reserve_share": lambda v: _budget_share(v, 0.0, 0.9, lo_open=False),
+    "num_ctx": _budget_num_ctx,
+    "announce": _budget_bool,
+}
+
+#: Keys a ``[role.X.models."<model>"]`` table takes.
+MODEL_OVERRIDE_KEYS: dict[str, Any] = dict(BUDGET_KEYS)
+
+
+def validate_settings(raw: Any, keys: dict[str, Any], *,
+                      where: str) -> dict[str, Any]:
+    """The valid ``key = value`` pairs of a settings table. An unknown
+    key or a bad value is logged and dropped, never fatal at load."""
+    out: dict[str, Any] = {}
+    if not isinstance(raw, dict):
+        return out
+    for k, v in raw.items():
+        check = keys.get(k)
+        if check is None:
+            log.warning("consultants config: %s: unknown key %r ignored",
+                        where, k)
+            continue
+        try:
+            out[k] = check(v)
+        except ValueError as e:
+            log.warning("consultants config: %s.%s = %r ignored: %s",
+                        where, k, v, e)
+    return out
+
+
 @dataclass
 class ProtocolConfig:
     """How roles hand results to each other (plan Milestone G).
@@ -769,6 +843,30 @@ class EndpointConfig:
     #: id the server lists (OpenAI-compatible backends).
     model: Optional[str] = None
     api_key: Optional[str] = None
+    #: PolyKV window mode (plan B2). ``dynamic``: no fixed context; each
+    #: agent's request is its own allocation, up to the engine's
+    #: ``session_ctx_max`` (the model's window, more with DCA), and the
+    #: council budgets against that. ``assured`` (a booked window per
+    #: agent session) needs Milestone F's session manager.
+    window: str = "dynamic"
+
+
+#: Endpoint window modes accepted today (plan B2 / F).
+ENDPOINT_WINDOW_MODES = ("dynamic",)
+ENDPOINT_WINDOW_MODES_LATER = ("assured",)
+
+
+def check_endpoint_window(mode: str) -> str:
+    m = (mode or "").strip().lower()
+    if m in ENDPOINT_WINDOW_MODES:
+        return m
+    if m in ENDPOINT_WINDOW_MODES_LATER:
+        raise ValueError(
+            "window = 'assured' books a window per agent session, which "
+            "needs the PolyKV session manager (plan Milestone F); until it "
+            "lands, use 'dynamic' (no fixed context, budgeted against the "
+            "engine's session_ctx_max)")
+    raise ValueError(f"window must be one of {ENDPOINT_WINDOW_MODES}")
 
 
 def valid_endpoint_name(name: str) -> bool:
@@ -809,6 +907,8 @@ class ConsultantsConfig:
     })
     endpoints: dict[str, EndpointConfig] = field(default_factory=dict)
     protocol: ProtocolConfig = field(default_factory=ProtocolConfig)
+    # Plan B: ``[budget]`` — only the keys a layer set.
+    budget: dict[str, Any] = field(default_factory=dict)
 
     def role(self, name: str) -> RoleConfig:
         if name not in ROLES:
@@ -876,7 +976,20 @@ def _merge_role(base: RoleConfig, override: dict) -> RoleConfig:
         extra_models=list(base.extra_models),
         routes_by_language=dict(base.routes_by_language),
         default_route=base.default_route,
+        budget=dict(base.budget),
+        model_overrides={m: dict(v) for m, v in base.model_overrides.items()},
     )
+    if "budget" in override:
+        out.budget.update(validate_settings(
+            override["budget"], BUDGET_KEYS, where="role budget"))
+    if isinstance(override.get("models"), dict):
+        for m, table in override["models"].items():
+            if not isinstance(m, str) or not m.strip():
+                continue
+            vals = validate_settings(table, MODEL_OVERRIDE_KEYS,
+                                     where=f"role models.{m}")
+            if vals:
+                out.model_overrides.setdefault(m.strip(), {}).update(vals)
     if "enabled" in override:
         out.enabled = bool(override["enabled"])
     if "model" in override and isinstance(override["model"], str):
@@ -1217,6 +1330,11 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
             if isinstance(v, int) and v > 0:
                 setattr(base.coder_limits, k, v)
 
+    # budget (plan B1/B2)
+    if "budget" in raw:
+        base.budget.update(validate_settings(raw["budget"], BUDGET_KEYS,
+                                             where="budget"))
+
     # protocol (plan G)
     proto = raw.get("protocol") or {}
     if isinstance(proto, dict) and isinstance(proto.get("typed"), bool):
@@ -1236,10 +1354,17 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
                 log.warning("consultants config: endpoint %r has unknown "
                             "backend %r; skipped", name, backend)
                 continue
+            window = "dynamic"
+            if "window" in ep:
+                try:
+                    window = check_endpoint_window(str(ep["window"]))
+                except ValueError as e:
+                    log.warning("consultants config: endpoint %r: %s; "
+                                "using 'dynamic'", name, e)
             base.endpoints[name] = EndpointConfig(
                 url=url.strip().rstrip("/"), backend=backend,
                 model=(ep.get("model") or None),
-                api_key=(ep.get("api_key") or None))
+                api_key=(ep.get("api_key") or None), window=window)
 
     # roles
     roles = raw.get("role") or {}
@@ -1330,6 +1455,15 @@ def _toml_str(value: str) -> str:
     for ch in value:
         parts.append(_TOML_NEEDS_ESCAPE.get(ch, ch))
     return '"' + "".join(parts) + '"'
+
+
+def _toml_value(value: Any) -> str:
+    """A scalar settings value (bool / int / float / str) as TOML."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    return _toml_str(str(value))
 
 
 def _render(cfg: ConsultantsConfig, *,
@@ -1580,6 +1714,16 @@ def _render(cfg: ConsultantsConfig, *,
     L.append(f"max_total_bytes = {cfg.coder_limits.max_total_bytes}")
     L.append(f"max_files = {cfg.coder_limits.max_files}")
     L.append("")
+    L.append("[budget]")
+    L.append("# Output cap and window (plan B). Unset keys use the shipped "
+             "defaults: output_ceiling = 96000, output_window_share = 0.75, "
+             "reserve_min = 1024, reserve_share = 0.12, num_ctx = \"model\", "
+             "announce = true. Per role: [role.X.budget]; per (role, model): "
+             "[role.X.models.\"<model>\"].")
+    for k in BUDGET_KEYS:
+        if k in cfg.budget:
+            L.append(f"{k} = {_toml_value(cfg.budget[k])}")
+    L.append("")
     L.append("[protocol]")
     L.append("# typed: roles hand typed records to each other (plan G); the "
              "synthesizer stays prose. Off until benched.")
@@ -1589,6 +1733,8 @@ def _render(cfg: ConsultantsConfig, *,
         L.append(f"[endpoints.{name}]")
         L.append(f"url = {_toml_str(ep.url)}")
         L.append(f"backend = {_toml_str(ep.backend)}")
+        L.append(f"window = {_toml_str(ep.window)}  # dynamic: no fixed "
+                 "context, each agent up to the engine's session_ctx_max")
         if ep.model:
             L.append(f"model = {_toml_str(ep.model)}")
         if ep.api_key:
@@ -1638,6 +1784,19 @@ def _render(cfg: ConsultantsConfig, *,
                     L.append('# fallback = ""  # empty / unset: '
                              "no failover on this route")
                 L.append("")
+        if rc.budget:
+            L.append(f"[role.{role}.budget]")
+            for k, v in rc.budget.items():
+                L.append(f"{k} = {_toml_value(v)}")
+            L.append("")
+        for m in sorted(rc.model_overrides):
+            vals = rc.model_overrides[m]
+            if not vals:
+                continue
+            L.append(f"[role.{role}.models.{_toml_str(m)}]")
+            for k, v in vals.items():
+                L.append(f"{k} = {_toml_value(v)}")
+            L.append("")
     return "\n".join(L)
 
 
@@ -1842,6 +2001,7 @@ def set_endpoint(name: str, *, url: Optional[str] = None,
                  backend: Optional[str] = None,
                  model: Optional[str] = None,
                  api_key: Optional[str] = None,
+                 window: Optional[str] = None,
                  scope: str = "user",
                  cwd: Optional[Path] = None) -> ConsultantsConfig:
     """Add or update ``[endpoints.<name>]``. ``url`` is required for a
@@ -1866,6 +2026,8 @@ def set_endpoint(name: str, *, url: Optional[str] = None,
         ep.model = model.strip() or None
     if api_key is not None:
         ep.api_key = api_key.strip() or None
+    if window is not None:
+        ep.window = check_endpoint_window(window)
     cfg.endpoints[name] = ep
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
@@ -1875,6 +2037,44 @@ def set_protocol(*, typed: Optional[bool] = None, scope: str = "user",
     cfg = _load_for_edit(scope, cwd)
     if typed is not None:
         cfg.protocol.typed = bool(typed)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_budget(values: Optional[dict] = None, *,
+               clear: Optional[list[str]] = None,
+               role: Optional[str] = None, model: Optional[str] = None,
+               scope: str = "user",
+               cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set or clear budget knobs (plan B) in ``[budget]``,
+    ``[role.<role>.budget]`` or ``[role.<role>.models."<model>"]``.
+    Bad values raise ``ValueError``; nothing is written then."""
+    if model and not role:
+        raise ValueError("--model needs --role: per-model settings belong "
+                         "to a role")
+    keys = MODEL_OVERRIDE_KEYS if model else BUDGET_KEYS
+    checked: dict[str, Any] = {}
+    for k, v in (values or {}).items():
+        if k not in keys:
+            raise ValueError(f"unknown budget key {k!r} "
+                             f"(keys: {', '.join(keys)})")
+        checked[k] = keys[k](v)
+    for k in clear or []:
+        if k not in keys:
+            raise ValueError(f"unknown budget key {k!r}")
+    cfg = _load_for_edit(scope, cwd)
+    if role:
+        rc = cfg.role(role)
+        if model:
+            target = rc.model_overrides.setdefault(model, {})
+        else:
+            target = rc.budget
+    else:
+        target = cfg.budget
+    target.update(checked)
+    for k in clear or []:
+        target.pop(k, None)
+    if role and model and not target:
+        cfg.roles[role].model_overrides.pop(model, None)
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 

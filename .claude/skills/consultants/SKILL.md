@@ -780,7 +780,7 @@ per-language entry the same way. The routes only matter when
 
 ### 2. Top-level menu (loop until Done)
 
-The menu has ten areas; AskUserQuestion caps at 4 options, so
+The menu has eleven areas; AskUserQuestion caps at 4 options, so
 present it in rounds — round 1 offers the first three plus **More…**,
 and **More…** opens the next batch (ending with **Done**):
 
@@ -805,6 +805,9 @@ and **More…** opens the next batch (ending with **Done**):
     --typed on|off`: planner, researcher, critic and adversary hand in
     typed records (rendered back to their usual text); the synthesizer
     stays prose. Experimental, off by default until benched.
+11. **Output cap & window** — the per-call output ceiling and the
+    context window each role is budgeted against, globally, per role or
+    per (role, model) — see Subflow K
 
 Loop back to step 1 after each successful change; exit on **Done**.
 
@@ -1065,13 +1068,41 @@ only `api_key_set`). Sub-actions:
 - **Add / edit** — ask for the name, URL and backend (`opencoti`,
   `llamacpp`, `xollama`, `ollama`), optionally a served model and a key,
   then `claude-consultants config set-endpoint <name> --url <u>
-  --backend <b> [--model <m>] [--api-key <k>]`.
+  --backend <b> [--model <m>] [--api-key <k>]`. A PolyKV server
+  (opencoti) runs `--window dynamic` (the default): no fixed context,
+  each lane its own allocation up to the engine's `session_ctx_max`.
+  `assured` is refused until Milestone F; say so if the user asks for a
+  booked window.
 - **Use it for a role** — Subflow A's **Change model**, with
   `@<name>` (the endpoint's served model) or `@<name>/<model>`. A role's
   extra models may mix endpoints and Ollama tags; each lane goes to its
   own server.
 - **Remove** — `claude-consultants config remove-endpoint <name>`.
   Warn first if a role still names `@<name>`.
+
+### Subflow K — Output cap & window
+
+Read `budget` (global) and each role's `budget` / `models` blocks from
+`config show`. Only keys that were set appear; anything else is the
+shipped default: `output_ceiling` 96000, `output_window_share` 0.75,
+`reserve_min` 1024, `reserve_share` 0.12, `num_ctx` `"model"` (the
+backend's own window), `announce` on (the cap is stated in the role's
+prompt). Ask the scope first: **all roles**, **one role**, or **one
+role on one model** (the model exactly as the role names it, e.g.
+`glm-5.3:cloud` or `@bs2`). Then:
+
+- **Output ceiling** — `claude-consultants config set-budget
+  [--role R [--model M]] --output-ceiling N`. Calls ask for
+  `min(share × window, ceiling, the model's own max)`.
+- **Context window** — `--num-ctx model` or `--num-ctx N`. On a local
+  Ollama the window is also sent as `num_ctx` (a different value reloads
+  the model, so warn when another tool shares it); cloud, xOllama and
+  opencoti are only budgeted against it.
+- **State the cap in the prompt** — `--announce on|off`.
+- **Reset** — `--clear <key>` (repeatable) drops a setting back to the
+  default.
+
+A legacy explicit `ctx_max` on a role still pins that role's window.
 
 ### Subflow I — Tool surface
 

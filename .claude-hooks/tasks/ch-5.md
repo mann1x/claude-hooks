@@ -7,7 +7,7 @@ area: consultants.providers
 tags: [council, cerebriline]
 plan: docs/PLAN-council-cerebriline.md
 created: 2026-10-14T13:22:02Z
-updated: 2026-10-14T13:22:02Z
+updated: 2026-10-14T14:31:01Z
 sessions: [0a7a5bf4]
 ---
 
@@ -20,4 +20,5 @@ Milestone A of docs/PLAN-council-cerebriline.md: ProviderCaps probe per (base_ur
 - [ ] calibration guard tests port the fork's cases
 
 ## Log
+- 2026-10-14 14:31Z [0a7a5bf4] Done so far: A1-A3+A5 (7c0f25a, 2f0a83c), A4 calibration (d2e3297), opencoti/llamacpp named endpoints (9ed5d1a, live on bs2 :8240). Left: xOllama live probe (needs an endpoint); host-tailored default URLs (plan §8).
 - 2026-10-14 13:22Z [0a7a5bf4] created

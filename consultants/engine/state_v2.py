@@ -263,6 +263,7 @@ class RuntimeControl(TypedDict, total=False):
     # ---- topology gates ----
     enabled_roles: list[str]    # subset of the project's roles
     typed_protocol: bool        # plan G: roles hand in typed records
+    budget: dict                # plan B: budget knob layers (control.budget_layers)
     # ---- quality thresholds ----
     confidence_target: float    # synthesizer self-rating cutoff
     # M4 dynamic critic dial. ``adversarial`` is reachable only via a

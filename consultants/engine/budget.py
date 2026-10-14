@@ -49,6 +49,7 @@ counts.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -70,22 +71,257 @@ def estimate_tokens(text: str, model: str = "") -> int:
     return token_calib.estimate_tokens(len(text or ""), model)
 
 #: Ceiling on what any single call may request, however much window is
-#: free. Past this a larger budget stops buying a better answer.
-MAX_OUTPUT_TOKENS = 32_768
+#: free (plan B1; the fork's ``OUTPUT_BUDGET_CEILING_TOKENS``). It binds
+#: only above a 128k window, where three quarters of it is already more
+#: than any measured turn used. ``[budget] output_ceiling`` overrides it.
+OUTPUT_CEILING_TOKENS = 96_000
+MAX_OUTPUT_TOKENS = OUTPUT_CEILING_TOKENS
+
+#: What a call asks for, as a share of the window it runs in. Generous on
+#: purpose: the cap's job is not to truncate a turn, and what keeps the
+#: compaction trigger honest is the reservation below, not the ask.
+OUTPUT_WINDOW_SHARE = 0.75
+
+#: What a call asks for when the window is unknown. Still sent, so a
+#: provider default we cannot see does not silently rule.
+UNKNOWN_WINDOW_OUTPUT_TOKENS = 32_000
 
 #: Never request less than this. A budget this small means the prompt
 #: has crowded out the answer, and the right response is to compact, not
 #: to ask for a two-paragraph audit.
 MIN_OUTPUT_TOKENS = 4_096
 
-#: Left free for the backend's own framing — chat template, tool schema
-#: re-serialisation, thinking blocks that never appear in ``content``.
-WINDOW_MARGIN_TOKENS = 2_048
+#: Left free for estimate error and the backend's own framing (chat
+#: template, tool schema re-serialisation): ``max(RESERVE_MIN_TOKENS,
+#: ⌈RESERVE_SHARE × estimate⌉)``. A flat margin is too much on a small
+#: prompt and too little on a large one, where the estimate's error is.
+RESERVE_MIN_TOKENS = 1_024
+RESERVE_SHARE = 0.12
+WINDOW_MARGIN_TOKENS = 2_048  # legacy name; see :func:`reserve_tokens`
 
-#: Kept for callers that predate the ladder. The planner asks for this
-#: much when nothing has been measured; the reservation shrinks it as
-#: soon as the session has turns to learn from.
+#: The window assumed when nothing answered (plan B2 step 4).
+DEFAULT_WINDOW_TOKENS = 32_768
+
+#: Kept for callers that predate the ladder.
 TARGET_OUTPUT_TOKENS = MAX_OUTPUT_TOKENS
+
+
+# --- knobs (plan B1/B2) ------------------------------------------------ #
+
+@dataclass(frozen=True)
+class Knobs:
+    """The budget settings for one (role, model): shipped defaults with
+    ``[budget]``, ``[role.X.budget]`` and ``[role.X.models."<m>"]``
+    merged over them, most specific last (:func:`knobs_from`)."""
+    output_ceiling: int = OUTPUT_CEILING_TOKENS
+    output_window_share: float = OUTPUT_WINDOW_SHARE
+    reserve_min: int = RESERVE_MIN_TOKENS
+    reserve_share: float = RESERVE_SHARE
+    #: ``"model"`` (resolve from the backend) or a pinned window.
+    num_ctx: Any = "model"
+    #: State the cap in the role's system prompt (``# Output Budget``).
+    announce: bool = True
+
+
+DEFAULT_KNOBS = Knobs()
+
+#: The keys :class:`Knobs` takes, for config validation.
+KNOB_KEYS = tuple(Knobs.__dataclass_fields__)
+
+
+def knobs_from(*layers: Optional[dict]) -> Knobs:
+    """Merge layers (least specific first) over the shipped defaults.
+    Unknown keys and ``None`` values are ignored; validation is the
+    config loader's job."""
+    merged: dict = {}
+    for layer in layers:
+        for k, v in (layer or {}).items():
+            if k in KNOB_KEYS and v is not None:
+                merged[k] = v
+    return Knobs(**merged) if merged else DEFAULT_KNOBS
+
+
+def reserve_tokens(prompt_tokens: int, knobs: Knobs = DEFAULT_KNOBS) -> int:
+    """Room kept free beside the prompt for the estimate's own error."""
+    return max(int(knobs.reserve_min),
+               math.ceil(max(0, prompt_tokens) * float(knobs.reserve_share)))
+
+
+def resolve_output_budget(ctx: Optional[int], model_max: Optional[int] = None,
+                          knobs: Knobs = DEFAULT_KNOBS) -> int:
+    """``min(share × ctx, ceiling, model_max)``; with no window,
+    ``min(32,000, ceiling, model_max)`` (plan B1)."""
+    bound = [int(knobs.output_ceiling)]
+    if _positive(model_max):
+        bound.append(int(model_max))
+    if _positive(ctx):
+        bound.append(int(ctx * float(knobs.output_window_share)))
+    else:
+        bound.append(UNKNOWN_WINDOW_OUTPUT_TOKENS)
+    return max(1, min(bound))
+
+
+def model_max_output_of(chat_client: Any, model: str) -> Optional[int]:
+    """The model's own output maximum: the capability record (cloud
+    recommendations), else a ceiling a refusal named (A2)."""
+    caps = _caps_of(chat_client, model)
+    if caps is not None and _positive(caps.max_output_tokens):
+        return int(caps.max_output_tokens)
+    probe = getattr(chat_client, "learned_output_ceiling", None)
+    if callable(probe):
+        try:
+            v = probe(model)
+        except Exception:  # pragma: no cover — probing never fails a call
+            return None
+        if _positive(v):
+            return int(v)
+    return None
+
+
+@dataclass(frozen=True)
+class Window:
+    """The window one call is budgeted against, where it came from, and
+    the ``num_ctx`` to send (local Ollama only; ``None`` = send none)."""
+    tokens: Optional[int]
+    source: str
+    send_num_ctx: Optional[int] = None
+
+
+def _caps_of(chat_client: Any, model: str):
+    probe = getattr(chat_client, "caps", None)
+    if not callable(probe):
+        return None
+    try:
+        caps = probe(model)
+    except Exception:  # pragma: no cover — probing must never fail a call
+        log.debug("caps probe failed for %s", model, exc_info=True)
+        return None
+    from claude_hooks.provider_caps import ProviderCaps
+    return caps if isinstance(caps, ProviderCaps) else None
+
+
+def resolve_window(chat_client: Any, model: str,
+                   knobs: Knobs = DEFAULT_KNOBS) -> Window:
+    """The window to budget against (plan B2).
+
+    1. a window the engine granted to a request that stated one;
+    2. a pinned ``num_ctx``;
+    3. per backend: opencoti/llama.cpp ``/props`` (session max, then
+       ``n_ctx``); cloud Ollama recommendations, then trained context;
+       local Ollama the Modelfile ``num_ctx`` — never the trained
+       context, which is not what the model loads with;
+    4. :data:`DEFAULT_WINDOW_TOKENS`.
+
+    Local Ollama is sent the resolved window as ``options.num_ctx``, the
+    same value on every call so the model never reloads; nothing else is
+    (cloud ignores it, xOllama reloads on it, opencoti's window is
+    Milestone F's). A client without a capability record keeps the old
+    probe (:func:`context_length_of`).
+    """
+    granted = getattr(chat_client, "granted_window", None)
+    if callable(granted):
+        try:
+            g = granted(model)
+        except Exception:  # pragma: no cover
+            g = None
+        if _positive(g):
+            return Window(int(g), "granted")
+    caps = _caps_of(chat_client, model)
+    pinned = knobs.num_ctx if (isinstance(knobs.num_ctx, int)
+                               and not isinstance(knobs.num_ctx, bool)
+                               and knobs.num_ctx > 0) else None
+    local = (caps is not None and caps.backend == "ollama"
+             and caps.cloud is False)
+    if pinned:
+        return Window(pinned, "pinned", pinned if local else None)
+    if caps is None:
+        ctx = context_length_of(chat_client, model)
+        return Window(ctx, "probe" if ctx else "unknown")
+    if caps.backend in ("opencoti", "llamacpp"):
+        for src, v in (("session_ctx_max", caps.session_ctx_max),
+                       ("n_ctx", caps.declared_num_ctx)):
+            if _positive(v):
+                return Window(int(v), src)
+        ctx = context_length_of(chat_client, model)
+        return Window(ctx, "probe" if ctx else "unknown")
+    if local:
+        if _positive(caps.declared_num_ctx):
+            n = int(caps.declared_num_ctx)
+            return Window(n, "modelfile", n)
+        return Window(DEFAULT_WINDOW_TOKENS, "default", DEFAULT_WINDOW_TOKENS)
+    order = ((("context_length", caps.context_length),
+              ("trained", caps.trained_ctx))
+             if caps.cloud else
+             (("modelfile", caps.declared_num_ctx),
+              ("context_length", caps.context_length),
+              ("trained", caps.trained_ctx)))
+    for src, v in order:
+        if _positive(v):
+            return Window(int(v), src)
+    return Window(DEFAULT_WINDOW_TOKENS, "default")
+
+
+# --- the cap, told to the model (plan B1) ------------------------------ #
+
+OUTPUT_BUDGET_HEADING = "# Output Budget"
+
+#: At or above this share of the window the cap is effectively the whole
+#: window, and the model is asked to keep a quarter free.
+_WHOLE_WINDOW_SHARE = 0.9
+_SAFE_SHARE = 0.75
+
+
+def output_budget_section(cap: int, context_window: Optional[int] = None,
+                          thinking: Optional[tuple[str, int]] = None) -> str:
+    """The fork's wording (``buildOutputBudgetSection``): the cap the
+    reply is cut at, the thinking share when one is enforced, the
+    window, and the advice to split work rather than overrun."""
+    s = (f"\n\n{OUTPUT_BUDGET_HEADING}\n\nEach reply you produce is capped at "
+         f"{cap} tokens, thinking included. Anything past the cap is cut off "
+         "mid-sentence and the turn is wasted.")
+    if thinking and thinking[1] > 0:
+        s += (f" Of that, at most {thinking[1]} tokens may be spent thinking "
+              f"(effort {thinking[0]}); reasoning past that point is cut "
+              "short, so reach a decision inside it and write the answer "
+              "with what is left.")
+    if _positive(context_window) and cap >= context_window * _WHOLE_WINDOW_SHARE:
+        safe = int(cap * _SAFE_SHARE)
+        s += (f" That cap is effectively the whole {context_window}-token "
+              f"context window, so keep each reply under {safe} tokens and "
+              f"leave the remaining {round((1 - _SAFE_SHARE) * 100)}% free "
+              "for compaction.")
+    elif _positive(context_window):
+        s += f" The context window is {context_window} tokens."
+    s += (" Prefer several focused tool calls over one oversized reply: if "
+          "the remaining work does not fit, do the part that fits, call the "
+          "tools it needs, and continue in the next turn.")
+    return s
+
+
+def with_output_budget_section(messages: list[dict], cap: Optional[int],
+                               context_window: Optional[int] = None,
+                               thinking: Optional[tuple[str, int]] = None
+                               ) -> list[dict]:
+    """Append :func:`output_budget_section` to the first system message,
+    unless a message already states a cap. The stated cap is the role's
+    resolved cap, not one call's remaining room, so the system prompt —
+    and the prefix cache behind it — stays the same from call to call."""
+    if not _positive(cap) or not messages:
+        return messages
+    for m in messages:
+        if (m.get("role") == "system"
+                and OUTPUT_BUDGET_HEADING in str(m.get("content") or "")):
+            return messages
+    idx = next((i for i, m in enumerate(messages)
+                if m.get("role") == "system"
+                and isinstance(m.get("content"), str)), None)
+    if idx is None:
+        return messages
+    out = list(messages)
+    out[idx] = dict(out[idx])
+    out[idx]["content"] = out[idx]["content"] + output_budget_section(
+        int(cap), context_window, thinking)
+    return out
 
 # --- observed-output reservation ------------------------------------- #
 
@@ -261,6 +497,13 @@ class Budget:
     detail: str = ""
     trigger_tokens: Optional[int] = None
     overflow: Optional[token_calib.ContextOverflowReport] = None
+    #: Where the window came from (:class:`Window`), and the
+    #: ``options.num_ctx`` to send with the call (local Ollama only).
+    window_source: str = "unknown"
+    send_num_ctx: Optional[int] = None
+    #: The role's resolved cap before this call's room clipped it: the
+    #: figure the ``# Output Budget`` section states.
+    role_cap: Optional[int] = None
 
     @property
     def window_bound(self) -> bool:
@@ -280,6 +523,7 @@ class Budget:
                 "prompt_tokens_est": self.prompt_tokens,
                 "num_predict": self.output_tokens,
                 "cap_source": self.cap_source,
+                "window_source": self.window_source,
                 "window_bound": self.window_bound,
                 "needs_compaction": self.needs_compaction}
 
@@ -309,8 +553,12 @@ def plan(chat_client: Any, model: str, messages: list[dict], *,
          target_output: Optional[int] = None,
          retry_cap: Optional[int] = None,
          tools: Optional[list] = None,
-         session: Optional[str] = None) -> Budget:
+         session: Optional[str] = None,
+         knobs: Knobs = DEFAULT_KNOBS) -> Budget:
     """Decide the output budget for one call, and name what capped it.
+
+    The ask is :func:`resolve_output_budget` against the window
+    :func:`resolve_window` names, unless ``target_output`` sets it.
 
     ``retry_cap`` is the ceiling a previous truncated attempt reported.
     When the cap that ended that turn was **not** the window's, the retry
@@ -318,32 +566,37 @@ def plan(chat_client: Any, model: str, messages: list[dict], *,
     cannot be raised, so asking for the same budget reproduces the same
     overlong reply.
 
-    With an unknown window we still request a budget — the point of
-    sending one is to override a provider default we cannot see, and
-    that motive is unchanged by not knowing the window. Backends clamp a
-    ``num_predict`` larger than they can serve; none of them fail on it.
+    A prompt that leaves less than :data:`MIN_OUTPUT_TOKENS` keeps its
+    own cap and is flagged for compaction (plan B1): shrinking the ask to
+    a floor answered nothing, it only made the cut certain.
     """
+    knobs = knobs or DEFAULT_KNOBS
     prompt_tokens = estimate_messages_tokens(messages, model, tools=tools,
                                              session=session)
-    ctx = context_length_of(chat_client, model)
-    ask = int(target_output) if _positive(target_output) else MAX_OUTPUT_TOKENS
-
+    window = resolve_window(chat_client, model, knobs)
+    ctx = window.tokens
+    role_cap = (int(target_output) if _positive(target_output)
+                else resolve_output_budget(
+                    ctx, model_max_output_of(chat_client, model), knobs))
+    ask = role_cap
     if _positive(retry_cap):
         # Deliberately below the cap that just truncated: at or above it
         # the model has no reason to answer any shorter.
-        ask = max(MIN_OUTPUT_TOKENS, int(retry_cap) // 2)
+        ask = max(MIN_OUTPUT_TOKENS, min(ask, int(retry_cap) // 2))
+    common = dict(window_source=window.source,
+                  send_num_ctx=window.send_num_ctx, role_cap=role_cap)
 
     if ctx is None:
         return Budget(None, prompt_tokens, ask, False,
                       cap_source="requested",
                       detail="context length unknown; requesting the "
                              "target budget so a provider default cannot "
-                             "silently rule")
+                             "silently rule", **common)
 
     observed = observed_output_tokens(messages)
     trigger = compaction_trigger_tokens(
         context_length=ctx, model_max_tokens=ask, observed_output=observed)
-    available = ctx - prompt_tokens - WINDOW_MARGIN_TOKENS
+    available = ctx - prompt_tokens - reserve_tokens(prompt_tokens, knobs)
 
     if available < MIN_OUTPUT_TOKENS:
         overflow = token_calib.ContextOverflowReport(
@@ -354,12 +607,12 @@ def plan(chat_client: Any, model: str, messages: list[dict], *,
         )
         token_calib.note_context_overflow(overflow, model)
         return Budget(
-            ctx, prompt_tokens, MIN_OUTPUT_TOKENS, True,
+            ctx, prompt_tokens, ask, True,
             cap_source="context-overflow",
             detail=(f"prompt ~{prompt_tokens} tok leaves {available} of "
                     f"{ctx} — below the {MIN_OUTPUT_TOKENS} tok floor for "
                     f"an answer"),
-            trigger_tokens=trigger, overflow=overflow,
+            trigger_tokens=trigger, overflow=overflow, **common,
         )
 
     if prompt_tokens > trigger:
@@ -371,19 +624,19 @@ def plan(chat_client: Any, model: str, messages: list[dict], *,
             detail=(f"prompt ~{prompt_tokens} tok is past the {trigger} tok "
                     f"trigger for a {ctx} window — fits, but not with a "
                     f"full turn's answer beside it"),
-            trigger_tokens=trigger,
+            trigger_tokens=trigger, **common,
         )
 
     if ask <= available:
         return Budget(ctx, prompt_tokens, ask, False, cap_source="requested",
                       detail=f"prompt ~{prompt_tokens} tok of {ctx}",
-                      trigger_tokens=trigger)
+                      trigger_tokens=trigger, **common)
     return Budget(ctx, prompt_tokens, max(MIN_OUTPUT_TOKENS, available), False,
                   cap_source="remaining-context",
                   detail=(f"prompt ~{prompt_tokens} tok of {ctx}; the window "
                           f"caps output at {available} rather than the "
                           f"{ask} asked for"),
-                  trigger_tokens=trigger)
+                  trigger_tokens=trigger, **common)
 
 
 @dataclass
@@ -524,7 +777,11 @@ def compact_messages(messages: list[dict], *, keep_tokens: int,
                             marker_index=len(head))
 
 
-__all__ = ["Budget", "CompactionResult", "estimate_tokens",
+__all__ = ["Budget", "CompactionResult", "Knobs", "Window", "estimate_tokens",
+           "knobs_from", "resolve_output_budget", "resolve_window",
+           "reserve_tokens", "model_max_output_of", "output_budget_section",
+           "with_output_budget_section", "OUTPUT_BUDGET_HEADING",
+           "OUTPUT_CEILING_TOKENS", "DEFAULT_WINDOW_TOKENS",
            "estimate_messages_tokens", "estimate_tools_tokens",
            "context_length_of", "plan",
            "compact_messages", "observed_output_tokens",

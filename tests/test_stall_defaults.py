@@ -262,6 +262,7 @@ class TestStallDefaultsPublicSurface(unittest.TestCase):
             "PRODUCTION_HARD_CAPS_BY_MODEL",
             "PRODUCTION_STALL_FLOOR_S",
             "runtime_stall_thresholds",
+            "HARD_CAP_REFERENCE_OUTPUT_TOKENS",
         }
         self.assertEqual(set(sd.__all__), expected)
 

@@ -265,6 +265,15 @@ PRODUCTION_HARD_CAPS_BY_MODEL: dict[str, float] = {
 }
 
 
+#: The output cap the production calls above ran under (the pre-B1 flat
+#: ``num_predict``). A call allowed more output gets a proportionally
+#: longer hard cap (:func:`consultants.engine.stall_chat.scaled_hard_cap`):
+#: measured decode on these models was 5-30 tok/s at p10 and 15-110 at
+#: p50 (140 transcript.db files, 2026-10-14), so a 96,000-token turn needs
+#: 15-100 min where the caps allow 5-15.
+HARD_CAP_REFERENCE_OUTPUT_TOKENS: int = 32_768
+
+
 def runtime_stall_thresholds(model: Optional[str]) -> StallThresholds:
     """The thresholds the engine applies to one chat call on ``model``.
 
@@ -285,6 +294,7 @@ __all__ = [
     "PRODUCTION_HARD_CAPS_BY_MODEL",
     "PRODUCTION_STALL_FLOOR_S",
     "runtime_stall_thresholds",
+    "HARD_CAP_REFERENCE_OUTPUT_TOKENS",
     "StallThresholds",
     "RECOMMENDED_AS_OF",
     "RECOMMENDED_SUITE_VERSION",

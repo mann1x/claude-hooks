@@ -1200,8 +1200,11 @@ class TestRecorderIntegration:
                 prior_messages=prior,
             )
             sent = client.calls[0]["messages"]
-            # Prior thread preserved; one user message appended.
-            assert sent[:3] == prior
+            # Prior thread preserved; one user message appended. The
+            # system turn also states the cap once (plan B1).
+            assert sent[1:3] == prior[1:3]
+            head, _, rest = sent[0]["content"].partition("\n\n# Output Budget")
+            assert head == "SYNTHESIZER_SYSTEM" and "# Output Budget" not in rest
             assert sent[-1]["role"] == "user"
             content = sent[-1]["content"]
             assert "FOLLOW-UP QUESTION" in content

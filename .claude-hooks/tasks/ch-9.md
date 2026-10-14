@@ -7,7 +7,7 @@ area: consultants.sandbox
 tags: [council, cerebriline]
 plan: docs/PLAN-council-cerebriline.md
 created: 2026-10-14T13:22:15Z
-updated: 2026-10-14T13:22:15Z
+updated: 2026-10-14T14:31:02Z
 sessions: [0a7a5bf4]
 ---
 
@@ -22,4 +22,5 @@ Milestone E: E1 prerequisite fixes (runtime_permissions, control.py enum, per-la
 - [ ] Windows smoke passes
 
 ## Log
+- 2026-10-14 14:31Z [0a7a5bf4] E1 done (240448d; probe result in 95638ee: EOVERFLOW comes from a host-fs lower layer inside a user namespace, not xino). Left: E2+.
 - 2026-10-14 13:22Z [0a7a5bf4] created

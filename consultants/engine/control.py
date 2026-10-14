@@ -203,7 +203,38 @@ def runtime_control_defaults(
     protocol = getattr(cfg, "protocol", None)
     if protocol is not None and getattr(protocol, "typed", False):
         rc["typed_protocol"] = True
+    layers = budget_layers(cfg)
+    if layers:
+        rc["budget"] = layers  # type: ignore[typeddict-item]
     return rc
+
+
+def budget_layers(cfg: cc.ConsultantsConfig) -> dict:
+    """The run's budget knobs (plan B1/B2) as merge layers for
+    :func:`consultants.engine.council._budget_knobs`: ``"*"`` from
+    ``[budget]``, ``"<role>"`` from ``[role.X.budget]`` (an explicit
+    ``ctx_max`` is that role's pinned ``num_ctx`` unless the table sets
+    one), ``"<role>@<model>"`` from ``[role.X.models."<model>"]``. Only
+    set keys are carried, and the record is empty when none are, so a
+    default run seeds nothing."""
+    out: dict = {}
+    glob = dict(getattr(cfg, "budget", None) or {})
+    if glob:
+        out["*"] = glob
+    for role, rc in (getattr(cfg, "roles", None) or {}).items():
+        layer = dict(getattr(rc, "budget", None) or {})
+        ctx_max = getattr(rc, "ctx_max", None)
+        if (getattr(rc, "ctx_max_explicit", False) and ctx_max
+                and "num_ctx" not in layer):
+            layer["num_ctx"] = int(ctx_max)
+        if layer:
+            out[role] = layer
+        for model, vals in (getattr(rc, "model_overrides", None) or {}).items():
+            picked = {k: v for k, v in (vals or {}).items()
+                      if k in cc.BUDGET_KEYS}
+            if picked:
+                out[f"{role}@{model}"] = picked
+    return out
 
 
 # ---------- accessor helpers (node-side) ------------------------- #
