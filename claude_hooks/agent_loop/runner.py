@@ -94,6 +94,15 @@ class LoopConfig:
     # unprepared. None = no preparation (caliber / advisor behavior).
     prepare_payload: Optional[Callable[[dict], None]] = None
 
+    # Called with (payload, response) after every conversation call the
+    # loop makes — each iteration and each answer continuation — with the
+    # payload exactly as it was sent. For calibration: the provider's
+    # prompt count belongs to that payload, and only to that one.
+    # Auxiliary calls (the capped-thinking condenser) are not reported,
+    # so they cannot overwrite the conversation's anchor. Exceptions are
+    # logged and ignored. None = no callback (caliber / advisor).
+    on_response: Optional[Callable[[dict, dict], None]] = None
+
 
 # Type aliases.
 ToolExecutor = Callable[[str, str, str], str]
@@ -197,6 +206,17 @@ def _capped_thinking_note(msg: dict, response: dict, payload: dict,
     return capped_thinking.as_thinking_block(note)
 
 
+def _notify_response(config: "LoopConfig", payload: dict,
+                     response: dict) -> None:
+    callback = getattr(config, "on_response", None)
+    if callback is None:
+        return
+    try:
+        callback(payload, response)
+    except Exception:
+        log.exception("on_response callback raised; ignored")
+
+
 def _answer_text(response: dict) -> str:
     choices = response.get("choices") or []
     if not choices:
@@ -252,6 +272,7 @@ def _continue_truncated_answer(final: dict, payload: dict, chat_fn: ChatFn,
         cont_payload.pop("tool_choice", None)
         t0 = time.monotonic()
         result = chat_fn(cont_payload)
+        _notify_response(config, cont_payload, result)
         if on_iter is not None:
             try:
                 on_iter(iter_idx, cont_payload, result,
@@ -473,6 +494,7 @@ def run_loop(
         t_iter = time.monotonic()
         final = chat_fn(payload)
         iter_ms = int((time.monotonic() - t_iter) * 1000)
+        _notify_response(config, payload, final)
         if on_iter is not None:
             try:
                 on_iter(i, payload, final, iter_ms)

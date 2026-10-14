@@ -54,12 +54,12 @@ class TestCalibration(unittest.TestCase):
             self.assertEqual(tc.chars_per_token("m"), tc.CHARS_PER_TOKEN)
 
     def test_a_rejected_ratio_does_not_take_the_count_with_it(self):
-        """Only one of the two can be wrong. ``tokens`` is what the
-        provider counted; nothing about the character measurement can
-        make that untrue. Keeping them together froze the fork's
-        last-observed count fourteen turns stale."""
-        tc.observe_request_tokens(10, 1000, model="m")     # ratio rejected
-        self.assertEqual(tc.last_observed_request_tokens("m"), 1000)
+        """Above the ceiling only the pairing is suspect. ``tokens`` is
+        what the provider counted; keeping them together froze the
+        fork's last-observed count fourteen turns stale. (Below the
+        floor the count goes too — see test_token_calib_guards.)"""
+        tc.observe_request_tokens(1000, 1, model="m")      # ratio rejected
+        self.assertEqual(tc.last_observed_request_tokens("m"), 1)
         self.assertEqual(tc.chars_per_token("m"), tc.CHARS_PER_TOKEN)
 
     def test_reasoning_is_charged_at_its_own_rate_first(self):
