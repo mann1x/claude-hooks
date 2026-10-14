@@ -28,6 +28,7 @@ from claude_hooks import reasoning_loop_guard as rlg
 from claude_hooks import reasoning_repetition
 from claude_hooks import loop_detection
 from claude_hooks import struggle_supervisor
+from claude_hooks import silent_turns
 
 log = logging.getLogger("claude_hooks.agent_loop")
 
@@ -687,6 +688,69 @@ def _reasoning_loop_note(msg: dict, payload: dict, chat_fn: "ChatFn",
         capped_thinking.as_thinking_block(note))
 
 
+class _SilentTurns:
+    """Plan D3 (standard): which silent turns are re-asked, with budgets.
+    A tool-calling turn resets the streaks; the intent nudge and the
+    non-convergence line are spent once per loop."""
+
+    def __init__(self) -> None:
+        self.thinking = 0
+        self.parse = 0
+        self.intent = 0
+        self.streak = 0
+        self.streak_chars = 0
+        self.non_convergence_spent = False
+
+    def reset(self) -> None:
+        self.thinking = self.parse = 0
+        self.streak = self.streak_chars = 0
+
+    def reask(self, response: dict, msg: dict, *, tools_offered: bool
+              ) -> Optional[tuple[str, str]]:
+        """``(kind, reminder)`` for a silent turn to ask again, or ``None``
+        to let it stand as the answer. A truncated answer is never taken:
+        the continuation owns it."""
+        if truncation.classify(response) is not None:
+            return None
+        content = msg.get("content") or ""
+        reasoning = capped_thinking.thinking_text(msg)
+        found = None
+        only = silent_turns.thinking_only(content, reasoning)
+        if only is not None:
+            if self.thinking < silent_turns.THINKING_ONLY_RETRY_BUDGET:
+                self.thinking += 1
+                found = (("tool_call_in_thinking",
+                          silent_turns.TOOL_CALL_IN_THINKING_REMINDER)
+                         if only and tools_offered else
+                         ("thinking_only", silent_turns.THINKING_ONLY_REMINDER
+                          if tools_offered else
+                          silent_turns.THINKING_ONLY_ANSWER_REMINDER))
+        elif tools_offered and (call := silent_turns.unparsed_tool_call(content)):
+            if self.parse < silent_turns.TOOL_CALL_PARSE_RETRY_BUDGET:
+                self.parse += 1
+                found = ("unparsed_tool_call",
+                         silent_turns.unparsed_reminder(call))
+        elif tools_offered and (said := silent_turns.announced_intent(content)):
+            if self.intent < silent_turns.ANNOUNCED_INTENT_BUDGET:
+                self.intent += 1
+                found = ("announced_intent",
+                         silent_turns.announced_intent_reminder(said))
+        if found is None:
+            return None
+        if len(reasoning) >= silent_turns.NON_CONVERGENCE_MIN_REASONING_CHARS:
+            self.streak += 1
+            self.streak_chars += len(reasoning)
+        else:
+            self.streak = self.streak_chars = 0
+        if (tools_offered and not self.non_convergence_spent
+                and self.streak >= silent_turns.NON_CONVERGENCE_STREAK):
+            self.non_convergence_spent = True
+            kind, text = found
+            return kind, text + "\n\n" + silent_turns.non_convergence_note(
+                self.streak, self.streak_chars)
+        return found
+
+
 def _forced_report(payload: dict, history: list, instruction: str,
                    stop_reason: str, chat_fn: "ChatFn", config: "LoopConfig",
                    on_iter: Optional["OnIter"], iteration: int
@@ -783,6 +847,7 @@ def run_loop(
     nudger = reasoning_repetition.RepetitionNudger()
     guards = ToolGuards(config)
     supervisor = struggle_supervisor.StruggleSupervisor(config.max_iterations)
+    silent = _SilentTurns()
 
     if config.tools_available and preseed_builder is not None:
         preseed = preseed_builder(cwd)
@@ -929,10 +994,25 @@ def run_loop(
                     {"role": "user", "content": retry, "_harness": True},
                 ]
                 continue
+            reminder = silent.reask(final, msg, tools_offered=bool(
+                payload.get("tools")))
+            if reminder is not None:
+                kind, text = reminder
+                _emit_guard(config, {"guard": "silent_turn", "action": "reask",
+                                     "kind": kind, "iteration": i})
+                payload = dict(payload)
+                history = list(payload["messages"])
+                if (msg.get("content") or "").strip():
+                    history.append({"role": "assistant",
+                                    "content": msg["content"]})
+                payload["messages"] = history + [
+                    {"role": "user", "content": text, "_harness": True}]
+                continue
             final = _continue_truncated_answer(
                 final, payload, chat_fn, config, on_iter, i)
             break
         has_called_tool = True
+        silent.reset()
 
         # Collapse identical tool_calls within one assistant turn, then
         # cap. Preserves distinct calls; suppresses gemma-style bursts.
