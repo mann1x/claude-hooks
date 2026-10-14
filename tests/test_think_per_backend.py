@@ -238,7 +238,7 @@ def test_think_config_roundtrip_seed_and_cli(home, capsys):
     ccfg.set_budget({"announce": False}, scope="user", cwd=home)
     assert ccfg.load_config(home).roles["critic"].think == "max"
     rc = control.runtime_control_defaults(ccfg.load_config(home), effort="high")
-    assert rc["think"] == {"researcher@@bs2": 8192}
+    assert rc["think"] == {"researcher@@bs2": 8192, "critic": "max"}
     assert cli.main(["config", "set-think", "critic", "huge", "--user"]) == 2
     assert cli.main(["config", "set-think", "researcher", "--model", "@bs2",
                      "--clear", "--user"]) == 0
@@ -250,3 +250,97 @@ def test_default_run_seeds_no_think_record():
     from consultants.engine import control
     rc = control.runtime_control_defaults(ccfg.ConsultantsConfig(), effort="high")
     assert "think" not in rc
+
+
+# --- closing B: template layer, read-back, loaded window ---------------- #
+
+def test_template_think_sits_between_explicit_role_and_default(monkeypatch):
+    import claude_hooks.model_sampling as ms
+    monkeypatch.setattr(ms, "templates", lambda cfg=None, shipped=None:
+                        {"glm*": {"think": "high", "temperature": 0.7}})
+    assert ms.sampling_for("glm-5.3:cloud") == {"temperature": 0.7}  # never sent
+    assert council._think_for({}, "critic", "glm-5.3:cloud", "medium") == "high"
+    explicit = {"runtime_control": {"think": {"critic": "low"}}}
+    assert council._think_for(explicit, "critic", "glm-5.3:cloud", "low") == "low"
+    per_model = {"runtime_control": {"think": {"critic": "low",
+                                               "critic@glm-5.3:cloud": "max"}}}
+    assert council._think_for(per_model, "critic", "glm-5.3:cloud", "low") == "max"
+    assert council._think_for({}, "critic", "other", "medium") == "medium"
+
+
+def test_think_budget_read_back_is_cached_and_skips_cloud():
+    c = cc.ChatClient("http://h")
+    seq = _Seq([_Resp({"think_budget_tokens": 2000})])
+    with patch("urllib.request.urlopen", side_effect=seq):
+        assert c.think_budget("m", "medium", 8000, 32768) == 2000
+        assert c.think_budget("m", "medium", 8000, 32768) == 2000  # cached
+    assert seq.bodies == [{"model": "m", "think": "medium",
+                           "options": {"num_predict": 8000, "num_ctx": 32768}}]
+    provider_caps._store(provider_caps.ProviderCaps("http://h", "x:cloud",
+                                                    cloud=True))
+    with patch("urllib.request.urlopen", side_effect=AssertionError):
+        assert c.think_budget("x:cloud", "high", 8000) is None
+
+
+def test_stated_share_reads_back_on_a_local_ollama_server():
+    class _C:
+        def caps(self, model):
+            return provider_caps.ProviderCaps("http://h", "m",
+                                              backend="xollama", cloud=False)
+
+        def think_budget(self, model, think, cap, ctx):
+            return 4000 if think == "high" else None
+    assert council._stated_think_share(_C(), "m", "high", 8000, 32768) \
+        == ("high", 4000)
+    assert council._stated_think_share(_C(), "m", "low", 8000, 32768) is None
+
+
+def test_streamed_final_chunk_keeps_the_enforced_budget():
+    c = cc.ChatClient("http://h")
+    c._probed_think["m"] = True
+    lines = [json.dumps({"message": {"role": "assistant", "content": "No."},
+                         "done": False}).encode() + b"\n",
+             json.dumps({"done": True, "done_reason": "stop", "eval_count": 3,
+                         "think_budget": "low", "think_budget_tokens": 500,
+                         "cached_prompt_tokens": 12}).encode() + b"\n"]
+
+    class _S(_Resp):
+        def __iter__(self):
+            return iter(lines)
+    with patch("urllib.request.urlopen", side_effect=_Seq([_S({})])):
+        out = c.chat_streamed({"model": "m", "messages": [], "think": "low"})
+    assert out["timings"]["think_budget_tokens"] == 500
+    assert out["timings"]["think_budget_source"] == "read_back"
+    assert out["timings"]["cached_prompt_tokens"] == 12
+
+
+def test_xollama_window_is_the_loaded_one_never_trained():
+    from consultants.engine import budget
+
+    class _C:
+        def __init__(self, loaded):
+            self.loaded = loaded
+
+        def caps(self, model):
+            return provider_caps.ProviderCaps(
+                "http://h", "m", backend="xollama", cloud=False,
+                trained_ctx=262_144)
+
+        def loaded_context(self, model):
+            return self.loaded
+    w = budget.resolve_window(_C(32_768), "m")
+    assert (w.tokens, w.source, w.send_num_ctx) == (32_768, "loaded", None)
+    w = budget.resolve_window(_C(None), "m")
+    assert (w.tokens, w.source) == (budget.DEFAULT_WINDOW_TOKENS, "default")
+
+
+def test_loaded_context_reads_api_ps_and_caches_briefly():
+    calls = []
+
+    def fetch(url, **kw):
+        calls.append(url)
+        return 200, {"models": [{"name": "q:8b", "context_length": 32768}]}
+    assert provider_caps.loaded_context("http://h", "q:8b", fetch=fetch) == 32768
+    assert provider_caps.loaded_context("http://h", "q:8b", fetch=fetch) == 32768
+    assert provider_caps.loaded_context("http://h", "other", fetch=fetch) is None
+    assert calls == ["http://h/api/ps", "http://h/api/ps"]

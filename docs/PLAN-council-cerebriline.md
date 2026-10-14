@@ -155,6 +155,18 @@ Exact algorithm in 01 §6.
 
 ## 2. Milestone B — Budgets: output, window, thinking, sampling
 
+**Closed 2026-10-14.** Exit evidence: a full council on opencoti `@bs2` (DCA on, `session_ctx_max` 2,097,152) completed in 92 s. Each `llm_call` row records:
+
+- `num_predict` 96,000 and the stated cap;
+- the thinking budget sent (`medium` 24,000, `high` 48,000);
+- a per-instance seed and temperature (lanes distinct, reused within a lane).
+
+Deadlines are re-validated against the measured decode rates (B1). The parity cohorts are green: a default run seeds no budget or think layers, and `seed=off` with range 0 adds nothing. The run also found three defects outside B, all fixed:
+
+- llama.cpp templates rejected several system turns;
+- two lanes failing in one step aborted the run;
+- `Send` lanes never received `runtime_control`, so fanned-out lanes ran without the stall monitor, typed protocol, budget, think or sampling settings.
+
 ### B1. Output cap — fully automatic, 96k ceiling (owner)
 
 **Built 2026-10-14.** The re-check found the per-call hard caps would kill long turns, so they now scale with `num_predict`. Deadlines are unchanged. See `docs/consultants-providers.md` "Budgets".
@@ -199,7 +211,7 @@ Exact algorithm in 01 §6.
 
 ### B3. Thinking — per backend, level fixed per (role, model)
 
-**Built 2026-10-14**, except the model-template `think` layer, which waits for a measured per-model value to ship, and the `/api/show` think-budget probe for local builds, which have no read-back yet. xOllama's read-back is fixture-tested only.
+**Built 2026-10-14, closed.** The template `think` layer exists, but no shipped template sets a value until one is measured. xOllama's read-back is verified live (reply, streamed, and `/api/show` before the call) on solidpc `:11433` and eleven2go `:22434`.
 
 - **Level resolution** (owner):
   - fixed per role **and** per model, configurable as `roles.<role>.think` plus `roles.<role>.models.<model>.think`;
@@ -528,6 +540,8 @@ Cerebriline's. xOllama council chat is out of scope.
   - P2r: researcher role, shared by all lanes and tool_executor items;
   - P3: reports, shared by critic, adversary, refuter and synthesizer.
 - Each layer is rendered through `/apply-template` with a sentinel cut and byte-prefix-checked, so a one-token miss is detected, not silent.
+- **Session capacity (owner, 2026-10-14):** one PolyKV session can carry up to **32 workers/agents**. A whole council fits in one owner session: lanes and roles are workers on its pools, not one session each. The engine's parallel slots (8 on bs2 after the 2026-10-14 restart; `/props` `total_slots`, elastic) bound how many decode at once. Workers beyond that queue on 429 + `Retry-After`; they are not refused.
+- **Window with DCA:** with DCA on, bs2 reports `session_ctx_max` = `kv_pool_cells` = 2,097,152, so one session may grow to the whole pool. The owner booking and compaction pressure must read `/kv` live (`cells_free`, `largest_admissible`, pressure); a session ceiling equal to the pool is not room any one lane can count on.
 - **Fan-out:**
   - a capacity read plus a semaphore before Sends;
   - owner grow/wait when full;

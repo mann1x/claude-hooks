@@ -60,6 +60,13 @@ FIELDS = frozenset({
 })
 
 
+#: Template fields that describe the model rather than a sampler option:
+#: read by the engine, never sent in ``options``. ``think`` is the
+#: model's default thinking level (plan B3), below an explicit role
+#: setting and above the role default.
+META_FIELDS = frozenset({"think"})
+
+
 SHIPPED_FILE = Path(__file__).resolve().parent.parent / "config" / "model-sampling.json"
 
 
@@ -98,12 +105,12 @@ def templates(cfg: Optional[dict] = None,
             log.warning("model_sampling: template %r is not an object", pattern)
             continue
         opts = {k: v for k, v in opts.items() if not k.startswith("_")}
-        unknown = set(opts) - FIELDS
+        unknown = set(opts) - FIELDS - META_FIELDS
         if unknown:
             log.warning("model_sampling: template %r ignores unknown field(s) %s",
                         pattern, sorted(unknown))
         out[pattern] = {k: v for k, v in opts.items()
-                        if k in FIELDS and v is not None}
+                        if (k in FIELDS or k in META_FIELDS) and v is not None}
     return out
 
 
@@ -176,8 +183,15 @@ def resolve(model: str, cfg: Optional[dict] = None
 
 
 def sampling_for(model: str, cfg: Optional[dict] = None) -> dict:
-    """The options to send for ``model`` (a copy, safe to extend)."""
-    return resolve(model, cfg)[0]
+    """The options to send for ``model`` (a copy, safe to extend).
+    :data:`META_FIELDS` are left out: they are not options."""
+    return {k: v for k, v in resolve(model, cfg)[0].items()
+            if k not in META_FIELDS}
+
+
+def template_think(model: str, cfg: Optional[dict] = None):
+    """The template's ``think`` for ``model``, or ``None``."""
+    return resolve(model, cfg)[0].get("think")
 
 
 def apply(payload: dict, cfg: Optional[dict] = None) -> dict:

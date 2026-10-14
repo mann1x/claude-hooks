@@ -187,7 +187,7 @@ def _wire_v2_reducers():
         from consultants.engine.state_v2 import (
             CoderArtifact, CoderTaskItem,
             Doc, ToolPlanItem, ToolResult, append_doc,
-            merge_runtime_control,
+            join_errors, latest_non_none, merge_runtime_control,
         )
     except ImportError:  # pragma: no cover
         return
@@ -208,6 +208,10 @@ def _wire_v2_reducers():
     hints["coder_tasks"] = _Ann[list[CoderTaskItem], operator.add]
     hints["coder_artifacts"] = _Ann[list[CoderArtifact], operator.add]
     hints["coder_task_item"] = Optional[CoderTaskItem]
+    # Lanes that fail in the same superstep each write a tombstone; a
+    # plain channel aborted the whole run (InvalidUpdateError) instead.
+    hints["error"] = _Ann[Optional[str], join_errors]
+    hints["_role_failed"] = _Ann[Optional[str], latest_non_none]
 
 
 _wire_v2_reducers()
@@ -1001,6 +1005,10 @@ def build_council_graph(deps: GraphDeps,
                             # the lane's citation lint runs with cwd alone
                             # and calls every --add-dir cite unverified.
                             "extra_roots": list(state.get("extra_roots") or []),
+                            # The run record (stall thresholds, typed protocol,
+                            # budget / think / sampling layers): read-only here,
+                            # and absent from a lane unless handed over.
+                            "runtime_control": dict(state.get("runtime_control") or {}),
                             "effort": state.get("effort"),
                             "models": state.get("models", {}),
                             "topology": state.get("topology"),
@@ -1054,6 +1062,10 @@ def build_council_graph(deps: GraphDeps,
                         # Carried explicitly: a Send lane sees only the
                         # keys in its own dict (see the researcher fanout).
                         "extra_roots": list(state.get("extra_roots") or []),
+                        # The run record (stall thresholds, typed protocol,
+                        # budget / think / sampling layers): read-only here,
+                        # and absent from a lane unless handed over.
+                        "runtime_control": dict(state.get("runtime_control") or {}),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
@@ -1254,6 +1266,10 @@ def build_council_graph(deps: GraphDeps,
                         # Carried explicitly: a Send lane sees only the
                         # keys in its own dict (see the researcher fanout).
                         "extra_roots": list(state.get("extra_roots") or []),
+                        # The run record (stall thresholds, typed protocol,
+                        # budget / think / sampling layers): read-only here,
+                        # and absent from a lane unless handed over.
+                        "runtime_control": dict(state.get("runtime_control") or {}),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
@@ -1410,6 +1426,10 @@ def build_council_graph(deps: GraphDeps,
                         # Carried explicitly: a Send lane sees only the
                         # keys in its own dict (see the researcher fanout).
                         "extra_roots": list(state.get("extra_roots") or []),
+                        # The run record (stall thresholds, typed protocol,
+                        # budget / think / sampling layers): read-only here,
+                        # and absent from a lane unless handed over.
+                        "runtime_control": dict(state.get("runtime_control") or {}),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
@@ -1587,6 +1607,10 @@ def build_council_graph(deps: GraphDeps,
                         # Carried explicitly: a Send lane sees only the
                         # keys in its own dict (see the researcher fanout).
                         "extra_roots": list(state.get("extra_roots") or []),
+                        # The run record (stall thresholds, typed protocol,
+                        # budget / think / sampling layers): read-only here,
+                        # and absent from a lane unless handed over.
+                        "runtime_control": dict(state.get("runtime_control") or {}),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),

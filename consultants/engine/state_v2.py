@@ -315,6 +315,26 @@ def merge_runtime_control(left: Optional[RuntimeControl],
     return out
 
 
+def join_errors(left: Optional[str], right: Optional[str]) -> Optional[str]:
+    """Reducer for ``error``: fan-out lanes that fail in the same
+    superstep each write one, and a plain channel then aborts the whole
+    run (``InvalidUpdateError``) instead of tombstoning the lanes.
+    Distinct messages are joined in order."""
+    if not right:
+        return left
+    if not left:
+        return right
+    if right in left.split(" | "):
+        return left
+    return f"{left} | {right}"
+
+
+def latest_non_none(left: Any, right: Any) -> Any:
+    """Reducer for ``_role_failed``: the latest failed role wins, and a
+    write of ``None`` never clears it."""
+    return right if right is not None else left
+
+
 def append_doc(left: Optional[list[Doc]],
                right: Optional[list[Doc]]) -> list[Doc]:
     """Reducer for ``additional_context``. Append-only with hash-based
@@ -469,8 +489,9 @@ class CouncilStateV2(TypedDict, total=False):
     retries_by_role: dict[str, int]
 
     # ---- error tombstones ----
-    error: Optional[str]
-    _role_failed: Optional[str]
+    # Reducers, so lanes failing in the same superstep both land.
+    error: Annotated[Optional[str], join_errors]
+    _role_failed: Annotated[Optional[str], latest_non_none]
 
     # ---- Send-injected per-lane fields ----
     plan_item: Optional[str]

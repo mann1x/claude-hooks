@@ -53,6 +53,17 @@ claude-consultants config remove-endpoint bs2
 | `timings.cache_n` | `timings.cached_prompt_tokens` |
 | `X-Context-Window` | `timings.granted_window` |
 
+### One system turn on llama.cpp wires
+
+llama.cpp chat templates (opencoti, llamafile) accept one `system` turn,
+first. The council sends several: grounding, structure map, anchors and
+the role prompt lead every grounded role, and compaction markers come
+later. `single_system_messages()` joins the leading run into one system
+turn. A later system turn is sent as a user note (`[system note]`),
+merged into an adjacent user turn so roles still alternate. Nothing is
+dropped. Ollama-native requests are unchanged. The first full council on
+opencoti failed on this ("System message must be at the beginning").
+
 ### PolyKV window mode (`window`)
 
 One PolyKV connection carries many sessions, one per agent (council
@@ -78,8 +89,11 @@ any one session's window.
 
 `/props` `opencoti.dca` (`enabled`, `yarn_factor`) is recorded on the
 capability record (`dca_enabled`, `dca_yarn_factor`). It is never used to
-compute a window; `session_ctx_max` stays the authority. bs2 runs with
-DCA off, so a DCA-extended `session_ctx_max` has not been observed yet.
+compute a window; `session_ctx_max` stays the authority. Observed on bs2:
+with DCA off it reported 262,144; after the 2026-10-14 restart with DCA
+on it reports 2,097,152, the whole pool, so the budget follows without a
+code change. The output cap is then the 96k ceiling. One PolyKV session
+can carry up to 32 workers; using that is Milestone F (the plan's F3).
 
 ## Capabilities: `claude_hooks/provider_caps.py`
 
@@ -168,6 +182,7 @@ mirrors it on the `llm_call` runtime event.
    - opencoti / llama.cpp: `/props` `opencoti.kv.session_ctx_max`, then `n_ctx`;
    - cloud Ollama: the recommendations window, then the trained context;
    - local Ollama: the Modelfile `num_ctx`, **never** the trained context, which is not what the model loads with;
+   - local xOllama: the Modelfile `num_ctx`, then the window the model is loaded with (`GET /api/ps` `context_length`, cached 60 s), then the default; never sent, never trained;
 4. 32,768.
 
 Local Ollama is sent the resolved window as `options.num_ctx`, with the
@@ -175,9 +190,10 @@ same value on every call, so the model loads once. Nothing else is sent
 one: cloud ignores it, xOllama reloads on it, and opencoti's window
 modes are Milestone F's.
 
-On bs2 (opencoti) the 2,097,152-cell KV pool is shared by 4 slots, and
-one session can take at most 262,144 (`session_ctx_max` =
-`largest_admissible`), which is what calls are budgeted against.
+On bs2 (opencoti) the KV pool is 2,097,152 cells. Without DCA one
+session could take at most 262,144 (`session_ctx_max` =
+`largest_admissible`); with DCA on (2026-10-14 restart) it reports the
+whole pool. Calls are budgeted against whatever it reports.
 
 **Output cap**: `min(0.75 × window, 96,000, the model's max)`. With no
 window it is `min(32,000, …)`. The model's max comes from the cloud
@@ -229,7 +245,10 @@ default run seeds nothing. The menu entry is **Output cap & window**
 
 A role's `think` is fixed per role and per (role, model), and never
 derived from effort. Precedence: `[role.X.models."<m>"] think` >
-`[role.X] think` > `DEFAULT_THINK_BY_ROLE`.
+`[role.X] think` > the model template's `think`
+(`config/model-sampling.json`, a non-option field that is never sent) >
+`DEFAULT_THINK_BY_ROLE`. No template ships a `think` yet; one is added
+when a per-model value has been measured.
 
 Values:
 
@@ -250,7 +269,7 @@ claude-consultants config set-think researcher --model @bs2 --clear
 |---|---|---|
 | Ollama (cloud / local) | sent only if the model's `thinking_values` (recommendations) accept it, else `think: true`; with no list the level is sent as is | `think: true` + `options.think_budget` |
 | opencoti / llama.cpp | `reasoning_budget_tokens` = share × `min(num_predict, window)`: max 4/5, high 1/2, medium 1/4, low 1/8, minimal 1/16 | `reasoning_budget_tokens` |
-| xOllama / think-budget builds | as Ollama; the enforced budget is read back from `think_budget_tokens` | as Ollama |
+| xOllama / think-budget builds | as Ollama; the enforced budget is read back from `think_budget_tokens` on the reply (plain and streamed) and, before the call, from `POST /api/show` with the level and limits (`ChatClient.think_budget`; never asked of a cloud model) | as Ollama |
 
 - A level the model refuses (a 4xx naming `think`) is retried once as
   `think: true`. Only a refused `think: true` strips the field.
@@ -265,6 +284,10 @@ claude-consultants config set-think researcher --model @bs2 --clear
   count), the `# Output Budget` section states it.
 
 Measured on 2026-10-14:
+
+- xOllama (solidpc `:11433`, eleven2go `:22434`) reads back
+  `minimal` → 500, `high` → 4,000 and `3000` → 3,000 at
+  `num_predict` 8,000, plain and streamed;
 
 - gemma4:31b-cloud accepts only `off` / `on`, so its roles' levels are
   sent as `true`;

@@ -1198,13 +1198,26 @@ def _instance_sampling(state: Optional[dict], role: str, model: str,
 
 def _think_for(state: Optional[dict], role: str, model: str,
                think: Any) -> Any:
-    """``think`` for ``(role, model)`` (plan B3): a per-model setting
-    (``[role.X.models."<m>"] think``, seeded as
-    ``runtime_control["think"]["<role>@<model>"]``) over the role's own.
-    Never derived from effort."""
-    by_model = ((state or {}).get("runtime_control") or {}).get("think") or {}
+    """``think`` for ``(role, model)`` (plan B3), most specific first: a
+    per-model setting (``[role.X.models."<m>"] think``, seeded as
+    ``runtime_control["think"]["<role>@<model>"]``), an explicit role
+    setting (seeded as ``["<role>"]``), the model template's ``think``,
+    then ``think`` as passed (the role default). Never derived from
+    effort."""
+    seeded = ((state or {}).get("runtime_control") or {}).get("think") or {}
     key = f"{role}@{model}"
-    return by_model[key] if key in by_model else think
+    if key in seeded:
+        return seeded[key]
+    if role in seeded:  # set explicitly for the role
+        return seeded[role]
+    # The model template's default level (``config/model-sampling.json``
+    # ``think``) beats the role default, never an explicit setting.
+    from claude_hooks.model_sampling import template_think
+    try:
+        t = template_think(model)
+    except Exception:  # pragma: no cover — a broken template never fails a call
+        t = None
+    return t if t is not None else think
 
 
 def _think_budget_message(chat_client, model: str) -> Optional[str]:
@@ -1229,9 +1242,10 @@ def _stated_think_share(chat_client, model: str, think: Any,
                         cap: Optional[int], ctx: Optional[int]
                         ) -> Optional[tuple[str, int]]:
     """``(label, tokens)`` for the ``# Output Budget`` section when the
-    thinking allowance is known before the call: a token count, or a
-    level an opencoti / llama.cpp backend is sent as tokens. Ollama
-    levels are computed server-side and are not stated."""
+    thinking allowance is known before the call: a token count, a level
+    an opencoti / llama.cpp backend is sent as tokens, or a level a local
+    Ollama-protocol server reads back. Cloud levels carry no token
+    budget and are not stated."""
     from claude_hooks.get_advice.chat_client import (
         normalize_think, think_budget_tokens,
     )
@@ -1240,8 +1254,19 @@ def _stated_think_share(chat_client, model: str, think: Any,
         return None
     if isinstance(t, str):
         caps = budget._caps_of(chat_client, model)
-        if caps is None or caps.backend not in ("opencoti", "llamacpp"):
+        if caps is None or caps.cloud:
             return None
+        if caps.backend not in ("opencoti", "llamacpp"):
+            # A local Ollama-protocol server computes the budget itself;
+            # ask it what it will enforce (xOllama / think-budget builds).
+            probe = getattr(chat_client, "think_budget", None)
+            tokens = None
+            if callable(probe):
+                try:
+                    tokens = probe(model, t, cap, ctx)
+                except Exception:  # pragma: no cover
+                    tokens = None
+            return (t, tokens) if tokens else None
     tokens = think_budget_tokens(t, cap, ctx)
     return (str(t), tokens) if tokens else None
 

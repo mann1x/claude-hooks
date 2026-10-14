@@ -200,6 +200,17 @@ def _caps_of(chat_client: Any, model: str):
     return caps if isinstance(caps, ProviderCaps) else None
 
 
+def _loaded_context_of(chat_client: Any, model: str) -> Optional[int]:
+    probe = getattr(chat_client, "loaded_context", None)
+    if not callable(probe):
+        return None
+    try:
+        v = probe(model)
+    except Exception:  # pragma: no cover — probing never fails a call
+        return None
+    return int(v) if _positive(v) else None
+
+
 def resolve_window(chat_client: Any, model: str,
                    knobs: Knobs = DEFAULT_KNOBS) -> Window:
     """The window to budget against (plan B2).
@@ -249,6 +260,16 @@ def resolve_window(chat_client: Any, model: str,
             n = int(caps.declared_num_ctx)
             return Window(n, "modelfile", n)
         return Window(DEFAULT_WINDOW_TOKENS, "default", DEFAULT_WINDOW_TOKENS)
+    if caps.backend == "xollama" and caps.cloud is False:
+        # Never sent a num_ctx (it reloads), so the window is what the
+        # server loaded the model with: the Modelfile's, else the one
+        # /api/ps reports, else the default — never the trained context.
+        if _positive(caps.declared_num_ctx):
+            return Window(int(caps.declared_num_ctx), "modelfile")
+        loaded = _loaded_context_of(chat_client, model)
+        if loaded:
+            return Window(loaded, "loaded")
+        return Window(DEFAULT_WINDOW_TOKENS, "default")
     order = ((("context_length", caps.context_length),
               ("trained", caps.trained_ctx))
              if caps.cloud else

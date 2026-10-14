@@ -213,6 +213,11 @@ def runtime_control_defaults(
         for role, r in (getattr(cfg, "roles", None) or {}).items()
         for m, vals in (getattr(r, "model_overrides", None) or {}).items()
         if "think" in (vals or {})}
+    # An explicit role setting, so a model template's ``think`` can sit
+    # between it and the role default (plan B3).
+    think_by_model.update({
+        role: r.think for role, r in (getattr(cfg, "roles", None) or {}).items()
+        if getattr(r, "think", None) is not None})
     if think_by_model:
         rc["think"] = think_by_model  # type: ignore[typeddict-item]
     # Plan B4: scopes seed uniqueness to this run (rides the checkpoint,

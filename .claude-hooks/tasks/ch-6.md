@@ -7,7 +7,7 @@ area: consultants.budgets
 tags: [council, cerebriline]
 plan: docs/PLAN-council-cerebriline.md
 created: 2026-10-14T13:22:05Z
-updated: 2026-10-14T13:22:05Z
+updated: 2026-10-14T15:51:19Z
 sessions: [0a7a5bf4]
 ---
 
@@ -20,4 +20,5 @@ Milestone B: automatic output cap min(0.75×ctx, 96k, model max, user max) with 
 - [ ] parity cohort green
 
 ## Log
+- 2026-10-14 15:51Z [0a7a5bf4] B built on dev: B1/B2 3798d9c (cap min(0.75·window, 96k, model max); window per backend, local never trained ctx; stated # Output Budget; [budget] knobs + set-budget; hard cap scales with num_predict/32768 after measuring decode in 140 transcript.db; PolyKV [endpoints.X] window = dynamic default, assured refused until F), B3 209ec28 (think levels/ints per (role, model), opencoti reasoning_budget_tokens, cloud thinking_values gate, refused level -> true, allowance-based capped detection, set-think; fixed role.think dropped on save), B4 82c7bf5 (per-instance seed unique per model per run, ±2% temperature jitter, set-sampling, show samplers). Open: model-template think layer (no measured values yet), /api/show think-budget probe for local builds, xOllama read-back live test.
 - 2026-10-14 13:22Z [0a7a5bf4] created

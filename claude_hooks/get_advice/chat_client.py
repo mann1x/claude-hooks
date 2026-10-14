@@ -364,6 +364,47 @@ THINK_UNSUPPORTED_4XX_BODY_SUBSTRINGS = (
 )
 
 
+#: Label a mid-conversation system message carries once it is sent as a
+#: user turn (:func:`single_system_messages`).
+SYSTEM_NOTE_PREFIX = "[system note]\n"
+
+
+def single_system_messages(messages: list[dict]) -> list[dict]:
+    """Messages a llama.cpp chat template accepts: one ``system`` turn,
+    first, and no two ``user`` turns in a row.
+
+    Ollama renders several system messages and system turns mid-history;
+    llama.cpp's Jinja templates (opencoti, llamafile) raise "System
+    message must be at the beginning" on either. The council sends both:
+    grounding, structure map, anchors and the role prompt as leading
+    system turns, and compaction markers later on. So the leading run is
+    joined into one system turn, in order, and a later system turn is
+    sent as a user note, merged into an adjacent user turn so roles still
+    alternate. Content is never dropped."""
+    out: list[dict] = []
+    i = 0
+    lead: list[str] = []
+    while i < len(messages) and messages[i].get("role") == "system":
+        c = messages[i].get("content")
+        if isinstance(c, str) and c:
+            lead.append(c)
+        i += 1
+    if lead:
+        out.append({"role": "system", "content": "\n\n".join(lead)})
+    for m in messages[i:]:
+        if m.get("role") == "system":
+            m = {"role": "user",
+                 "content": SYSTEM_NOTE_PREFIX + str(m.get("content") or "")}
+        if (m.get("role") == "user" and out and out[-1].get("role") == "user"
+                and isinstance(out[-1].get("content"), str)
+                and isinstance(m.get("content"), str)):
+            out[-1] = {**out[-1],
+                       "content": out[-1]["content"] + "\n\n" + m["content"]}
+            continue
+        out.append(m)
+    return out
+
+
 def _ollama_messages(messages: list[dict]) -> list[dict]:
     """Translate OpenAI-shape messages into Ollama-native shape.
 
@@ -555,6 +596,8 @@ class ChatClient:
         # Windows granted to requests that stated one (plan B2); a booking
         # never shrinks, so the first grant is kept.
         self._granted: dict[str, int] = {}
+        # Read-back thinking budgets per (model, think, limits) (plan B3).
+        self._think_budgets: dict[tuple, Optional[int]] = {}
 
     def _headers(self, **extra) -> dict:
         h = {"Content-Type": "application/json", **extra}
@@ -579,6 +622,51 @@ class ChatClient:
     def learned_output_ceiling(self, model: str) -> Optional[int]:
         """An output maximum this server's refusal named for ``model``."""
         return learned_output_ceiling(self.base_url, self._real(model))
+
+    def think_budget(self, model: str, think: Any,
+                     num_predict: Optional[int],
+                     num_ctx: Optional[int] = None) -> Optional[int]:
+        """The thinking budget the server will enforce for ``think`` at
+        these limits, read back from ``POST /api/show`` (xOllama and
+        think-budget builds answer ``think_budget_tokens``; stock Ollama
+        does not, which is ``None``). Asked once per (model, think,
+        limits). Never asked of a cloud model: no token budget exists
+        there (plan B3)."""
+        model = self._real(model)
+        key = (model, str(think), num_predict, num_ctx)
+        if key in self._think_budgets:
+            return self._think_budgets[key]
+        from claude_hooks import provider_caps
+        caps = provider_caps.cached(self.base_url, model)
+        if caps is not None and caps.cloud:
+            self._think_budgets[key] = None
+            return None
+        opts = {k: v for k, v in (("num_predict", num_predict),
+                                  ("num_ctx", num_ctx)) if v}
+        req = urllib.request.Request(
+            f"{self.base_url}/api/show", method="POST",
+            data=json.dumps({"model": model, "think": normalize_think(think),
+                             "options": opts}).encode(),
+            headers=self._headers())
+        value: Optional[int] = None
+        try:
+            with urllib.request.urlopen(req, timeout=10.0) as resp:
+                data = json.loads(resp.read())
+            v = data.get("think_budget_tokens") if isinstance(data, dict) else None
+            if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+                value = v
+        except (urllib.error.URLError, OSError, ValueError):
+            return None  # not cached: ask again next time
+        self._think_budgets[key] = value
+        return value
+
+    def loaded_context(self, model: str) -> Optional[int]:
+        """The window ``model`` is loaded with now (``/api/ps``)."""
+        from claude_hooks import provider_caps
+        auth = ({"Authorization": f"Bearer {self.api_key}"}
+                if self.api_key else None)
+        return provider_caps.loaded_context(self.base_url, self._real(model),
+                                            headers=auth)
 
     def _accepted_level(self, model: str, level: str) -> Any:
         """``level`` if the service accepts it for ``model``, else bare
@@ -1207,7 +1295,11 @@ class ChatClient:
                 for k in ("prompt_eval_count", "eval_count",
                          "total_duration", "load_duration",
                          "prompt_eval_duration", "eval_duration",
-                         "done_reason"):
+                         "done_reason",
+                         # xOllama / think-budget builds: the enforced
+                         # budget, and the prompt tokens served from cache.
+                         "think_budget_tokens", "think_budget",
+                         "cached_prompt_tokens"):
                     if k in obj:
                         final_fields[k] = obj[k]
 
@@ -1426,7 +1518,8 @@ class OpenAICompatChatClient(ChatClient):
                  stream: bool) -> dict:
         model = payload.get("model") or ""
         body: dict = {"model": model,
-                      "messages": list(payload.get("messages") or []),
+                      "messages": single_system_messages(
+                          list(payload.get("messages") or [])),
                       "stream": bool(stream)}
         from claude_hooks.model_sampling import sampling_for
         opts = {**sampling_for(model), **dict(payload.get("options") or {})}
@@ -1795,7 +1888,8 @@ class LlamafileAgentChatClient:
         """
         body: dict = {
             "model": payload.get("model") or self.label,
-            "messages": list(payload.get("messages") or []),
+            "messages": single_system_messages(
+                list(payload.get("messages") or [])),
             "stream": False,
         }
         opts = dict(payload.get("options") or {})

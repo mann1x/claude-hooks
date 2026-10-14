@@ -353,6 +353,8 @@ _lock = threading.Lock()
 def clear_cache() -> None:
     with _lock:
         _cache.clear()
+    with _lock:
+        _loaded.clear()
 
 
 def cached(base_url: str, model: str) -> Optional[ProviderCaps]:
@@ -422,6 +424,38 @@ def ollama_caps(base_url: str, model: str, *,
     if show is not None or features is not None or entry is not None:
         _store(caps)
     return caps
+
+
+#: How long a loaded-window answer is trusted. Short: a model reloads.
+LOADED_TTL_S = 60.0
+_loaded: dict[tuple[str, str], tuple[float, Optional[int]]] = {}
+
+
+def loaded_context(base_url: str, model: str, *, fetch: Fetch = _request,
+                   headers: Optional[dict] = None) -> Optional[int]:
+    """The window ``model`` is loaded with right now (``GET /api/ps``
+    ``context_length``), or ``None`` when it is not loaded or the server
+    did not say. The answer for a model with no Modelfile ``num_ctx``:
+    the server's default, not the trained context (plan B2)."""
+    key = (base_url, model)
+    now = time.time()
+    with _lock:
+        hit = _loaded.get(key)
+    if hit is not None and now - hit[0] < LOADED_TTL_S:
+        return hit[1]
+    try:
+        status, data = fetch(f"{base_url}/api/ps", headers=headers)
+    except OSError:
+        return None  # not cached: ask again next time
+    n: Optional[int] = None
+    if status == 200 and isinstance(data, dict):
+        for m in data.get("models") or []:
+            if isinstance(m, dict) and model in (m.get("name"), m.get("model")):
+                n = _int(m.get("context_length"))
+                break
+    with _lock:
+        _loaded[key] = (now, n)
+    return n
 
 
 def openai_compat_caps(base_url: str, model: str, *,
