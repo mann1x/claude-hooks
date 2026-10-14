@@ -1,8 +1,8 @@
 # PLAN — Consultants council: inheriting Cerebriline (and the PolyKV API)
 
-Status: **DRAFT, 2026-10-10.** Nothing here is implemented. Reports 07
-(Milestone G) and 08 (§0.7, §4) are folded in. Still open: the owner's
-sign-off on §11 items 2–5 and on Milestone G.
+Status: **all decisions taken, 2026-10-14** (draft of 2026-10-10). Nothing
+here is implemented yet. Reports 07 (Milestone G) and 08 (§0.7, §4) are
+folded in; §11 records the decisions.
 
 The consultants council is the **reference implementation**: other projects
 (giano first) inherit it, and there opencoti and xOllama with PolyKV are
@@ -397,7 +397,7 @@ read `~/.claude.json` and `~/.ssh`, and saw every interface and every host PID.
   5. rlimits;
   6. all capabilities dropped, plus no-new-privs;
   7. seccomp, denying `unshare`/`setns`/`CLONE_NEW*`, `mount`, `ptrace`, `io_uring`, `bpf` and similar;
-  8. Landlock when the kernel has it active;
+  8. Landlock **optional**: used when the kernel has it active, never required. Its absence is not a missing layer (§11.5);
   9. an environment allowlist.
 - **A missing required layer means no shell**, never a weaker shell silently. `preflight` says which layer is missing.
 - **P1 interim backend:** bwrap (0.4.1 is present here and verified to run as nobody with only `lo`), wrapped in `systemd-run --scope` for limits, until the launcher lands.
@@ -459,7 +459,7 @@ Chosen per root, by what its filesystem supports (probed, never assumed):
 ### E8. Hardening
 
 - Move the consultants unit under systemd hardening (`ProtectSystem=strict` like the daemon), since the engine runs as root today.
-- Document the boot parameter that activates Landlock (compiled in but inactive here).
+- Landlock stays optional (§11.5). Document the boot parameter that activates it (compiled in but inactive on solidpc). A reboot is scheduled only if the escape suite needs it.
 - An optional VM backend (Firecracker or gVisor) for a `paranoid` mode, later.
 
 **Exit E:**
@@ -707,23 +707,24 @@ is listed here so it isn't forgotten:
 
 ---
 
-## 11. Decisions for the owner
+## 11. Decisions (all taken)
 
-The owner already ruled on most of this plan (2026-10-10: providers, account,
+The owner ruled on the body of this plan on 2026-10-10 (providers, account,
 96k output cap, window knob, thinking per backend, fixed level per (role,
 model), calibration in full, the compaction rules, sampling on every role,
-PolyKV last and complete, the sandbox requirements, atomic tasks excluded).
-What's left:
+PolyKV last and complete, the sandbox requirements, atomic tasks excluded,
+guards scoped for unattended runs, loop guards always on). The remaining items
+were settled on 2026-10-14:
 
-1. ~~What counts as a "small model" for the full 5-step flow?~~ **Decided (2026-10-10):** nothing is detected. The reduced replay flow is the default everywhere; the user enables the full flow per role (§3 C2).
-2. **Compaction message role.**
-   - Proposed: A/B `user` (fork order) against `system` (ours) on the C bench, then fix the winner as default.
-3. **PolyKV role-instruction placement.** Move the role text out of the system turn on PolyKV backends (needed for shared prefixes) behind an A/B? Proposed: yes.
-4. **PolyKV pools for a finished run.**
-   - Proposed: hold until the consultancy is accepted or an idle TTL expires (default 300 s, matching the engine's session TTL, configurable).
-   - Also proposed: one P0 root per distinct toolset (read-only lanes vs coder/shell lanes).
-5. **Sandbox defaults.**
-   - Network: none by default, with an allowlist proxy on request.
-   - Held-view TTL: 7 days, then kept as a patch.
-   - Quotas: 2/8/32 GiB.
-   - Landlock: activate on solidpc via the boot parameter (needs a reboot), or rely on the other layers?
+1. **Full 5-step compaction:** no detection. Reduced replay flow everywhere by default; the user enables the full flow per role (§3 C2). (2026-10-10)
+2. **Compaction message role:** A/B `user` (fork order) against `system` (ours) on the C bench; the winner becomes the default.
+3. **PolyKV role-instruction placement:** on PolyKV backends the role text moves out of the system turn (F4). An A/B on answer quality decides whether that layout becomes the default elsewhere.
+4. **PolyKV pools for a finished run:**
+   - held until the consultancy is accepted, or until an idle TTL expires (default 300 s, matching the engine's session TTL, configurable);
+   - one P0 root per distinct toolset (read-only lanes vs coder/shell lanes).
+5. **Sandbox defaults:**
+   - network none, with an allowlist proxy on request;
+   - held-view TTL 7 days, then kept as a patch;
+   - quotas 2/8/32 GiB.
+   - **Landlock is optional:** first try without the boot parameter and rely on the other layers. Activate it (a scheduled reboot) only if the escape suite shows a layer is needed.
+6. **Milestone G approved** (typed role messages). The default still flips only after the G6 bench.
