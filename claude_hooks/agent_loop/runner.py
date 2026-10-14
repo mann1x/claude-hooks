@@ -26,6 +26,7 @@ from typing import Any, Callable, Optional
 from claude_hooks import capped_thinking, reasoning_replay, truncation
 from claude_hooks import reasoning_loop_guard as rlg
 from claude_hooks import reasoning_repetition
+from claude_hooks import loop_detection
 
 log = logging.getLogger("claude_hooks.agent_loop")
 
@@ -137,6 +138,10 @@ class LoopConfig:
     # report. ``on_guard`` gets one event dict per trip and per stop —
     # the quantity the guard fired on included. Exceptions are ignored.
     reasoning_loop_max_trips: int = rlg.DEFAULT.max_consecutive_trips
+    # Plan D10/D14 (always on): consecutive failed tool calls that end the
+    # loop, and tools whose same call rightly repeats (status / await).
+    mistake_limit: int = loop_detection.MISTAKE_LIMIT
+    polling_tools: tuple[str, ...] = ()
     on_guard: Optional[Callable[[dict], None]] = None
 
 
@@ -415,12 +420,74 @@ def dedup_key(name: str, args: Any) -> str:
         return f"{name}|{args}"
 
 
+LOOP_GUARD_LAST_WARNING = (
+    "This call was not run. This is your last warning: the next call the "
+    "loop guard stops ends this task. Send something different, or give "
+    "your answer with what you have.")
+
+LOOP_GUARD_FINAL = (
+    "[SYSTEM MESSAGE] The harness is ending this task: {why} Tools are off. "
+    "Write your report now from what you have already established: what "
+    "you found, with its evidence, and what is still open.")
+
+
+class ToolGuards:
+    """Plan D10/D14 state for one ``run_loop``: the loop tracker, the
+    mistake limit, and what fired during the current batch of calls."""
+
+    def __init__(self, config: "LoopConfig") -> None:
+        self.config = config
+        self.tracker = loop_detection.LoopTracker(
+            polling=frozenset(getattr(config, "polling_tools", ()) or ())
+            or loop_detection.POLLING_TOOL_NAMES)
+        self.mistakes = loop_detection.MistakeLimit(
+            limit=max(1, int(getattr(config, "mistake_limit",
+                                     loop_detection.MISTAKE_LIMIT))))
+        self.hard_hits = 0
+        self.stop: Optional[dict] = None
+        self.iteration = 0
+
+    def _emit(self, event: dict) -> None:
+        _emit_guard(self.config, {"iteration": self.iteration, **event})
+
+    def hard(self, name: str, args: str, verdict) -> None:
+        self.hard_hits += 1
+        call = loop_detection.describe_call(name, args)
+        action = "stop" if self.hard_hits >= 2 else "last_warning"
+        self._emit({"guard": "loop_guard", "action": action,
+                    "rule": verdict.rule, "count": verdict.count,
+                    "call": call})
+        if action == "stop" and self.stop is None:
+            self.stop = {"stop_reason": "loop_guard", "call": call,
+                         "why": f"{verdict.message} The call was {call}."}
+
+    def outcome(self, name: str, args: str, answer: str, output: str,
+                verdict) -> str:
+        failed = loop_detection.is_failed_output(answer)
+        self.tracker.note_outcome(not failed, answer)
+        if self.mistakes.note(failed) and self.stop is None:
+            n = self.mistakes.streak
+            self._emit({"guard": "mistake_limit", "action": "stop",
+                        "count": n, "call":
+                        loop_detection.describe_call(name, args)})
+            self.stop = {"stop_reason": "mistake_limit", "why": (
+                f"{n} tool calls in a row have failed, the last one "
+                f"{loop_detection.describe_call(name, args)}.")}
+        if verdict.kind == "soft":
+            self._emit({"guard": "loop_guard", "action": "warn",
+                        "rule": verdict.rule, "count": verdict.count,
+                        "call": loop_detection.describe_call(name, args)})
+            return f"{output}\n\n[SYSTEM MESSAGE] {verdict.message}"
+        return output
+
+
 def execute_tool_calls(tool_calls: list[dict], cwd: str,
                        seen: dict[str, str],
                        tool_executor: ToolExecutor,
                        *,
                        on_tool: Optional[OnTool] = None,
-                       repeats: Optional[dict[str, int]] = None) -> list[dict]:
+                       repeats: Optional[dict[str, int]] = None,
+                       guards: Optional["ToolGuards"] = None) -> list[dict]:
     """Run each tool and return ``role: tool`` messages.
 
     Duplicate (name+args) calls within a single agent loop return a
@@ -438,6 +505,11 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
     deduped) with ``(name, args_str, output, duration_ms, error)``.
     Callback exceptions are swallowed so a misbehaving recorder
     can't crash the loop.
+
+    Plan D10/D14: with ``guards``, every call is inspected first. A soft
+    verdict rides on the result; a hard one answers the call without
+    running it. Each outcome then feeds the loop tracker and the mistake
+    limit, and what fired is left in ``guards.hits`` for ``run_loop``.
     """
     results: list[dict] = []
     for tc in tool_calls:
@@ -449,6 +521,21 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
             args_str = json.dumps(args_str)
         key = dedup_key(name, args_str)
         err: Optional[str] = None
+        verdict = (guards.tracker.inspect(name, args_str) if guards is not None
+                   else loop_detection.OK)
+        if verdict.kind == "hard":
+            guards.hard(name, args_str, verdict)
+            output = (f"[SYSTEM MESSAGE] {verdict.message}\n\n"
+                      f"{LOOP_GUARD_LAST_WARNING}")
+            guards.tracker.pending = ""
+            if on_tool is not None:
+                try:
+                    on_tool(name, args_str, output, 0, None)
+                except Exception:
+                    log.exception("on_tool callback raised; ignored")
+            results.append({"role": "tool", "tool_call_id": tc_id,
+                            "name": name, "content": output})
+            continue
         reserve = False
         if key in seen and repeats is not None:
             repeats[key] = repeats.get(key, 0) + 1
@@ -483,6 +570,10 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
                 seen.clear()
                 if repeats is not None:
                     repeats.clear()
+        if guards is not None:
+            # A stubbed repeat is the earlier answer again, failure included.
+            answer = seen.get(key, output)
+            output = guards.outcome(name, args_str, answer, output, verdict)
         if on_tool is not None:
             try:
                 on_tool(name, args_str, output, dt_ms, err)
@@ -588,6 +679,34 @@ def _reasoning_loop_note(msg: dict, payload: dict, chat_fn: "ChatFn",
         capped_thinking.as_thinking_block(note))
 
 
+def _forced_report(payload: dict, history: list, instruction: str,
+                   stop_reason: str, chat_fn: "ChatFn", config: "LoopConfig",
+                   on_iter: Optional["OnIter"], iteration: int
+                   ) -> tuple[dict, dict]:
+    """The named terminal action (plan D): one tool-less, think-off report
+    asked of the lane, marked ``_stop_reason`` / ``_failure_class``."""
+    payload = dict(payload)
+    payload.pop("tools", None)
+    payload.pop("tool_choice", None)
+    payload["think"] = False
+    payload["reasoning_effort"] = "none"
+    payload["messages"] = list(history) + [
+        {"role": "user", "content": instruction, "_harness": True}]
+    t0 = time.monotonic()
+    final = chat_fn(payload)
+    _notify_response(config, payload, final)
+    if on_iter is not None:
+        try:
+            on_iter(iteration, payload, final,
+                    int((time.monotonic() - t0) * 1000))
+        except Exception:
+            log.exception("on_iter callback raised; ignored")
+    final = dict(final or {})
+    final["_stop_reason"] = stop_reason
+    final["_failure_class"] = stop_reason
+    return payload, final
+
+
 def run_loop(
     payload: dict,
     cwd: str,
@@ -654,6 +773,7 @@ def run_loop(
     compaction_gen = 0
     loop_trips = 0
     nudger = reasoning_repetition.RepetitionNudger()
+    guards = ToolGuards(config)
 
     if config.tools_available and preseed_builder is not None:
         preseed = preseed_builder(cwd)
@@ -761,27 +881,10 @@ def run_loop(
             if partial:
                 history.append({"role": "assistant", "content": partial})
             if loop_trips >= limit:
-                payload = dict(payload)
-                payload.pop("tools", None)
-                payload.pop("tool_choice", None)
-                payload["think"] = False
-                payload["reasoning_effort"] = "none"
-                payload["messages"] = history + [{
-                    "role": "user", "_harness": True,
-                    "content": REASONING_LOOP_FINAL.format(
-                        trips=loop_trips, diagnosis=diagnosis)}]
-                t_iter = time.monotonic()
-                final = chat_fn(payload)
-                _notify_response(config, payload, final)
-                if on_iter is not None:
-                    try:
-                        on_iter(i, payload, final,
-                                int((time.monotonic() - t_iter) * 1000))
-                    except Exception:
-                        log.exception("on_iter callback raised; ignored")
-                final = dict(final or {})
-                final["_stop_reason"] = "reasoning_loop"
-                final["_failure_class"] = "reasoning_loop"
+                payload, final = _forced_report(
+                    payload, history, REASONING_LOOP_FINAL.format(
+                        trips=loop_trips, diagnosis=diagnosis),
+                    "reasoning_loop", chat_fn, config, on_iter, i)
                 final["_reasoning_loop"] = verdict
                 break
             note = _reasoning_loop_note(msg, payload, chat_fn, verdict)
@@ -896,10 +999,11 @@ def run_loop(
                 clean_msg, getattr(config, "reasoning_replay", "none"))
         payload["messages"] = list(payload["messages"]) + [clean_msg]
         runnable = [tc for tc in tool_calls if tc not in results_called]
+        guards.iteration = i
         payload["messages"].extend(
             execute_tool_calls(
                 runnable, cwd, seen_calls, tool_executor,
-                on_tool=on_tool, repeats=repeats,
+                on_tool=on_tool, repeats=repeats, guards=guards,
             )
         )
         for tc in results_called:
@@ -912,6 +1016,18 @@ def run_loop(
         # Plan D1: a turn that re-derives the same conclusion paragraph
         # after paragraph while still calling tools reads as productive to
         # every turn-level check. One rationed nudge; it never cuts.
+        if guards.stop is not None:
+            # Plan D10/D14: the second hard loop verdict, or the mistake
+            # limit. The batch's results stay in the history the report
+            # is asked from.
+            stop = guards.stop
+            payload, final = _forced_report(
+                payload, payload["messages"],
+                LOOP_GUARD_FINAL.format(why=stop["why"]),
+                stop["stop_reason"], chat_fn, config, on_iter, i)
+            if stop.get("call"):
+                final["_loop_call"] = stop["call"]
+            break
         nudge = nudger.inspect(capped_thinking.thinking_text(msg), i)
         if nudge:
             payload["messages"].append(
