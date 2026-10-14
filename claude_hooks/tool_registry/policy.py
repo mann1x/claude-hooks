@@ -96,6 +96,21 @@ def is_valid_level(level: object) -> bool:
     return isinstance(level, str) and level in LEVELS
 
 
+#: The control surface's original three-value spelling, kept as
+#: deprecated aliases. ``ask`` meant "a person approves", so it maps to
+#: ``ask_human``, never to the auto-approving ``ask_assistant``: an
+#: alias must not loosen what the operator asked for.
+LEGACY_ALIASES: dict[str, str] = {"allow": AUTO, "ask": ASK_HUMAN}
+
+
+def normalize_level(level: object) -> object:
+    """Map a legacy alias to its ladder level; anything else unchanged
+    (so an invalid value still fails closed in :meth:`PolicyGate.resolve`)."""
+    if isinstance(level, str):
+        return LEGACY_ALIASES.get(level, level)
+    return level
+
+
 # ====================================================================== #
 # Decision
 # ====================================================================== #
@@ -218,7 +233,9 @@ class PolicyGate:
         if runtime_permissions:
             got = runtime_permissions.get(tool)
             if got is not None:
-                return got, "runtime control"
+                # A checkpoint written before the ladder may still hold
+                # ``allow`` / ``ask``; read them as the operator meant.
+                return normalize_level(got), "runtime control"
         if tool in self.overrides:
             return self.overrides[tool], "[tools.permissions] config"
         if tool in self.provider_defaults:
@@ -244,4 +261,5 @@ __all__ = [
     "LEVELS", "ASK_LEVELS",
     "GateDecision", "PolicyGate",
     "escalate", "is_valid_level",
+    "LEGACY_ALIASES", "normalize_level",
 ]

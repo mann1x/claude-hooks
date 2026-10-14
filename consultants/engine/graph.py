@@ -56,6 +56,11 @@ if TYPE_CHECKING:
     )
 
 from consultants.engine import council
+from consultants.engine.lane_executor import (
+    bind_lane,
+    researcher_lane_id,
+    tool_executor_lane_id,
+)
 
 
 # ----------------------- state schema --------------------------- #
@@ -416,7 +421,10 @@ def _wrap_researcher(deps: GraphDeps):
         return council.researcher_node(
             state,
             chat_client=deps.chat_clients["researcher"],
-            tool_executor=deps.tool_executor,
+            # The shared executor, told which lane is calling (read
+            # cache scoping now; the shell's lane views later).
+            tool_executor=bind_lane(deps.tool_executor,
+                                    researcher_lane_id(state), deps.sid),
             tool_specs=deps.tool_specs,
             grounding_msgs=deps.grounding_msgs,
             model=deps.models["researcher"],
@@ -524,7 +532,8 @@ def _wrap_tool_executor(deps: GraphDeps):
         return tool_executor_node(
             state,
             chat_client=deps.chat_clients[role],
-            tool_executor=deps.tool_executor,
+            tool_executor=bind_lane(deps.tool_executor,
+                                    tool_executor_lane_id(state), deps.sid),
             tool_specs=deps.tool_specs,
             grounding_msgs=deps.grounding_msgs,
             model=deps.models[role],

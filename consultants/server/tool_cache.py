@@ -18,6 +18,13 @@ new one, because files may have changed between the two. Within a run:
   arguments, so an edit during the run is a miss rather than stale text;
 * any call to a tool not known to be read-only clears the cache — it
   may have changed what the cached reads describe;
+* a tool in :data:`ISOLATED_EFFECT_TOOLS` changes only its own lane's
+  private view (the sandboxed shell), never the real tree, so it leaves
+  the shared cache alone. From then on that lane's reads are cached in
+  a cache of its own, which the lane's next such call clears; the
+  lane's reads may describe its view, so they never enter the shared
+  cache. The lane comes from ``LaneBoundExecutor``; a call without one
+  is treated as possibly effectful and clears everything;
 * results that report an error are not kept, so a transient failure
   (a grep timeout) is retried by the next caller rather than replayed;
 * concurrent calls with the same key run the tool once; the others wait
@@ -44,6 +51,14 @@ MAX_CACHED_BYTES: int = 32 * 1024 * 1024
 #: Read-only but not cached; calling them leaves the cache alone.
 READ_ONLY_UNCACHED: frozenset[str] = frozenset({"recall_memory"})
 
+#: Effectful, but confined to the calling lane's private view: they
+#: invalidate that lane's reads only. Without this every shell command
+#: would flush every lane's cache.
+ISOLATED_EFFECT_TOOLS: frozenset[str] = frozenset({"run_command"})
+
+#: The scope of the reads every lane shares.
+_SHARED = None
+
 Executor = Callable[..., str]
 
 
@@ -56,17 +71,30 @@ class SharedReadCache:
     """Wrap ``executor`` (``(name, raw_args, cwd) -> str``) with a
     per-run cache of :data:`CACHEABLE_TOOLS` results."""
 
+    #: ``LaneBoundExecutor`` passes ``lane=`` only to executors that say so.
+    accepts_lane = True
+
     def __init__(self, executor: Executor, *,
                  cacheable: frozenset[str] = CACHEABLE_TOOLS,
                  read_only: frozenset[str] = frozenset(),
-                 max_bytes: int = MAX_CACHED_BYTES):
+                 isolated_effect: frozenset[str] = ISOLATED_EFFECT_TOOLS,
+                 max_bytes: int = MAX_CACHED_BYTES,
+                 uncached_when: Optional[Callable[[str], bool]] = None):
         self._executor = executor
+        # True for a tool the gate must see on every call (an operator
+        # pinned it through ``POST /control``): a cache hit would answer
+        # without asking the gate, and so ignore a live deny.
+        self._uncached_when = uncached_when
         self._cacheable = cacheable
         self._read_only = frozenset(read_only) | READ_ONLY_UNCACHED | cacheable
+        self._isolated = frozenset(isolated_effect) - self._read_only
         self._max_bytes = max_bytes
         self._lock = threading.Lock()
+        # (scope, name, args, cwd, stamp) -> output. The scope is
+        # _SHARED, or the id of a lane that has diverged from the tree.
         self._results: dict[tuple, str] = {}
         self._inflight: dict[tuple, threading.Event] = {}
+        self._diverged: set[str] = set()
         self._bytes = 0
         self.hits = 0
         self.misses = 0
@@ -97,17 +125,43 @@ class SharedReadCache:
             self._results.clear()
             self._bytes = 0
 
+    def clear_lane(self, lane: str) -> None:
+        """Drop ``lane``'s private reads; the shared ones stay."""
+        with self._lock:
+            for k in [k for k in self._results if k[0] == lane]:
+                self._bytes -= len(self._results.pop(k))
+
+    def _scope(self, lane: Optional[str]):
+        with self._lock:
+            return lane if lane is not None and lane in self._diverged \
+                else _SHARED
+
     # ------------------------------------------------------------------ #
-    def __call__(self, name: str, raw_args: str, cwd: str, **kw) -> str:
+    def __call__(self, name: str, raw_args: str, cwd: str, *,
+                 lane: Optional[str] = None, **kw) -> str:
         if name not in self._cacheable:
-            if name not in self._read_only:
+            if name in self._isolated and lane is not None:
+                # Only this lane's view changed; its next reads must
+                # neither come from nor go into the shared cache.
+                with self._lock:
+                    self._diverged.add(lane)
+                self.clear_lane(lane)
+            elif name not in self._read_only:
                 # Possibly effectful: whatever it did, the cached reads
                 # may no longer describe the tree.
                 self.clear()
             return self._executor(name, raw_args, cwd, **kw)
-        key = self._key(name, raw_args, cwd)
-        if key is None:
+        if self._uncached_when is not None:
+            try:
+                gated = self._uncached_when(name)
+            except Exception:
+                gated = True     # unsure: let the gate decide
+            if gated:
+                return self._executor(name, raw_args, cwd, **kw)
+        base = self._key(name, raw_args, cwd)
+        if base is None:
             return self._executor(name, raw_args, cwd, **kw)
+        key = (self._scope(lane),) + base
 
         while True:
             with self._lock:
@@ -138,4 +192,5 @@ class SharedReadCache:
             mine.set()
 
 
-__all__ = ["CACHEABLE_TOOLS", "READ_ONLY_UNCACHED", "SharedReadCache"]
+__all__ = ["CACHEABLE_TOOLS", "ISOLATED_EFFECT_TOOLS", "READ_ONLY_UNCACHED",
+           "SharedReadCache"]

@@ -1364,6 +1364,13 @@ def _settle_inflight(state: "SessionState") -> None:
                         suspended_at=time.time())
         return
     inflight.remove(state.sid)
+    # Directories the run created and never used (a coder lane that
+    # wrote nothing); the records it did write are left alone.
+    try:
+        from consultants.server.session_gc import prune_empty, sessions_root
+        prune_empty(sessions_root(state.cwd) / state.sid)
+    except Exception:  # pragma: no cover — defensive
+        log.exception("empty-dir prune failed for %s", state.sid)
     compiled = getattr(state, "_compiled", None)
     parked = False
     if compiled is not None:
@@ -2157,6 +2164,15 @@ def _reaper_tick(app) -> None:
                 app.state.sessions.pop(sid, None)
         for sid in to_evict:
             log.info("evicted closed session %s after grace period", sid)
+    # Stale coder-out/ trees and empty dirs of the projects this engine
+    # has served, at most hourly per project. Sessions still in memory
+    # are skipped whatever their state.
+    try:
+        from consultants.server.session_gc import maybe_sweep
+        maybe_sweep([getattr(s, "cwd", "") for _sid, s in entries],
+                    skip_sids=[sid for sid, _s in entries], now=now)
+    except Exception:  # pragma: no cover — defensive
+        log.exception("session gc sweep crashed")
 
 
 def _load_session_from_disk(sid: str) -> Optional[dict]:

@@ -287,7 +287,9 @@ def should_interrupt_on_tool_permission(
     rc = state.get("runtime_control") or {}
     perms = rc.get("tool_permissions") or {}
     perm = perms.get(tool_name)
-    if perm != "ask":
+    # ``POST /control`` now stores the ladder level (``ask`` arrives as
+    # ``ask_human``); the legacy spelling still counts.
+    if perm not in ("ask", "ask_human"):
         return None
     return InterruptDecision(
         kind="tool_permission",

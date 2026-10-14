@@ -301,6 +301,7 @@ def make_runner(*, ollama_base_url: str):
             cfg, extra_roots=extra_roots,
             approval_fn=_make_tool_approval_fn(
                 state, recorder, cfg, cwd, log_label="council"),
+            runtime_permissions=_live_tool_permissions(state),
         )
         # M-B: which roles get those tools. Empty unless [tools]
         # all_roles is on, which keeps the default graph pre-M-B.
@@ -826,6 +827,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
             cfg, extra_roots=extra_roots,
             approval_fn=_make_tool_approval_fn(
                 state, recorder, cfg, cwd, log_label="council follow-up"),
+            runtime_permissions=_live_tool_permissions(state),
         )
         # M-B: which roles get those tools. Empty unless [tools]
         # all_roles is on, which keeps the default graph pre-M-B.
@@ -1533,6 +1535,34 @@ def _seed_runtime_control(cfg, enabled, *, n_fanout_extras: int = 0) -> dict:
     return dict(rc)
 
 
+def _live_tool_permissions(state):
+    """The per-call source of ``runtime_control.tool_permissions`` for
+    the tool gate: ``RunControl``'s live copy, which ``POST /control``
+    writes. ``None`` for a session without one (test doubles), which
+    leaves the gate exactly as it was."""
+    rc = getattr(state, "run_control", None)
+    fn = getattr(rc, "tool_permissions", None)
+    return fn if callable(fn) else None
+
+
+def _restore_tool_permissions(compiled, thread_config, state) -> None:
+    """On resume, put the checkpoint's operator permissions back on the
+    new process's ``RunControl``: it starts empty, and the gate reads
+    only the live copy."""
+    rc = getattr(state, "run_control", None)
+    if rc is None or not hasattr(rc, "set_tool_permissions"):
+        return
+    try:
+        values = compiled.get_state(thread_config).values or {}
+        perms = (values.get("runtime_control") or {}).get("tool_permissions")
+    except Exception:
+        log.debug("no checkpoint state to restore tool permissions from",
+                  exc_info=True)
+        return
+    if isinstance(perms, dict) and perms:
+        rc.set_tool_permissions(perms)
+
+
 def _drive_council_stream(compiled, initial, thread_config, *,
                           state, enabled, review_before_synthesis: bool,
                           recorder, log_label: str,
@@ -1583,6 +1613,7 @@ def _drive_council_stream(compiled, initial, thread_config, *,
         log.warning("%s: resuming sid=%s from its checkpoint",
                     log_label, state.sid)
         stream_input = None
+        _restore_tool_permissions(compiled, thread_config, state)
     elif resume:
         log.warning("%s: sid=%s has no checkpoint to resume from; "
                     "starting it again", log_label, state.sid)

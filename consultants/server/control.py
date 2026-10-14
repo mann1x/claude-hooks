@@ -52,7 +52,18 @@ VALID_INJECT_ROLES: tuple[str, ...] = (
     "planner", "researcher", "critic", "synthesizer", "any",
 )
 
-VALID_TOOL_PERMISSION_VALUES: tuple[str, ...] = ("allow", "deny", "ask")
+# The tool gate's four-level ladder (``claude_hooks.tool_registry.policy``).
+# The original ``allow`` / ``ask`` spellings are still accepted and stored
+# as their ladder level, so what this validates is exactly what the gate
+# enforces: validating one enum while the gate read another turned an
+# operator's ``allow`` into a deny.
+VALID_TOOL_PERMISSION_VALUES: tuple[str, ...] = (
+    "auto", "ask_assistant", "ask_human", "deny",
+)
+#: Deprecated spellings -> ladder level (mirrors ``policy.LEGACY_ALIASES``).
+TOOL_PERMISSION_ALIASES: dict[str, str] = {
+    "allow": "auto", "ask": "ask_human",
+}
 
 VALID_STRICTNESS_VALUES: tuple[str, ...] = (
     "lax", "normal", "strict", "adversarial",
@@ -346,7 +357,9 @@ def build_runtime_control_delta(
     - ``adversarial_focus`` (str; ``""`` clears) — M4 free-text attack
       brief naming the claims the critic should hunt to break.
     - ``enabled_roles`` (list[str]) — subset of the project's roles.
-    - ``tool_permissions`` (dict[str, "allow" / "deny" / "ask"]).
+    - ``tool_permissions`` (dict[str, "auto" / "ask_assistant" /
+      "ask_human" / "deny"]; the deprecated ``"allow"`` and ``"ask"``
+      are stored as ``"auto"`` and ``"ask_human"``).
     - ``review_before_synthesis`` (bool) — toggle static interrupt.
     - ``interrupt_on_low_confidence`` (bool) — toggle dynamic interrupt.
 
@@ -419,16 +432,21 @@ def build_runtime_control_delta(
         elif k == "tool_permissions":
             if not isinstance(v, dict):
                 raise ControlInputError(
-                    "tool_permissions must be a dict of "
-                    "tool_name -> 'allow'|'deny'|'ask'"
+                    "tool_permissions must be a dict of tool_name -> "
+                    "'auto'|'ask_assistant'|'ask_human'|'deny'"
                 )
+            perms: dict[str, str] = {}
             for tn, perm in v.items():
-                if perm not in VALID_TOOL_PERMISSION_VALUES:
+                level = (TOOL_PERMISSION_ALIASES.get(perm, perm)
+                         if isinstance(perm, str) else perm)
+                if level not in VALID_TOOL_PERMISSION_VALUES:
                     raise ControlInputError(
                         f"tool_permissions[{tn!r}] must be one of "
-                        f"{VALID_TOOL_PERMISSION_VALUES}; got {perm!r}"
+                        f"{VALID_TOOL_PERMISSION_VALUES} (or the "
+                        f"deprecated 'allow' / 'ask'); got {perm!r}"
                     )
-            out[k] = dict(v)
+                perms[tn] = level
+            out[k] = perms
         elif k in ("review_before_synthesis",
                    "interrupt_on_low_confidence"):
             out[k] = bool(v)
@@ -673,6 +691,7 @@ __all__ = [
     "VALID_INJECT_ROLES",
     "VALID_STRICTNESS_VALUES",
     "VALID_TOOL_PERMISSION_VALUES",
+    "TOOL_PERMISSION_ALIASES",
     "build_cancel_request",
     "build_inject_delta",
     "build_interrupt_delta",

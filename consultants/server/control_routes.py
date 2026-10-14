@@ -564,6 +564,11 @@ def register_control_routes(app: "FastAPI") -> None:
         except ControlInputError as e:
             raise HTTPException(_HTTP_BAD_REQUEST, str(e))
         _safe_apply_state_delta(s, delta)
+        # The channel write above is the record; a running graph never
+        # re-reads it. The tool gate reads the live copy on run_control.
+        perms = delta["runtime_control"].get("tool_permissions")
+        if perms:
+            s.run_control.set_tool_permissions(perms)
         s.bump_activity()
         return {"ok": True, "applied": _serialize_for_json(delta)}
 
