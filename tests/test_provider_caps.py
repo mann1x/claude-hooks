@@ -164,7 +164,11 @@ def test_opencoti_props_and_boot_id():
         "/health": (200, {"status": "ok", "boot_id": "b1"}),
         "/props": (200, {"build_info": "b9999-ignored",
                          "features": ["polykv_pools_v1", "kv_pressure_v1"],
-                         "opencoti": {"polykv": {"pools_enabled": True}},
+                         "total_slots": 4,
+                         "opencoti": {"polykv": {"pools_enabled": True},
+                                      "kv": {"kv_pool_cells": 2097152,
+                                             "session_ctx_max": 262144,
+                                             "largest_admissible": 262144}},
                          "default_generation_settings": {
                              "n_ctx": 65536, "params": {"temperature": 0.7}}}),
     })
@@ -174,6 +178,10 @@ def test_opencoti_props_and_boot_id():
     assert caps.declared_num_ctx == 65536
     assert caps.temperature == 0.7
     assert caps.has("kv_pressure_v1")
+    assert caps.kv_pool_cells == 2097152
+    assert caps.session_ctx_max == 262144
+    assert caps.largest_admissible == 262144
+    assert caps.total_slots == 4
     stale = provider_caps.with_boot_id(caps, "b2")
     assert stale.boot_id == "b2"
     assert provider_caps.cached("http://o/v1", "m") is None

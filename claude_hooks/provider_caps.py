@@ -84,6 +84,13 @@ class ProviderCaps:
     #: Feature flags from ``/api/xollama`` or opencoti ``/props``.
     features: tuple[str, ...] = ()
     boot_id: Optional[str] = None
+    #: opencoti KV control plane (``/props`` ``opencoti.kv``): the whole
+    #: pool shared by every session, the most one session may hold, and
+    #: the largest window admissible right now.
+    kv_pool_cells: Optional[int] = None
+    session_ctx_max: Optional[int] = None
+    largest_admissible: Optional[int] = None
+    total_slots: Optional[int] = None
     probed_at: float = field(default_factory=time.time)
 
     @property
@@ -231,6 +238,17 @@ def caps_fields_from_props(data: dict) -> dict:
     n_ctx = _int(data.get("n_ctx"))
     if n_ctx is not None and "declared_num_ctx" not in out:
         out["declared_num_ctx"] = n_ctx
+    slots = _int(data.get("total_slots"))
+    if slots is not None:
+        out["total_slots"] = slots
+    oc = data.get("opencoti")
+    kv = oc.get("kv") if isinstance(oc, dict) and isinstance(oc.get("kv"), dict) else {}
+    for src, dst in (("kv_pool_cells", "kv_pool_cells"),
+                     ("session_ctx_max", "session_ctx_max"),
+                     ("largest_admissible", "largest_admissible")):
+        n = _int(kv.get(src))
+        if n is not None:
+            out[dst] = n
     return out
 
 
