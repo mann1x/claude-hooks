@@ -1309,10 +1309,15 @@ def run_loop(
         # Plan D2: the struggle supervisor. Its nudge rides on the turn's
         # last tool result, which is what the model reads next.
         spent = _detect_capped(msg, final, payload, config)[0] is not None
+        failed = [loop_detection.is_failed_output(m.get("content") or "")
+                  for m in batch]
         move = supervisor.close_iteration(
-            i, budget_spent=spent,
-            failures=[loop_detection.is_failed_output(m.get("content") or "")
-                      for m in batch])
+            i, budget_spent=spent, failures=failed,
+            calls=[(f"{(tc.get('function') or {}).get('name') or ''}:"
+                    + loop_detection.call_signature(
+                        (tc.get("function") or {}).get("arguments")),
+                    m.get("content") or "", bad)
+                   for tc, m, bad in zip(runnable, batch, failed)])
         if move is not None:
             action, why = move
             _emit_guard(config, {"guard": "struggle", "action": action,

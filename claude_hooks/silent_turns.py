@@ -55,13 +55,24 @@ TOOL_CALL_IN_THINKING_REMINDER = (
     "nothing was changed by it. Close your thinking first, then send that "
     "one call again as an actual tool call. Keep the thinking short.")
 
-_TOOL_CALL_MARKUP = re.compile(r"</?tool_call>|</function>|<function=|</parameter>")
-_TOOL_CALL_TAG = re.compile(r"<tool_call>|<parameter=[^>]*>|</parameter>")
-_FUNCTION_OPEN = re.compile(r"<function=([^\s>]+)\s*>")
+_TOOL_CALL_MARKUP = re.compile(
+    r"</?tool_call>|</function>|<function=|</parameter>|<invoke name=|</invoke>")
+_TOOL_CALL_TAG = re.compile(
+    r"<tool_call>|<parameter=[^>]*>|</parameter>|<invoke name=[^>]*>|</invoke>")
+#: ``<function=NAME>`` (Qwen / Hermes), or MiniMax's ``<invoke name="NAME">``
+#: — minimax-m3 writes the whole batch as text, its parameters as
+#: ``<key>value</key>`` between ``]<]minimax[>[`` separators (the guard
+#: replay found 57 lanes that ended on one, read as the lane's report).
+_FUNCTION_OPEN = re.compile(r"<function=([^\s>]+)\s*>|<invoke name=\"([^\"]+)\"\s*>")
 
+#: "lets" is a verb ("… and lets Claude Code re-issue") and "would let me
+#: cite" is a condition: both ended real reports in the guard replay.
 _ANNOUNCED_INTENT = re.compile(
-    r"\b(?:let me(?! know)|i'?ll|i will|i'?m going to|i am going to|"
-    r"now i(?:'?ll| will)|next,? i(?:'?ll| will)|let'?s)\b", re.I)
+    r"\b(?:(?<!would )(?<!could )(?<!might )(?<!should )(?<!to )"
+    r"let me(?! know)|i'?ll|i will|i'?m going to|i am going to|"
+    r"now i(?:'?ll| will)|next,? i(?:'?ll| will)|let[\u2019']s|"
+    r"lets (?:check|look|see|try|read|grep|verify|inspect|open|search|find|start))\b",
+    re.I)
 _CLAIMS_COMPLETION = re.compile(
     r"\b(?:task (?:is )?(?:complete|finished|done)|all done|is now "
     r"(?:complete|finished|fixed|working)|i(?:'?m| am) (?:done|finished)|"
@@ -93,7 +104,7 @@ def unparsed_tool_call(text: str) -> Optional[UnparsedCall]:
         tag = m.group(0)
         if tag == "<tool_call>":
             blocks += 1
-        elif tag == "</parameter>":
+        elif tag in ("</parameter>", "</invoke>"):
             closed += 1
         else:
             opened += 1
@@ -101,7 +112,7 @@ def unparsed_tool_call(text: str) -> Optional[UnparsedCall]:
         return None
     unterminated = max(opened - closed, 0)
     restarts = min(max(blocks - 1, 0), unterminated)
-    names = _FUNCTION_OPEN.findall(text)
+    names = [a or b for a, b in _FUNCTION_OPEN.findall(text)]
     return UnparsedCall(blocks, restarts, names[-1] if names else None)
 
 

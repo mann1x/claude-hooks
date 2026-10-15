@@ -23,6 +23,26 @@ def test_detectors():
     assert st.announced_intent("Found the bug. Next, I'll read src/b.py.")
     assert st.announced_intent("Report done. Let me know if you need more.") is None
     assert st.announced_intent("I'll check it. The task is complete.") is None
+    # Guard replay (2026-10-16): two real reports ended this way.
+    assert st.announced_intent("It logs the cut and lets Claude Code re-issue.") is None
+    assert st.announced_intent("Opening the matrix would let me cite cell counts.") is None
+    assert st.announced_intent("Found it. Let\u2019s read the caller next.")
+    assert st.announced_intent("Found it. Lets check the caller next.")
+
+
+#: minimax-m3:cloud hands its tool calls back as text in this shape.
+MINIMAX = ("Need the caller.]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"grep\">"
+           "]<]minimax[>[<path>src]<]minimax[>[</path>]<]minimax[>[<pattern>def run"
+           "]<]minimax[>[</pattern>]<]minimax[>[</invoke>\n]<]minimax[>[<invoke name=\"read_file\">"
+           "]<]minimax[>[<path>src/a.py]<]minimax[>[</path>]<]minimax[>[</invoke>\n"
+           "]<]minimax[>[</tool_call>")
+
+
+def test_minimax_invoke_markup_is_an_unparsed_call():
+    u = st.unparsed_tool_call(MINIMAX)
+    assert u is not None and u.name == "read_file" and u.restarts == 0
+    assert st.thinking_only("", MINIMAX) is True
+    assert st.unparsed_tool_call('Write <invoke name="grep"> to search.') is None
 
 
 def _say(content="", thinking="", tool=False, cid="c"):

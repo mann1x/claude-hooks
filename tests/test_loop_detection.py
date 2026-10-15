@@ -103,7 +103,8 @@ def test_failed_output_convention():
 
 def test_mistake_limit():
     m = ld.MistakeLimit()
-    assert not any(m.note(True) for _ in range(5))
+    assert ld.MISTAKE_LIMIT >= ld.STRIKE_LIMIT
+    assert not any(m.note(True) for _ in range(ld.MISTAKE_LIMIT - 1))
     assert m.note(True)
     m.note(False)
     assert m.streak == 0
@@ -164,13 +165,25 @@ def test_run_loop_repeated_read_ends_with_a_named_report():
     assert len(ran) == 1      # the first call; the rest were the dedup stub
 
 
-def test_run_loop_mistake_limit_after_six_failures_in_a_row():
+def test_run_loop_mistake_limit_after_ten_failures_in_a_row():
     script = [_turn("read_file", _args(path=f"missing{k}.py"), f"c{k}")
-              for k in range(6)] + [_final("Report.")]
+              for k in range(10)] + [_final("Report.")]
     out, sent, events, ran = _run(script, lambda n, x: "error: path not found")
     assert out["_stop_reason"] == "mistake_limit"
-    assert events[-1]["guard"] == "mistake_limit" and events[-1]["count"] == 6
-    assert "6 tool calls in a row have failed" in sent[-1]["messages"][-1]["content"]
+    events = [e for e in events if e["guard"] == "mistake_limit"]
+    assert events[-1]["count"] == 10
+    assert "10 tool calls in a row have failed" in sent[-1]["messages"][-1]["content"]
+
+
+def test_six_wrong_paths_then_a_hit_is_not_stopped():
+    """Guard replay: the lanes the fork's 6 cut were wrong-path streaks the
+    model corrected itself."""
+    script = [_turn("read_file", _args(path=f"missing{k}.py"), f"c{k}")
+              for k in range(6)] + [_turn("read_file", _args(path="src/a.py"), "ok"),
+                                    _final("Report.")]
+    out, *_ = _run(script, lambda n, x: "body" if "src/a.py" in x
+                   else "error: path not found")
+    assert out.get("_stop_reason") != "mistake_limit"
 
 
 def test_run_loop_soft_warning_rides_on_the_tool_result():

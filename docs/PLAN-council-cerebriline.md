@@ -388,6 +388,8 @@ not compaction, so cross-model is fine here. The harness decides. Cerebriline's
 notes are not ported, because they all assume a model or a user making the
 decision (08 §2.13).
 
+**Thresholds fitted by replay (2026-10-16):** `benchmarks/consultants/guard_replay.py` drives 911 recorded tool-loop lanes (207 `transcript.db` files, 14,233 calls) through the guards and labels each stop by what the lane did next; report in `benchmarks/consultants/results/2026-10-16/guard-replay/`. Changed: D1 gains `block-cycle` (six ≈50k-token verbatim loops passed every fork signal); D3/D4 read MiniMax's `<invoke name=…>` (57 lanes had ended on one) and the promise-of-work pattern no longer matches "lets" or "would let me"; D2's length nudge also needs a stale window (443 → 3 nudges, 204 had landed on progressing lanes); D14 6 → 10 (every value under 10 cut more new calls than it saved). D10 kept.
+
 **Dropped, with reason (08 §6):**
 - Cerebriline's lead struggle detector and escalation offer: its hedging-decay signal is kept only as an xauto escalation candidate.
 - Checklist close-out, team obligations and the rounds guard: the graph's fan-back already covers them.

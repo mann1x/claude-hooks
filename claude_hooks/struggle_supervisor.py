@@ -24,6 +24,15 @@ shorter than 8 is never nudged for its length. The fork's struggle
 detector (refused-edit streaks, distress, a scored window) is approximated
 by the failure share of the last tool results: it only nudges either way.
 
+Refit by replay (2026-10-16, ``benchmarks/consultants/guard_replay.py``,
+911 recorded lanes): a length nudge on the count alone fired on 443 lanes,
+204 of which went on to find something new in most of their next calls
+and 5 of which were stuck. Past the length the nudge now also needs the
+lane to have gone stale: at most :data:`STALE_MAX_NEW` of its last
+:data:`STALE_WINDOW` calls brought anything new (a call not made before,
+that did not fail, whose answer was not seen before). That fires 8 times
+on the same lanes, none on a lane that was still progressing.
+
 Always on, every backend (owner, 2026-10-10).
 """
 from __future__ import annotations
@@ -40,6 +49,8 @@ BUDGET_TURNS_TO_STOP = 2
 GRACE_ITERATIONS = 2
 FAILURE_WINDOW = 6
 FAILURES_TO_NUDGE = 3
+STALE_WINDOW = 6
+STALE_MAX_NEW = 1
 
 
 def nudge_after(max_iterations: Optional[int]) -> int:
@@ -84,14 +95,26 @@ class StruggleSupervisor:
     nudged_at: Optional[int] = None
     spent: list = field(default_factory=list)
     outcomes: deque = field(default_factory=lambda: deque(maxlen=FAILURE_WINDOW))
+    novel: deque = field(default_factory=lambda: deque(maxlen=STALE_WINDOW))
+    _calls_seen: set = field(default_factory=set)
+    _answers_seen: set = field(default_factory=set)
 
     def close_iteration(self, iteration: int, *, budget_spent: bool,
-                        failures: list[bool] = ()) -> Optional[tuple[str, str]]:
+                        failures: list[bool] = (),
+                        calls: list[tuple[str, str, bool]] = ()
+                        ) -> Optional[tuple[str, str]]:
         """Fold one finished iteration. ``("nudge", reason)``,
-        ``("stop", reason)`` or ``None``."""
+        ``("stop", reason)`` or ``None``. ``calls`` is the batch as
+        ``(call key, answer, failed)``: what the staleness window reads."""
         if budget_spent:
             self.spent.append(iteration)
         self.outcomes.extend(failures)
+        for key, answer, failed in calls:
+            digest = hash(answer or "")
+            self.novel.append(key not in self._calls_seen and not failed
+                              and digest not in self._answers_seen)
+            self._calls_seen.add(key)
+            self._answers_seen.add(digest)
         if self.phase == "watching":
             recent = sum(1 for s in self.spent if s > iteration - BUDGET_WINDOW)
             if recent >= BUDGET_TURNS_TO_NUDGE:
@@ -100,7 +123,8 @@ class StruggleSupervisor:
                     and sum(self.outcomes) >= FAILURES_TO_NUDGE):
                 return self._nudge(iteration, "struggle")
             # 0-based iterations: this is turn ``iteration + 1``.
-            if iteration + 1 >= nudge_after(self.max_iterations):
+            if (iteration + 1 >= nudge_after(self.max_iterations)
+                    and self.stale()):
                 return self._nudge(iteration, "non-progress")
             return None
         if self.phase == "nudged" and self.nudged_at is not None:
@@ -111,6 +135,12 @@ class StruggleSupervisor:
                 self.reason = "thinking-budget"
                 return ("stop", "thinking-budget")
         return None
+
+    def stale(self) -> bool:
+        """A full window of recent calls with at most
+        :data:`STALE_MAX_NEW` bringing anything new."""
+        return (len(self.novel) == STALE_WINDOW
+                and sum(self.novel) <= STALE_MAX_NEW)
 
     def spent_after_nudge(self) -> int:
         if self.nudged_at is None:
@@ -126,4 +156,5 @@ class StruggleSupervisor:
 
 __all__ = ["StruggleSupervisor", "nudge_after", "describe_nudge",
            "describe_stop", "MIN_ITERATION", "BUDGET_WINDOW",
-           "BUDGET_TURNS_TO_NUDGE", "BUDGET_TURNS_TO_STOP", "GRACE_ITERATIONS"]
+           "BUDGET_TURNS_TO_NUDGE", "BUDGET_TURNS_TO_STOP", "GRACE_ITERATIONS",
+           "STALE_WINDOW", "STALE_MAX_NEW"]

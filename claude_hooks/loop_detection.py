@@ -36,14 +36,20 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 #: Failures of one unchanged call before it is stopped (fork STRIKE_LIMIT);
-#: equal to the mistake limit on purpose, so a model told it has strikes
-#: left does not discover a second, shorter budget also counting.
+#: never above the mistake limit, so a model told it has strikes left does
+#: not discover a second, shorter budget also counting.
 STRIKE_LIMIT = 6
 SOFT_THRESHOLD = 2
 HARD_THRESHOLD = 5
 CYCLE_REPEAT_LIMIT = 3
 CYCLE_HARD_LIMIT = 6
-MISTAKE_LIMIT = 6
+#: Failed calls in a row (any calls) that end the loop. The fork's 6 is
+#: refit by replay (2026-10-16, ``benchmarks/consultants/guard_replay.py``,
+#: 911 recorded lanes): at 6 it stopped 8 lanes, saving 20 stale calls and
+#: cutting 38 calls that brought something new — streaks of wrong paths the
+#: model corrected on its own; every value under 10 cut more than it saved,
+#: and 10 cuts none. Repeats of one failing call stay STRIKE_LIMIT's.
+MISTAKE_LIMIT = 10
 
 #: Tools that change the workspace (named, never inferred). Our write tools
 #: are the ones ``agent_loop.runner.is_write_tool`` recognises; these are

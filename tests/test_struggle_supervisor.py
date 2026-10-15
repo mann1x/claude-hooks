@@ -25,12 +25,32 @@ def test_budget_loop_nudges_then_stops_after_grace():
     assert s.spent_after_nudge() == 2
 
 
-def test_long_is_not_stuck():
+def test_long_and_still_finding_things_is_never_nudged():
+    """Guard replay: 204 of 443 count-only length nudges landed on lanes
+    whose next calls were mostly new."""
+    s = ss.StruggleSupervisor(max_iterations=20)
+    moves = [s.close_iteration(i, budget_spent=False,
+                               calls=[(f"read_file:{i}", f"body {i}", False)])
+             for i in range(20)]
+    assert [m for m in moves if m] == []
+
+
+def test_long_and_stale_is_nudged_once_and_never_stopped():
     # The length nudge never becomes a stop without the budget loop.
     s = ss.StruggleSupervisor(max_iterations=20)
-    moves = [s.close_iteration(i, budget_spent=False) for i in range(20)]
+    moves = [s.close_iteration(i, budget_spent=False,
+                               calls=[("read_file:same", "same body", False)])
+             for i in range(20)]
     assert [m for m in moves if m] == [("nudge", "non-progress")]
     assert moves[9] == ("nudge", "non-progress")
+
+
+def test_a_failing_call_is_never_new():
+    s = ss.StruggleSupervisor(max_iterations=20)
+    for i in range(6):
+        s.close_iteration(i, budget_spent=False,
+                          calls=[(f"read_file:{i}", f"error: no file {i}", True)])
+    assert s.stale()
 
 
 def test_failing_calls_nudge_only_after_the_floor():

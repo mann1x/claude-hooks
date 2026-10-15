@@ -325,3 +325,34 @@ def test_guard_events_land_in_the_recorder(tmp_path):
         assert row["payload"]["cycles"] == 117
     finally:
         rec.close()
+
+
+# --- block-cycle (guard replay, 2026-10-16) ---------------------------------
+
+def _block(n_lines, width=90, tag="a"):
+    return [f"{tag} step {i}: " + ("x" * (width - 12)) for i in range(n_lines)]
+
+
+def test_a_long_block_repeated_verbatim_trips_block_cycle():
+    """The replay's loops: 34-62 distinct lines repeated verbatim, which the
+    60-line window of low-uniqueness / line-cycle cannot hold."""
+    from claude_hooks import reasoning_loop_guard as g
+    lead = "\n".join(f"healthy line {i} " + "y" * 60 for i in range(80))
+    unit = "\n".join(_block(40))
+    v = g.scan(lead + "\n" + "\n".join([unit] * 4) + "\n")
+    assert v is not None and v.kind == "block-cycle" and v.period == 40
+    assert v.cycles >= 3
+
+
+def test_a_block_printed_twice_is_not_a_loop():
+    from claude_hooks import reasoning_loop_guard as g
+    lead = "\n".join(f"healthy line {i} " + "y" * 60 for i in range(80))
+    unit = "\n".join(_block(40))
+    assert g.scan(lead + "\n" + unit + "\n" + unit + "\nthen something new\n") is None
+
+
+def test_three_short_repeats_are_not_a_loop():
+    from claude_hooks import reasoning_loop_guard as g
+    lead = "\n".join(f"healthy line {i} " + "y" * 60 for i in range(80))
+    unit = "\n".join(_block(10, width=30))     # ~300 chars a repeat
+    assert g.scan(lead + "\n" + "\n".join([unit] * 3) + "\nnext\n") is None

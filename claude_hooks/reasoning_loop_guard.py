@@ -17,6 +17,13 @@ real collapses:
                     which defeats an exact-period test).
 ``line-cycle``      the same 1..N lines repeating with an exact period.
 ``phrase-cycle``    one fragment repeating inside a single unbroken line.
+``block-cycle``     ours, not the fork's: a block of 7..128 lines repeating
+                    with an exact period, which the 60-line window of the
+                    first two cannot hold. The guard replay (2026-10-16,
+                    ``benchmarks/consultants/guard_replay.py``) found six
+                    turns of 190k-250k characters in 4,117 recorded blocks
+                    whose last half was one 34-62-line block (code + prose)
+                    repeated verbatim, which none of the three caught.
 
 Length is never the signal: healthy agentic reasoning runs 150k–260k
 characters a turn. Thresholds were set on 1,556 reasoning blocks from 82
@@ -41,6 +48,14 @@ class GuardConfig:
     min_line_chars: int = 2000
     phrase_max_period: int = 120
     phrase_min_cycles: int = 12
+    #: block-cycle: the lines kept, the longest period tried, the repeats
+    #: required (the block itself included) and the characters they must
+    #: span, checked every ``block_check_every`` new lines.
+    block_window: int = 512
+    block_max_period: int = 128
+    block_min_cycles: int = 3
+    block_min_chars: int = 6000
+    block_check_every: int = 16
     #: Consecutive cut turns that end the lane.
     max_consecutive_trips: int = 3
 
@@ -50,7 +65,7 @@ DEFAULT = GuardConfig()
 
 @dataclass(frozen=True)
 class Verdict:
-    kind: str                  # low-uniqueness | line-cycle | phrase-cycle
+    kind: str                  # low-uniqueness | line-cycle | phrase-cycle | block-cycle
     chars: int                 # reasoning characters seen at the trip
     sample: str                # a short excerpt of the repeating unit
     period: Optional[int] = None
@@ -68,7 +83,7 @@ def describe(v: Verdict) -> str:
     if v.kind == "low-uniqueness":
         return (f"The model's reasoning collapsed into {v.distinct} distinct "
                 f"lines over {where}.{sample}")
-    if v.kind == "line-cycle":
+    if v.kind in ("line-cycle", "block-cycle"):
         return (f"The model's reasoning repeated a {v.period}-line block "
                 f"{v.cycles} times {where}.{sample}")
     return (f"The model's reasoning repeated a {v.period}-character phrase "
@@ -82,6 +97,8 @@ class ReasoningLoopGuard:
     lines: list = field(default_factory=list)
     pending: str = ""
     verdict: Optional[Verdict] = None
+    block: list = field(default_factory=list)
+    _since_block_check: int = 0
 
     def push(self, delta: str) -> Optional[Verdict]:
         """Feed one reasoning delta. Returns the verdict the first time the
@@ -101,10 +118,14 @@ class ReasoningLoopGuard:
                 self.lines.append(line)
                 if len(self.lines) > cfg.window:
                     self.lines.pop(0)
+                self.block.append(line)
+                if len(self.block) > cfg.block_window:
+                    self.block.pop(0)
+                self._since_block_check += 1
         if self.chars < cfg.min_chars:
             return None
         found = (self._low_uniqueness() or self._line_cycle()
-                 or self._phrase_cycle())
+                 or self._phrase_cycle() or self._block_cycle())
         if found is not None:
             self.verdict = found
         return self.verdict
@@ -155,6 +176,29 @@ class ReasoningLoopGuard:
                 return Verdict("phrase-cycle", self.chars,
                                " ".join(unit.split())[:160],
                                period=p, cycles=cycles + 1)
+        return None
+
+    def _block_cycle(self) -> Optional[Verdict]:
+        cfg = self.config
+        if self._since_block_check < cfg.block_check_every:
+            return None
+        self._since_block_check = 0
+        lines = self.block
+        n = len(lines)
+        for p in range(cfg.max_period + 1, cfg.block_max_period + 1):
+            if n < p * cfg.block_min_cycles:
+                break
+            unit = lines[n - p:]
+            repeats = 1
+            i = n - p
+            while i - p >= 0 and lines[i - p:i] == unit:
+                repeats += 1
+                i -= p
+            if repeats >= cfg.block_min_cycles and len(set(unit)) > 1 \
+                    and sum(map(len, unit)) * repeats >= cfg.block_min_chars:
+                return Verdict("block-cycle", self.chars,
+                               " / ".join(unit[:3])[:160],
+                               period=p, cycles=repeats)
         return None
 
 
