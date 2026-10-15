@@ -820,7 +820,8 @@ class ChatClient:
     def _wait_out_outage(self, e: BaseException, body: str,
                          attempts: "_Attempts", state: dict, *,
                          what: str,
-                         cancel_check: Optional[Callable[[], bool]] = None
+                         cancel_check: Optional[Callable[[], bool]] = None,
+                         on_wait: Optional[Callable[[dict], None]] = None,
                          ) -> bool:
         """Sleep through a network outage and hold the attempt index.
         Returns False (use the ordinary retry path) when the budget is
@@ -841,6 +842,14 @@ class ChatClient:
         log.warning("%s: network outage (%s); waiting %.0fs, %.0f of %.0fs "
                     "outage budget used", what, str(e)[:160] or body[:160],
                     delay, now - t0, self.outage_wait_s)
+        if on_wait is not None:
+            for _t in ollama_slots.infra_notices(
+                    now - t0, state.setdefault("noticed", set())):
+                try:
+                    on_wait({"what": "outage", "waited_s": round(now - t0),
+                             "error": (str(e) or body)[:200]})
+                except Exception:  # pragma: no cover
+                    log.exception("on_wait raised; ignored")
         end = time.monotonic() + delay
         while True:
             left = end - time.monotonic()
@@ -981,8 +990,13 @@ class ChatClient:
                       on_token: Optional[Callable[[str], None]] = None,
                       cancel_check: Optional[Callable[[], bool]] = None,
                       on_admitted: Optional[Callable[[], None]] = None,
+                      on_wait: Optional[Callable[[dict], None]] = None,
                       ) -> dict:
         """Streaming counterpart to ``chat()``.
+
+        ``on_wait`` (plan D9) gets one dict per infrastructure wait — a
+        queue for a connection slot or a network outage — at 10 min and
+        again at 2 h of it; informational, nothing else changes.
 
         ``on_admitted`` is called once per attempt when the call holds
         its connection slot (``claude_hooks.ollama_slots``) and is about
@@ -1012,7 +1026,8 @@ class ChatClient:
         ``on_token``.
         """
         return self._call(payload, stream=True, on_token=on_token,
-                          cancel_check=cancel_check, on_admitted=on_admitted)
+                          cancel_check=cancel_check, on_admitted=on_admitted,
+                          on_wait=on_wait)
 
     #: Path of the chat route under the server root.
     _chat_path = "/api/chat"
@@ -1056,7 +1071,8 @@ class ChatClient:
     def _call(self, payload: dict, *, stream: bool,
               on_token: Optional[Callable[[str], None]] = None,
               cancel_check: Optional[Callable[[], bool]] = None,
-              on_admitted: Optional[Callable[[], None]] = None) -> dict:
+              on_admitted: Optional[Callable[[], None]] = None,
+              on_wait: Optional[Callable[[dict], None]] = None) -> dict:
         """The one retry loop behind :meth:`chat` and :meth:`chat_streamed`.
 
         Beyond the retry budget it handles, without spending a retry:
@@ -1118,7 +1134,8 @@ class ChatClient:
                 queued_at = time.monotonic()
                 try:
                     admitted = (ollama_slots.slot(self.base_url, model_tag,
-                                                  cancel_check=cancel_check)
+                                                  cancel_check=cancel_check,
+                                                  on_wait=on_wait)
                                 if stream else
                                 ollama_slots.slot(self.base_url, model_tag))
                     admitted.__enter__()
@@ -1290,7 +1307,8 @@ class ChatClient:
                 if (fault != TOOL_CALL_UNPARSABLE
                         and self._wait_out_outage(e, err_body, attempts, outage,
                                                   what=what,
-                                                  cancel_check=cancel_check)):
+                                                  cancel_check=cancel_check,
+                                                  on_wait=on_wait)):
                     continue
                 if retryable and attempt < self.max_retries:
                     delay = min(
@@ -1321,7 +1339,8 @@ class ChatClient:
             except (urllib.error.URLError, OSError) as e:
                 last_exc = e
                 if self._wait_out_outage(e, "", attempts, outage,
-                                         what=what, cancel_check=cancel_check):
+                                         what=what, cancel_check=cancel_check,
+                                         on_wait=on_wait):
                     continue
                 if attempt < self.max_retries:
                     delay = min(

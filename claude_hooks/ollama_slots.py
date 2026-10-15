@@ -282,13 +282,32 @@ def _try_any(d: Path, limit: int):
     return None
 
 
+#: Plan D9: how long a wait on infrastructure (a connection slot, an
+#: outage) runs before it is reported, once each (Cerebriline
+#: ``agent-trouble.ts``: 10 min, then 2 h). Informational only — the run
+#: deadline decides what happens to the lane.
+INFRA_WAIT_NOTICE_S = (600.0, 7200.0)
+
+
+def infra_notices(waited_s: float, sent: set) -> list[float]:
+    """The thresholds in :data:`INFRA_WAIT_NOTICE_S` ``waited_s`` has
+    crossed and ``sent`` has not seen; adds them to ``sent``."""
+    due = [t for t in INFRA_WAIT_NOTICE_S if waited_s >= t and t not in sent]
+    sent.update(due)
+    return due
+
+
 @contextlib.contextmanager
 def slot(base_url: str, model: str, *,
          cancel_check: Optional[Callable[[], bool]] = None,
-         cfg: Optional[dict] = None) -> Iterator[Optional[str]]:
+         cfg: Optional[dict] = None,
+         on_wait: Optional[Callable[[dict], None]] = None,
+         ) -> Iterator[Optional[str]]:
     """Hold a connection slot for one HTTP attempt. Yields the scope
     (``None`` when unlimited or when the limiter failed open). Raises
-    ``Cancelled`` if ``cancel_check`` turns true while waiting."""
+    ``Cancelled`` if ``cancel_check`` turns true while waiting.
+    ``on_wait`` gets one dict per :data:`INFRA_WAIT_NOTICE_S` threshold
+    the queue wait crosses (plan D9)."""
     sc = scope_for(base_url, model, cfg)
     if sc is None:
         yield None
@@ -302,6 +321,7 @@ def slot(base_url: str, model: str, *,
     held = None
     t0 = time.monotonic()
     warned = t0
+    noticed: set = set()
     try:
         d = slot_dir() / scope
         d.mkdir(parents=True, exist_ok=True)
@@ -327,6 +347,14 @@ def slot(base_url: str, model: str, *,
                 log.info("ollama_slots: %s × %s queued %.0fs (limit %d)",
                          model, scope, now - t0, limit)
                 warned = now
+            if on_wait is not None:
+                for _t in infra_notices(now - t0, noticed):
+                    try:
+                        on_wait({"what": "slot", "scope": scope,
+                                 "model": model, "limit": limit,
+                                 "waited_s": round(now - t0)})
+                    except Exception:  # pragma: no cover
+                        log.exception("on_wait raised; ignored")
             time.sleep(delay)
             delay = min(0.5, delay * 1.5)
     except Cancelled:

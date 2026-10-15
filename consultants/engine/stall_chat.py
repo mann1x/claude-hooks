@@ -131,6 +131,10 @@ def make_stall_protected_chat_fn(
                   "cancel_check": controller.is_cancelled}
         if _accepts(chat_streamed, "on_admitted"):
             kwargs["on_admitted"] = controller.restart_clock
+        if on_event is not None and _accepts(chat_streamed, "on_wait"):
+            # Plan D9: a long wait on infrastructure lands in the lane's
+            # events as ``infra_wait``; informational only.
+            kwargs["on_wait"] = lambda ev: on_event({"kind": "infra_wait", **ev})
         return chat_streamed(payload, **kwargs)
 
     def chat_fn(payload: dict) -> dict:
