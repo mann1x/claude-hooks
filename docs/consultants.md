@@ -629,7 +629,41 @@ and a node added later cannot forget it.
 like any other, and running it would be spending after you said stop.
 Terminal status is `cancelled`, not `completed`, and partial state is
 kept unless you pass `--discard-partial`. "Stop and synthesize what you
-have" would be a different verb; it does not exist yet.
+have" is the other verb, `wrap-up` (below).
+
+### Wrap-up: stop and answer with what you have
+
+`POST /v1/consult/{sid}/wrap-up` (`claude-consultants wrap-up <sid>`)
+is the graceful stop (plan D9). It rides the same out-of-band
+`RunControl` (`request_wrap_up()`), and nothing raises:
+
+- a researcher, tool_executor or coder loop already running asks
+  `LoopConfig.wrap_up_check` before each turn and ends on one tool-less
+  report (`WRAP_UP_FINAL`, `_stop_reason = wrap_up`); a coder starts no
+  fallback model;
+- the gate skips work not yet started (`wrap_up_skips()`: planner,
+  critic, meta-critic, escalator, adversary, tool_executor and coder
+  lanes, and any researcher that is not a REPORT re-entry holding its
+  round's tool results); each skip is a `node_wrap_up_skipped` event;
+- the routers send the run straight to the synthesizer, which is told
+  its research is partial (`WRAP_UP_SYNTHESIS_NOTE`);
+- the result carries `partial` (`reason`, `requested_by`,
+  `requested_at`, `skipped_roles`) and `summary.md` says
+  `partial: wrap_up`.
+
+It is refused (409) on a cancelled run and a no-op on one not running.
+Cancel arriving after a wrap-up still wins. A wrap-up is not carried
+across an engine restart: a suspended council resumes as a normal run.
+
+**Routers must not loop on a stopped run.** A skipped node writes
+nothing, so a router that reads its last verdict (a critic's "needs more
+research", an unconsumed tool plan) would send the run back round the
+same skipped nodes. Before D9 this is what a cancel during a critic
+asking for more research did: about 2 s of spinning to LangGraph's
+recursion limit, then `graph crashed` instead of `cancelled`. The
+critic, tool and coder routers now go to the synthesizer whenever the
+run is wrapping up or cancelled (`_stopping()` in
+`consultants/engine/graph.py`).
 
 **Cancel skips, it never raises.** An exception would abort the stream
 mid-superstep and lose exactly the partial state `--keep-partial` exists

@@ -491,6 +491,7 @@ def coder_node(state: dict,
                max_files: int = 16,
                model_chain_resolver: Optional[Callable[
                    [Optional[str]], list[tuple[Any, str]]]] = None,
+               wrap_up_check: Optional[Callable[[], bool]] = None,
                ) -> dict:
     """Execute one ``CoderTaskItem`` from the per-lane state slice.
 
@@ -650,6 +651,7 @@ def coder_node(state: dict,
             guard_profile=_guard_profile(state, "coder"),
             on_guard=guard_sink(recorder, role="coder",
                                  round=parent_round, lane_idx=lane_idx),
+            wrap_up_check=wrap_up_check,
         )
 
     # Walk the failover chain. Each iteration is a fully-isolated
@@ -844,7 +846,14 @@ def coder_node(state: dict,
 
         # Decide: more attempts left, or chain exhausted?
         next_idx = attempt_idx + 1
-        if next_idx <= len(chain):
+        # Plan D9: a wrap-up starts no fallback model.
+        wrapping = False
+        if wrap_up_check is not None:
+            try:
+                wrapping = bool(wrap_up_check())
+            except Exception:  # pragma: no cover
+                log.exception("wrap_up_check raised; carrying on")
+        if next_idx <= len(chain) and not wrapping:
             next_model = chain[next_idx - 1][1]
             _emit_coder_failover(
                 round=parent_round, lane_idx=lane_idx,

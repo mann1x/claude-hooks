@@ -150,6 +150,10 @@ class LoopConfig:
     # least 2 turns before the cap. The loop guards are in no profile.
     # Callers pair it with ``force_first_tool_call`` for the lanes.
     guard_profile: str = "standard"
+    # Plan D9: graceful stop. Asked before every turn; once it answers
+    # True the loop sends no further work and ends on one tool-less
+    # report (``_stop_reason`` = ``wrap_up``). ``None`` never asks.
+    wrap_up_check: Optional[Callable[[], bool]] = None
 
 
 #: Plan D13: every message the harness writes into a conversation opens
@@ -476,6 +480,26 @@ CAP_FINAL_REPORT = (
     "taken as it is. Do not call any tool. In this one reply, report: what "
     "you found, with its evidence, what you verified and how, and what is "
     "still open or unfinished — exactly where you stopped.")
+
+
+#: Plan D9: the operator asked the run to stop and synthesize what it has
+#: (Cerebriline ``wrapUpNote``). Unlike the cap, nothing went wrong.
+WRAP_UP_FINAL = (
+    "[SYSTEM MESSAGE] The operator is wrapping this run up: the answer is "
+    "being written from the work done so far. Do not call any tool. In this "
+    "one reply, report what you found, with its evidence, what you "
+    "verified, and what is still open — exactly where you stopped.")
+
+
+def _wrapping_up(config: "LoopConfig") -> bool:
+    check = getattr(config, "wrap_up_check", None)
+    if check is None:
+        return False
+    try:
+        return bool(check())
+    except Exception:
+        log.exception("wrap_up_check raised; carrying on")
+        return False
 
 
 LOOP_GUARD_FINAL = (
@@ -982,6 +1006,14 @@ def run_loop(
     cap = config.max_tool_calls_per_turn
 
     for i in range(config.max_iterations):
+        if _wrapping_up(config):
+            # Plan D9: the turn already running finished; no new one starts.
+            _emit_guard(config, {"guard": "wrap_up", "action": "stop",
+                                 "iteration": i})
+            payload, final = _forced_report(
+                payload, payload["messages"], WRAP_UP_FINAL, "wrap_up",
+                chat_fn, config, on_iter, i)
+            break
         if (config.tools_available and force_after > 0 and i >= force_after
                 and not tools_stripped):
             log.info(

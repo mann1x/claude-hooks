@@ -303,6 +303,11 @@ you**, and either one means "answer me":
 - `cancel_requested` — the run is draining. Every remaining node skips
   and the run ends with status `cancelled` and **no final answer**.
   Don't wait for one.
+- `wrap_up_requested` — the run is finishing on what it has: running
+  lanes are writing one report each, nothing new starts, and the
+  synthesizer answers next. Wait for that answer; the result carries
+  `partial` (and `summary.md` front matter says `partial: wrap_up`),
+  so tell the user the research was cut short.
 
 Each carries the wall-clock at which the engine gives up, and the three
 deadlines resolve differently — check which one you are looking at
@@ -1567,6 +1572,19 @@ Cooperative drain. ``--discard-partial`` also deletes the
 checkpointer file. Use when the user has changed their mind about
 the question. Idempotent on completed sessions (200, no-op).
 
+### wrap-up — stop and answer with what it has
+
+```
+claude-consultants wrap-up <sid> [--reason "..."]
+```
+
+The graceful stop: running lanes end on one report each, lanes not yet
+started are skipped, the critic, coder and adversary are passed by, and
+the synthesizer writes the answer from the partial research. The result
+carries `partial: {"reason": "wrap_up", ...}`. Refused (409) on a
+cancelled run. Use this, not `cancel`, when the user wants an answer now
+("that's enough, tell me what you have").
+
 ### events — live monitor (SSE stream)
 
 This is the **engine's real-time monitor channel** — the canonical way
@@ -1621,6 +1639,8 @@ mid-flight intervention.** Examples:
   branch" → ``inject --role researcher -m "..."``.
 - User says "cancel that, I want to ask something different"
   → ``cancel --discard-partial`` then start the new ask.
+- User says "that's enough, tell me what you have so far"
+  → ``wrap-up <sid>``, then wait for the (partial) answer.
 - User says "show me what the council has so far" → ``state``;
   pretty-print the partial_synthesis + research[].
 

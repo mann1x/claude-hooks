@@ -1732,6 +1732,19 @@ def cmd_cancel(args, base: str) -> int:
     return 0
 
 
+def cmd_wrap_up(args, base: str) -> int:
+    """POST /v1/consult/<sid>/wrap-up — plan D9's graceful stop: the
+    run ends on an answer from the research it has, marked ``partial``.
+    ``cancel`` is the verb for no answer at all."""
+    out = _http("POST", f"{base}/v1/consult/{args.sid}/wrap-up",
+                body={"reason": args.reason or "user-wrap-up"})
+    print(json.dumps({"ok": True, **out}, indent=2))
+    if not out.get("stops_the_run", True):
+        print("note: the run is not executing; nothing to wrap up.",
+              file=sys.stderr)
+    return 0
+
+
 #: Event kinds worth a human's attention. ``llm_call`` / ``tool_call``
 #: are the bulk of the stream — a single ``xhigh`` council emits
 #: hundreds, each with a full payload — and reading them is how the
@@ -1745,6 +1758,8 @@ _MILESTONE_KINDS = (
     # never be filtered out of the monitor view.
     "awaiting_tool_approval", "tool_approval_resolved",
     "tool_approval_auto",
+    # Plan D9: a wrap-up skipped a node that had not started.
+    "node_wrap_up_skipped",
 )
 
 
@@ -2465,6 +2480,19 @@ def build_parser() -> argparse.ArgumentParser:
     can.add_argument("--reason", default="user-cancel",
                      help="Human-readable cancel reason (logged).")
     can.set_defaults(fn=cmd_cancel)
+
+    # wrap-up — stop and synthesize what the run has (plan D9).
+    wu = sub.add_parser(
+        "wrap-up",
+        help="Stop a running consultation and synthesize what it has: "
+             "running lanes report, nothing new starts, the answer is "
+             "marked partial.",
+    )
+    wu.add_argument("sid")
+    wu.add_argument("--reason", default="user-wrap-up",
+                    help="Human-readable reason (logged, recorded on the "
+                         "result).")
+    wu.set_defaults(fn=cmd_wrap_up)
 
     # tool-ack — answer a parked ask_human tool approval (M-A).
     ta = sub.add_parser(

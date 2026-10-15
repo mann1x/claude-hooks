@@ -520,6 +520,8 @@ def make_runner(*, ollama_base_url: str):
             cwd_display=cwd_display,
             extra_roots_display=list(extra_roots_display),
             decision=final_state.get("decision_review") or None,
+            partial=(state.run_control.partial()
+                     if state.run_control is not None else None),
         )
         storage.write_consultation(result, cwd=Path(cwd))
 
@@ -1057,6 +1059,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
             cwd_display=cwd_display_fu,
             extra_roots_display=list(extra_roots_display_fu),
             decision=final_state.get("decision_review") or None,
+            partial=(state.run_control.partial()
+                     if state.run_control is not None else None),
         )
         storage.write_consultation(result, cwd=Path(cwd))
 

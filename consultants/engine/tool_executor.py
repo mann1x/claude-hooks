@@ -175,7 +175,8 @@ def tool_executor_node(state: dict,
                        cwd: str,
                        think: Any = False,
                        loop_runner=None,
-                       recorder=None) -> dict:
+                       recorder=None,
+                       wrap_up_check=None) -> dict:
     """Execute one ``ToolPlanItem`` from the per-lane state slice.
 
     Returns a state delta merging into ``tool_results``. Never
@@ -303,6 +304,7 @@ def tool_executor_node(state: dict,
             guard_profile=_guard_profile(state, "tool_executor"),
             on_guard=guard_sink(recorder, role="tool_executor",
                                  round=parent_round, lane_idx=lane_idx),
+            wrap_up_check=wrap_up_check,
         )
 
     # Recorder callbacks — exactly the researcher pattern, but

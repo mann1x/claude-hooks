@@ -416,6 +416,54 @@ def _wrap_planner(deps: GraphDeps):
     return _node
 
 
+def _wrap_up_check(deps: GraphDeps) -> Optional[Callable[[], bool]]:
+    """Plan D9: what a running lane's loop asks before each turn, or
+    ``None`` when the graph has no run control (tests, benchmarks)."""
+    rc = getattr(deps, "run_control", None)
+    if rc is None:
+        return None
+    return lambda: bool(rc.wrapping_up)
+
+
+def _wrap_up_kw(deps: GraphDeps) -> dict:
+    """``{"wrap_up_check": …}`` for a lane node, or nothing when the graph
+    has no run control — the call is then exactly what it was."""
+    check = _wrap_up_check(deps)
+    return {} if check is None else {"wrap_up_check": check}
+
+
+def _wrapping_up(deps: GraphDeps) -> bool:
+    rc = getattr(deps, "run_control", None)
+    return rc is not None and bool(rc.wrapping_up)
+
+
+def _stopping(deps: GraphDeps) -> bool:
+    """Wrapping up or cancelled: either way no router may start new work.
+    The gate skips the nodes, but a skipped node writes nothing, so a
+    router reading their last verdict (a critic's "needs more research",
+    an unconsumed tool plan) would send the run round the same skipped
+    nodes until LangGraph's recursion limit — which is what a cancel
+    during a critic asking for more research did, ending the run as
+    "graph crashed" instead of "cancelled"."""
+    rc = getattr(deps, "run_control", None)
+    return rc is not None and bool(rc.wrapping_up or rc.cancelled)
+
+
+def _route_unless_wrapping(deps: GraphDeps, route: Callable) -> Callable:
+    """``route``, except that a run wrapping up or cancelled goes to the
+    synthesizer (which the gate skips on a cancel): another research
+    round is new work (plan D9; see :func:`_stopping`)."""
+    if deps.run_control is None:
+        return route
+
+    def _routed(state: dict) -> Any:
+        if _stopping(deps):
+            return council.ROUTE_SYNTHESIZER
+        return route(state)
+    _routed.__name__ = getattr(route, "__name__", "route_after_critic")
+    return _routed
+
+
 def _wrap_researcher(deps: GraphDeps):
     # M6: when the tool_executor role is enabled in this build, flip
     # the researcher into PLAN/REPORT mode (no inline tool subloop —
@@ -442,6 +490,7 @@ def _wrap_researcher(deps: GraphDeps):
             tool_executor_enabled=tool_exec_on,
             store=deps.store,
             sid=deps.sid,
+            **_wrap_up_kw(deps),
         )
     return _node
 
@@ -547,6 +596,7 @@ def _wrap_tool_executor(deps: GraphDeps):
             cwd=deps.cwd,
             think=_think_for(deps, role),
             recorder=deps.recorder,
+            **_wrap_up_kw(deps),
         )
     return _node
 
@@ -589,6 +639,7 @@ def _wrap_coder(deps: GraphDeps, *, max_file_bytes: int,
             max_total_bytes=max_total_bytes,
             max_files=max_files,
             model_chain_resolver=resolver,
+            **_wrap_up_kw(deps),
         )
     return _node
 
@@ -662,6 +713,7 @@ def _wrap_synthesizer(deps: GraphDeps):
             recorder=deps.recorder,
             prior_messages=deps.prior_messages_by_role.get("synthesizer"),
             fallback_models=list(deps.synthesizer_fallback_models),
+            **({"wrap_up": True} if _wrapping_up(deps) else {}),
             **_tools_for(deps, "synthesizer"),
         )
     return _node
@@ -1237,6 +1289,9 @@ def build_council_graph(deps: GraphDeps,
             so x-tier sibling researcher lanes don't mask each
             other's unconsumed items.
             """
+            if _stopping(deps):
+                # Plan D9: no new tool lanes once the run stops.
+                return researcher_downstream_natural or synthesizer_target
             plan = list(state.get("tool_plan") or [])
             results = list(state.get("tool_results") or [])
             rounds_used = int(state.get("research_rounds_used") or 0)
@@ -1547,7 +1602,7 @@ def build_council_graph(deps: GraphDeps,
         if "researcher" in enabled:
             sg.add_conditional_edges(
                 conditional_source,
-                council.route_after_critic,
+                _route_unless_wrapping(deps, council.route_after_critic),
                 {
                     council.ROUTE_RESEARCHER: "researcher",
                     council.ROUTE_SYNTHESIZER: synthesizer_target,
@@ -1574,6 +1629,8 @@ def build_council_graph(deps: GraphDeps,
     # ``coder_artifacts`` read sees every lane's output merged.
     if coder_enabled:
         def _route_after_coder_gate(state: dict) -> Any:
+            if _stopping(deps):
+                return "synthesizer"
             wants = bool(state.get("requires_code_generation"))
             tasks = list(state.get("coder_tasks") or [])
             if not wants or not tasks:
@@ -1754,7 +1811,7 @@ def build_follow_up_graph(deps: GraphDeps,
         sg.add_edge("researcher", "critic")
         sg.add_conditional_edges(
             "critic",
-            council.route_after_critic,
+            _route_unless_wrapping(deps, council.route_after_critic),
             {
                 council.ROUTE_RESEARCHER: "researcher",
                 council.ROUTE_SYNTHESIZER: "synthesizer",

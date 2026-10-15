@@ -131,6 +131,10 @@ class ConsultationResult:
     # (``{"choice": accept|followup|research, "confidence", "confident",
     # "probabilities", "model"}``); ``None`` when the seam is off.
     decision: Optional[dict] = None
+    # Plan D9: set when the operator wrapped the run up early —
+    # ``{"reason": "wrap_up", "requested_by", "requested_at",
+    # "skipped_roles"}``. The answer stands on partial research.
+    partial: Optional[dict] = None
 
 
 # ----------------------- YAML front-matter writer -------------------- #
@@ -176,6 +180,9 @@ def _yaml_front_matter(result: ConsultationResult) -> str:
         lines.append("truncated: {}".format(_yaml_str(", ".join(
             f"{role}={n}"
             for role, n in sorted(result.truncations_by_role.items())))))
+    if result.partial:
+        # Plan D9: the answer below was written from partial research.
+        lines.append(f"partial: {_yaml_str(result.partial.get('reason') or 'wrap_up')}")
     if result.cwd:
         lines.append(f"cwd: {_yaml_str(result.cwd)}")
     if result.parent_sid:

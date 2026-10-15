@@ -907,6 +907,40 @@ def register_control_routes(app: "FastAPI") -> None:
             "final_answer_expected": False if running else None,
         }
 
+    # -------------------- POST /wrap-up ------------------------ #
+    @app.post("/v1/consult/{sid}/wrap-up")
+    def wrap_up(sid: str, body: Optional[dict] = None) -> dict:
+        """Plan D9: stop and synthesize what the run has. Running lanes
+        end on one report, work not yet started is skipped, the critic
+        and coder are passed by, and the synthesizer answers from the
+        partial research; the result carries ``partial``. Unlike cancel
+        it gives an answer, so it is refused on a cancelled run and a
+        no-op on one that is not running."""
+        body = body or {}
+        s = _require_session(app, sid)
+        if getattr(s, "closed", False):
+            raise HTTPException(_HTTP_GONE, f"session closed: {sid}")
+        running = getattr(s, "status", "") == "running"
+        if s.run_control.cancelled:
+            raise HTTPException(
+                409, "run is cancelled: a cancelled run has no answer to "
+                     "wrap up")
+        accepted = False
+        if running:
+            accepted = s.run_control.request_wrap_up(
+                str(body.get("reason") or "user-wrap-up"))
+            # The adversary checkpoint would hold the runner until its
+            # deadline; a wrap-up wants the answer now.
+            if hasattr(s, "ack_adversary"):
+                s.ack_adversary()
+        s.bump_activity()
+        return {
+            "ok": True,
+            "wrap_up_accepted": bool(accepted),
+            "stops_the_run": running,
+            "final_answer_expected": True if running else None,
+        }
+
     # -------------------- GET /events (SSE) -------------------- #
     @app.get("/v1/consult/{sid}/events")
     async def events(sid: str, request: Request):

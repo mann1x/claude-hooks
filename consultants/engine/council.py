@@ -40,7 +40,7 @@ import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from claude_hooks import capped_thinking, token_calib, truncation
 from claude_hooks.agent_loop.runner import harness_note
@@ -834,13 +834,22 @@ def build_critic_messages(question: str, plan: str,
     ]
 
 
+#: Plan D9: the synthesizer of a run the operator wrapped up early.
+WRAP_UP_SYNTHESIS_NOTE = (
+    "NOTE: the operator wrapped this run up before the research was done. "
+    "Lanes still working were asked for a report of what they had, and "
+    "work not yet started was skipped, so the research above is partial. "
+    "Answer from it, and say plainly what was not investigated.")
+
+
 def build_synthesizer_messages(question: str, plan: str,
                                research_rounds: list[str],
                                critique: Optional[str],
                                *, self_critic: bool = False,
                                additional_context=None,
                                coder_artifacts: Optional[list] = None,
-                               pager: bool = False) -> list[dict]:
+                               pager: bool = False,
+                               wrap_up: bool = False) -> list[dict]:
     parts = [
         f"USER QUESTION:\n{question.strip()}",
         f"\nPLANNER'S PLAN:\n{plan.strip()}",
@@ -863,6 +872,8 @@ def build_synthesizer_messages(question: str, plan: str,
     extra = _additional_context_block(additional_context)
     if extra:
         parts.append("\n" + extra)
+    if wrap_up:
+        parts.append("\n" + WRAP_UP_SYNTHESIS_NOTE)
     parts.append(
         "\nNow write the final answer for the user. Direct, concrete, "
         "cite `path:line` for any code-dependent claim."
@@ -2539,7 +2550,9 @@ def researcher_node(state: dict, *,
                     prior_messages: Optional[list[dict]] = None,
                     tool_executor_enabled: bool = False,
                     store: Any = None,
-                    sid: Optional[str] = None) -> dict:
+                    sid: Optional[str] = None,
+                    wrap_up_check: Optional[Callable[[], bool]] = None,
+                    ) -> dict:
     """Researcher uses agent_loop.runner.run_loop for a tool sub-loop.
 
     ``loop_runner`` defaults to ``claude_hooks.agent_loop.runner.run_loop``
@@ -3078,6 +3091,7 @@ def researcher_node(state: dict, *,
                 chat_client, model, _budget_knobs(state, "researcher", model)),
             on_guard=guard_sink(recorder, role="researcher",
                                  round=this_round, lane_idx=lane_idx),
+            wrap_up_check=wrap_up_check,
         )
 
     # Bind recorder callbacks to the loop_runner so per-iteration LLM
@@ -3633,7 +3647,8 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                      prior_messages: Optional[list[dict]] = None,
                      fallback_models: Optional[list[str]] = None,
                      tool_specs: Optional[list[dict]] = None,
-                     tool_executor=None, cwd: str = "") -> dict:
+                     tool_executor=None, cwd: str = "",
+                     wrap_up: bool = False) -> dict:
     _emit_started("synthesizer", round=1, model=model)
     if recorder is not None:
         try:
@@ -3668,6 +3683,8 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
             user_parts.append(
                 f"\nCRITIC'S VERDICT:\n{state['critique'].strip()}"
             )
+        if wrap_up:
+            user_parts.append("\n" + WRAP_UP_SYNTHESIS_NOTE)
         user_parts.append(
             "\nWrite the answer to the follow-up question. Reuse "
             "the prior reasoning above where it still applies; only "
@@ -3701,6 +3718,7 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
             coder_artifacts=state.get("coder_artifacts") or [],
             pager=any((t.get("function") or {}).get("name")
                       == lane_digest.PAGER_TOOL for t in tool_specs or []),
+            wrap_up=wrap_up,
         )
         msgs = _with_claims_framing(msgs, state)
     # 2026-05-07: serial fallback chain. The synthesizer always tries
