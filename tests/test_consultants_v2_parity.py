@@ -952,5 +952,128 @@ class TestStallRecoveryReplay(unittest.TestCase):
         self.assertEqual(monitor.attempts[0]["outcome"], "ok")
 
 
+# ============================================================== #
+# Cohort 2, Milestone A: the cloud request on the wire
+# ============================================================== #
+
+
+class _StockOllama:
+    """A stock Ollama (no ``/api/xollama``) serving one cloud tag, which
+    records every request it is sent."""
+
+    def __init__(self):
+        import json
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        seen = self.seen = []
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, body, ctype="application/json"):
+                b = body if isinstance(body, bytes) else json.dumps(body).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+
+            def do_GET(self):
+                seen.append(("GET", self.path, None))
+                if self.path == "/api/tags":
+                    return self._send(200, {"models": [{
+                        "name": "glm-5.3:cloud", "model": "glm-5.3:cloud",
+                        "remote_host": "https://ollama.com",
+                        "remote_model": "glm-5.3"}]})
+                return self._send(404, {"error": "not found"})
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n) or b"{}")
+                seen.append(("POST", self.path, body))
+                if self.path == "/api/show":
+                    return self._send(200, {
+                        "capabilities": ["completion", "tools", "thinking"],
+                        "model_info": {"glm.context_length": 202752}})
+                if self.path != "/api/chat":
+                    return self._send(404, {"error": "not found"})
+                done = {"model": "glm-5.3:cloud", "done": True,
+                        "done_reason": "stop", "prompt_eval_count": 10,
+                        "eval_count": 1,
+                        "message": {"role": "assistant", "content": "ok"}}
+                if not body.get("stream"):
+                    return self._send(200, done)
+                first = dict(done, done=False)
+                done["message"] = {"role": "assistant", "content": ""}
+                lines = "".join(json.dumps(x) + "\n" for x in (first, done))
+                return self._send(200, lines.encode(), "application/x-ndjson")
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
+
+    def chats(self):
+        return [b for m, p, b in self.seen if p == "/api/chat"]
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+class TestMilestoneAWireParity(unittest.TestCase):
+    """Plan A acceptance: the current cloud config sends exactly what it
+    sent before Milestone A. The expected bodies were captured from
+    ``ChatClient`` at 2ad9a8e (the commit before A) against this same
+    fake; the probe, account and timings work A added may read from the
+    server, but never changes the request."""
+
+    PAYLOAD = {
+        "model": "glm-5.3:cloud",
+        "messages": [{"role": "system", "content": "s"},
+                     {"role": "user", "content": "q"}],
+        "tools": [{"type": "function", "function": {
+            "name": "grep",
+            "parameters": {"type": "object", "properties": {}}}}],
+        "options": {"num_predict": 4096, "temperature": 0.7},
+        "think": True,
+    }
+
+    def _expected(self, stream: bool) -> dict:
+        return {
+            "messages": [{"content": "s", "role": "system"},
+                         {"content": "q", "role": "user"}],
+            "model": "glm-5.3:cloud",
+            "options": {"num_predict": 4096, "temperature": 0.7},
+            "stream": stream, "think": True,
+            "tools": [{"function": {"name": "grep", "parameters": {
+                "properties": {}, "type": "object"}}, "type": "function"}],
+        }
+
+    def setUp(self):
+        self.server = _StockOllama()
+        self.addCleanup(self.server.close)
+
+    def _client(self):
+        from claude_hooks.get_advice.chat_client import ChatClient
+        return ChatClient(self.server.base)
+
+    def test_a_cloud_chat_is_byte_identical(self):
+        self._client().chat(dict(self.PAYLOAD))
+        self.assertEqual(self.server.chats(), [self._expected(False)])
+
+    def test_a_streamed_cloud_chat_is_byte_identical(self):
+        self._client().chat_streamed(dict(self.PAYLOAD))
+        self.assertEqual(self.server.chats(), [self._expected(True)])
+
+    def test_the_probe_only_reads(self):
+        self._client().chat(dict(self.PAYLOAD))
+        writes = [p for m, p, b in self.server.seen
+                  if m == "POST" and p not in ("/api/show", "/api/me",
+                                                "/api/chat")]
+        self.assertEqual(writes, [])
+
+
 if __name__ == "__main__":
     unittest.main()
