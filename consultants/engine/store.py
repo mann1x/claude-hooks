@@ -53,9 +53,13 @@ must never break the council.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-from collections import defaultdict
+import re
+import threading
+import unicodedata
+from collections import OrderedDict, defaultdict
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Optional, Protocol
 
@@ -535,6 +539,13 @@ if HAVE_LANGGRAPH_STORE:
                     # Older entries or non-dict payloads — surface
                     # the raw text so the caller still gets content.
                     value = {"text": getattr(h, "text", "")}
+                # Plan D11: the vector leg's cosine similarity, on the
+                # returned copy only, when the provider says its distance
+                # is a cosine one. The RRF ``score`` is a rank, not this.
+                dist = _safe_float(meta.get("_distance"))
+                if (dist is not None and getattr(
+                        self._provider, "vector_distance", None) == "cosine"):
+                    value = {**value, "_similarity": 1.0 - dist}
                 created = _parse_dt(meta.get("created_at"))
                 updated = _parse_dt(meta.get("updated_at"))
                 score = _safe_float(
@@ -787,6 +798,131 @@ def _load_sqlite_vec(store_cfg):  # pragma: no cover — runtime-only
 # Convenience helpers — every function is safe to call when
 # ``store`` is None.
 # ============================================================== #
+
+# ---------- Plan D11: a relevance gate and "already given" -------- #
+# Ported from Cerebriline ``memory-recall.ts`` (``isAboutTheSearch``,
+# ``clampRecallQuery``, the per-session given set). A search always
+# returns its best matches, however poor: a lane with no real peers got
+# the 5 nearest unrelated findings. The fork's similarity floor (cosine
+# >= 0.5) is not the hit's score here — ``recall_hybrid`` scores are RRF
+# ranks — so it needs the vector leg's distance; without one the gate is
+# its other test alone: the finding
+# shares content words with the query — unless the provider reports a
+# cosine distance (pgvector), which the adapter turns into
+# ``value["_similarity"]`` and the fork's floor applies to.
+RECALL_MIN_SIMILARITY = 0.5
+
+RECALL_MIN_SHARED_WORDS = 2
+RECALL_MAX_QUERY_CHARS = 2000
+RECALL_MIN_QUERY_CHARS = 12
+GIVEN_SETS_MAX = 200
+
+_STOPWORDS = frozenset(
+    "a about above after again all also am an and any are as at be because "
+    "been before being below between both but by can could did do does "
+    "doing down during each few for from further had has have having he her "
+    "here hers him his how i if in into is it its just me more most my no "
+    "nor not now of off on once only or other our ours out over own same she "
+    "should so some such than that the their theirs them then there these "
+    "they this those through to too under until up very was we were what "
+    "when where which while who whom why will with would you your yours "
+    "please thanks every always never use using used want wants need needs "
+    "like get got make made new one two project projects code file files "
+    "thing things".split())
+_TERM = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def _stem(word: str) -> str:
+    return word if len(word) <= 4 else re.sub(r"(?:ing|ed|es|s)$", "", word)
+
+
+def content_words(text: str) -> set[str]:
+    """The meaningful words of a text, stemmed."""
+    norm = unicodedata.normalize("NFKD", text or "")
+    norm = "".join(c for c in norm if not unicodedata.combining(c)).lower()
+    return {_stem(t) for t in _TERM.findall(norm)
+            if len(t) >= 2 and t not in _STOPWORDS}
+
+
+def is_about_the_search(query: str, text: str,
+                        similarity: Optional[float] = None) -> bool:
+    """Whether a finding is about the search, not merely the best of a
+    poor lot: a cosine similarity at the floor, or shared content words."""
+    if similarity is not None and similarity >= RECALL_MIN_SIMILARITY:
+        return True
+    wanted = content_words(query)
+    if not wanted:
+        return False
+    held = content_words(text)
+    shared = sum(1 for w in wanted if w in held)
+    return shared >= min(RECALL_MIN_SHARED_WORDS, len(wanted))
+
+
+def clamp_recall_query(query: str, max_chars: int = RECALL_MAX_QUERY_CHARS) -> str:
+    """Bound a query, keeping its head and its tail."""
+    text = (query or "").strip()
+    if len(text) <= max_chars:
+        return text
+    half = (max_chars - 5) // 2
+    return f"{text[:half]}\n...\n{text[-half:]}"
+
+
+_GIVEN: "OrderedDict[tuple, set]" = OrderedDict()
+_GIVEN_LOCK = threading.Lock()
+
+
+def _finding_id(hit) -> tuple:
+    value = getattr(hit, "value", None) or {}
+    text = str(value.get("text") or "")
+    return (tuple(getattr(hit, "namespace", ()) or ()),
+            getattr(hit, "key", ""),
+            hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:16])
+
+
+def take_new(sid: str, lane_idx, hits: list) -> list:
+    """The hits this lane has not been given yet in this session, marked
+    given. Keyed on the finding's text too: a lane's key is stable across
+    rounds, and an updated finding is a new one. Bounded to
+    :data:`GIVEN_SETS_MAX` (session, lane) sets."""
+    with _GIVEN_LOCK:
+        slot = (sid, lane_idx)
+        given = _GIVEN.pop(slot, set())
+        _GIVEN[slot] = given
+        while len(_GIVEN) > GIVEN_SETS_MAX:
+            _GIVEN.popitem(last=False)
+        fresh = []
+        for h in hits:
+            fid = _finding_id(h)
+            if fid in given:
+                continue
+            given.add(fid)
+            fresh.append(h)
+        return fresh
+
+
+def peer_findings(store, sid: str, query: str, *, lane_idx=None,
+                  limit: int = 5) -> list:
+    """Plan D11: recalled peer findings for one lane — the query clamped
+    (skipped under :data:`RECALL_MIN_QUERY_CHARS`), the lane's own
+    findings dropped, only findings about the search, each given once per
+    lane per session."""
+    q = clamp_recall_query(query)
+    if len(q) < RECALL_MIN_QUERY_CHARS:
+        return []
+    hits = recall_research(store, sid, q, limit=limit)
+    if lane_idx is not None:
+        hits = [h for h in hits
+                if (getattr(h, "value", None) or {}).get("lane_idx") != lane_idx]
+    def _about(h) -> bool:
+        value = getattr(h, "value", None) or {}
+        return is_about_the_search(q, str(value.get("text") or ""),
+                                   _safe_float(value.get("_similarity")))
+    relevant = [h for h in hits if _about(h)]
+    if len(relevant) < len(hits):
+        log.info("peer findings: %d of %d recalled are not about %r; dropped",
+                 len(hits) - len(relevant), len(hits), q[:80])
+    return take_new(sid, lane_idx, relevant)
+
 
 def recall_research(
     store,

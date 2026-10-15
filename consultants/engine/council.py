@@ -2688,25 +2688,18 @@ def researcher_node(state: dict, *,
         if store is not None and sid:
             from consultants.engine.store import (
                 format_findings_block,
-                recall_research,
+                peer_findings,
             )
             recall_query = (
                 plan_item
                 if plan_item
                 else (state.get("plan") or state.get("question") or "")
             )
-            hits = recall_research(
-                store, sid, recall_query, limit=5,
-            )
-            # Optional dedup: don't surface this lane's own prior
-            # findings (they're already in ``prior_rounds`` above).
-            my_lane = state.get("lane_idx")
-            if my_lane is not None:
-                hits = [
-                    h for h in hits
-                    if (getattr(h, "value", None) or {}).get(
-                        "lane_idx") != my_lane
-                ]
+            # Plan D11: the lane's own findings dropped (they're already
+            # in ``prior_rounds`` above), only findings about the search,
+            # each given to this lane once per session.
+            hits = peer_findings(store, sid, recall_query,
+                                 lane_idx=state.get("lane_idx"), limit=5)
             peer_findings_block = (
                 format_findings_block(hits) if hits else None
             )

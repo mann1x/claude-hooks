@@ -50,6 +50,11 @@ class Provider(ABC):
     #: Short, lowercase identifier — must match the key under ``providers``
     #: in claude-hooks.json.
     name: str = ""
+    #: What ``metadata["_distance"]`` on a recalled hit measures:
+    #: ``"cosine"`` (similarity = 1 - distance), ``"l2"``, or ``None``
+    #: when the provider reports no distance. Read by consumers that
+    #: gate on similarity (plan D11); never assume one.
+    vector_distance: "Optional[str]" = None
 
     #: Human-readable label for prompts and logs.
     display_name: str = ""

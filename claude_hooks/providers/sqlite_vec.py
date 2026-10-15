@@ -71,6 +71,7 @@ log = logging.getLogger("claude_hooks.providers.sqlite_vec")
 
 class SqliteVecProvider(Provider):
     name = "sqlite_vec"
+    vector_distance = "l2"  # vec0 default metric
     display_name = "SQLite + sqlite-vec"
 
     def __init__(self, server: ServerCandidate, options: Optional[dict] = None):
