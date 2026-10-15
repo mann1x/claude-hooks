@@ -151,6 +151,8 @@ Exact algorithm in 01 §6.
 - a parity cohort shows unchanged requests for the current cloud config;
 - calibration guard tests port the fork's cases.
 
+**Exit A met (2026-10-16):** live probes of local Ollama (pandorum, stock), xOllama (solidpc `:11433`), Ollama cloud (through both), opencoti (bs2 `:8240`) and the llama.cpp family (llamafile `:38092`); `TestMilestoneAWireParity` in `tests/test_consultants_v2_parity.py` (the `/api/chat` body for a `:cloud` tag, plain and streamed, byte-identical to the commit before A); `tests/test_token_calib_guards.py` (the fork's `tokens.test.ts`). The §8 host-default URLs went with it: `claude_hooks/ollama_upstream.py`, `ollama.url`. **Milestone A closed.**
+
 ---
 
 ## 2. Milestone B — Budgets: output, window, thinking, sampling
