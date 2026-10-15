@@ -3925,7 +3925,8 @@ def _struggle_watch(state: dict, prepare, *, recorder=None,
         except Exception:  # pragma: no cover
             log.exception("struggle seam raised; ignored")
             return result
-        if verdict and verdict.get("confident"):
+        if verdict and verdict.get("confident") \
+                and not decision.shadowed(state, "struggle"):
             log.info("researcher lane %s: decision model reads it as stuck "
                      "(p=%.2f); nudging once", lane_idx, verdict["p"])
             msgs.append(harness_note(STRUGGLE_NUDGE))
@@ -3956,6 +3957,8 @@ def _scored_critic_confidence(state: dict, recorder=None) -> Optional[float]:
     except Exception:  # pragma: no cover
         log.exception("critic decision seam raised; ignored")
         return None
+    if decision.shadowed(state, "confidence"):
+        return None             # recorded by the seam; the self-rating stands
     if scored is not None:
         _emit_confidence(scored, source="decision", state=state)
     return scored
@@ -3982,6 +3985,8 @@ def _synthesizer_decision_seams(state: dict, text: str, *, recorder=None
                                                 recorder=recorder)
             bad = [items[i]["match"] for i, v in verdicts.items()
                    if v.get("unsupported")]
+            if bad and decision.shadowed(state, "citations"):
+                bad = []        # recorded; the answer is left as written
             if bad:
                 log.info("synthesizer: %d cite(s) not supported by the "
                          "cited code (decision model): %s", len(bad),

@@ -221,3 +221,107 @@ def test_unsupported_cites_are_annotated_once(tmp_path, monkeypatch):
     assert again == out
     assert citation_linter.semantic_items(
         out, allowed_roots=[str(tmp_path)]) == []
+
+
+# --- shadow (plan H6): asked and recorded, never acted on ----------------- #
+
+def _shadow(shadow, seams=(), **extra):
+    st = _state(seams=seams, **extra)
+    st["runtime_control"]["decision"]["shadow"] = list(shadow)
+    return st
+
+
+def test_shadow_is_seeded_only_when_set_and_round_trips():
+    cfg = cc.ConsultantsConfig()
+    cfg.decision.enabled = True
+    cfg.decision.seams = ["citations"]
+    assert "shadow" not in decision_settings(cfg)       # M12 parity
+    assert "shadow" not in cc._render(cfg)
+    cfg.decision.seams = []
+    assert decision_settings(cfg) == {}                 # nothing asked: off
+    cfg.decision.shadow = ["confidence"]
+    seeded = decision_settings(cfg)
+    assert seeded["seams"] == [] and seeded["shadow"] == ["confidence"]
+    assert 'shadow = ["confidence"]' in cc._render(cfg)
+
+
+def test_a_shadow_seam_is_asked_and_recorded(monkeypatch):
+    fake = Fake({"sound": {"type": "noul", "noul": 0.42}})
+    monkeypatch.setattr(dc, "evaluate", fake)
+    rec = Rec()
+    st = _shadow(["confidence"])
+    assert decision.enabled(st, "confidence") and decision.shadowed(
+        st, "confidence")
+    assert not decision.enabled(st, "review")
+    out = decision.review_answer(st, "q", "an answer", recorder=rec)
+    assert out == {}                                      # nothing to act on
+    assert set(fake.calls[0]["questions"]) == {"sound"}
+    ev = rec.events[0]
+    assert ev["role"] == "synthesizer" and ev["payload"]["shadow"] == [
+        "confidence"]
+    assert ev["payload"]["answers"]["sound"]["noul"] == 0.42
+
+
+def test_shadow_confidence_leaves_the_channel_alone(monkeypatch):
+    monkeypatch.setattr(dc, "evaluate", Fake({
+        "sound": {"type": "noul", "noul": 0.1},
+        "enough": {"type": "noul", "noul": 0.1}}))
+    emitted = []
+    monkeypatch.setattr(council, "_emit_confidence",
+                        lambda s, **kw: emitted.append((s, kw["source"])))
+    st = _shadow(["confidence"], research=["found it"])
+    assert council._synthesizer_decision_seams(st, "answer") == (
+        "answer", None, None)
+    assert council._scored_critic_confidence(st) is None
+    assert emitted == []
+
+
+def test_shadow_review_gives_no_recommendation(monkeypatch):
+    monkeypatch.setattr(dc, "evaluate", Fake({
+        "next": {"type": "choice", "choice": "research", "confidence": 0.9,
+                 "probabilities": {"research": 0.95}},
+        "sound": {"type": "noul", "noul": 0.9}}))
+    out = decision.review_answer(_shadow(["review"], seams=("confidence",)),
+                                 "q", "a")
+    assert out == {"confidence": 0.9}                     # confidence acts
+
+
+def test_shadow_struggle_never_nudges(monkeypatch):
+    fake = Fake({"stuck": {"type": "noul", "noul": 0.99}})
+    monkeypatch.setattr(dc, "evaluate", fake)
+    watch = council._struggle_watch(_shadow(["struggle"]), None)
+    payload = {"messages": _tool_turns(6)}
+    watch(payload)
+    assert fake.calls and not any(m.get("_harness") for m in payload["messages"])
+
+
+def test_shadow_citations_leave_the_answer_as_written(tmp_path, monkeypatch):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "net.py").write_text("def retry():\n    time.sleep(1.0)\n")
+    text = "It backs off exponentially (`src/net.py:2`)."
+    fake = Fake({"q0": {"type": "noul", "noul": 0.02}})
+    monkeypatch.setattr(dc, "evaluate", fake)
+    out, _, _ = council._synthesizer_decision_seams(
+        _shadow(["citations"], cwd=str(tmp_path)), text)
+    assert fake.calls and out == text
+
+
+def test_shadow_wins_over_seams(monkeypatch):
+    monkeypatch.setattr(dc, "evaluate", Fake({
+        "enough": {"type": "noul", "noul": 0.2}}))
+    st = _shadow(["confidence"], seams=("confidence",), research=["x"])
+    assert council._scored_critic_confidence(st) is None
+
+
+def test_set_decision_shadow(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    cfg = cc.set_decision(enabled=True, seams="", shadow="confidence",
+                          scope="project", cwd=tmp_path)
+    assert cfg.decision.seams == [] and cfg.decision.shadow == ["confidence"]
+    with pytest.raises(ValueError):
+        cc.set_decision(shadow="vibes", scope="project", cwd=tmp_path)
+    from consultants import cli
+    args = cli.build_parser().parse_args(
+        ["config", "set-decision", "--shadow", "confidence"])
+    assert args.shadow == "confidence"

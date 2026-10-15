@@ -1302,7 +1302,8 @@ def cmd_config_set_decision(args, base: str) -> int:
             enabled=enabled, url=args.url, model=args.model,
             key_file=args.key_file, floor=args.floor,
             high_stakes_floor=args.high_stakes_floor,
-            timeout_s=args.timeout_s, seams=args.seams, reset=args.reset,
+            timeout_s=args.timeout_s, seams=args.seams,
+            shadow=args.shadow, reset=args.reset,
             **_resolve_active_scope(args))
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
@@ -2907,6 +2908,9 @@ def build_parser() -> argparse.ArgumentParser:
                           "(default 15).")
     cde.add_argument("--seams", help="Comma list of review, confidence, "
                                      "struggle, citations.")
+    cde.add_argument("--shadow", help="Comma list of seams to ask and "
+                     "record but never act on (collect live scores before "
+                     "trusting them); '' clears.")
     cde.add_argument("--reset", action="store_true",
                      help="Back to the defaults (off) before applying.")
     _add_scope_args(cde)

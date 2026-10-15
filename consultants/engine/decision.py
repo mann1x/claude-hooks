@@ -20,6 +20,12 @@ Seams (``[decision] seams``):
 ``citations``   :func:`check_citations` — does the quoted code support the
                 claim citing it?
 
+A seam named in ``[decision] shadow`` is asked and recorded like any
+other, but never acted on (:func:`shadowed`): no confidence on the
+channel, no recommendation, no nudge, no citation note. That collects
+live scores next to what the reviewer later said (plan H6) before any
+seam is trusted. Shadow wins over ``seams``.
+
 Every state part is bounded (``decision_client.bound_text``) so a long
 answer cannot carry a whole transcript to the scorer.
 """
@@ -44,12 +50,21 @@ REVIEW_OPTIONS = {
 def settings(state: Optional[dict]) -> Optional[dict]:
     rc = (state or {}).get("runtime_control") or {}
     d = rc.get("decision")
-    return d if isinstance(d, dict) and d.get("seams") else None
+    return d if isinstance(d, dict) and (d.get("seams") or d.get("shadow")) \
+        else None
 
 
 def enabled(state: Optional[dict], seam: str) -> bool:
+    """The seam is asked: acting or in shadow."""
     d = settings(state)
-    return bool(d) and seam in (d.get("seams") or ())
+    return bool(d) and (seam in (d.get("seams") or ())
+                        or seam in (d.get("shadow") or ()))
+
+
+def shadowed(state: Optional[dict], seam: str) -> bool:
+    """The seam is asked and recorded, but its answer must not act."""
+    d = settings(state)
+    return bool(d) and seam in (d.get("shadow") or ())
 
 
 def endpoint(d: dict) -> dc.Endpoint:
@@ -83,14 +98,18 @@ def ask(state: Optional[dict], seam: str, decision_state: Any,
         error = f"{type(e).__name__}: {e}"
         log.exception("decision %s raised", seam)
     _record(recorder, seam=seam, role=role, round=round, lane_idx=lane_idx,
-            model=ep.model, resp=resp, error=error)
+            model=ep.model, resp=resp, error=error,
+            shadow=tuple(d.get("shadow") or ()))
     return resp
 
 
-def _record(recorder, *, seam, role, round, lane_idx, model, resp, error):
+def _record(recorder, *, seam, role, round, lane_idx, model, resp, error,
+            shadow=()):
     if recorder is None or not hasattr(recorder, "record_event"):
         return
     payload = {"seam": seam, "model": model, "error": error}
+    if shadow:
+        payload["shadow"] = list(shadow)
     if resp is not None:
         payload.update(served_by=resp.model, dialect=resp.dialect,
                        duration_ms=resp.duration_ms, answers=resp.answers,
@@ -132,7 +151,8 @@ def review_answer(state: dict, question: str, answer: str, *,
     floor = float(d.get("floor") or dc.DEFAULT_FLOOR)
     out: dict = {}
     nxt = resp.answers.get("next")
-    if isinstance(nxt, dict) and nxt.get("choice") in REVIEW_OPTIONS:
+    if isinstance(nxt, dict) and nxt.get("choice") in REVIEW_OPTIONS \
+            and not shadowed(state, "review"):
         conf = dc.confidence(nxt)
         out["recommendation"] = {
             "choice": nxt["choice"], "confidence": round(conf, 4),
@@ -141,7 +161,8 @@ def review_answer(state: dict, question: str, answer: str, *,
                               (nxt.get("probabilities") or {}).items()},
             "model": resp.model}
     sound = resp.answers.get("sound")
-    if isinstance(sound, dict) and "noul" in sound:
+    if isinstance(sound, dict) and "noul" in sound \
+            and not shadowed(state, "confidence"):
         out["confidence"] = round(max(0.0, min(1.0, float(sound["noul"]))), 4)
     return out
 

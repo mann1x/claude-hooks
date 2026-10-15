@@ -957,7 +957,9 @@ def check_guard_profile(value: Any) -> str:
 #: ``confidence``: a scored confidence beside the critic's and
 #: synthesizer's self-rating; ``struggle``: a stuck-vs-progressing reading
 #: of a lane's recent calls; ``citations``: whether quoted code supports
-#: the claim citing it.
+#: the claim citing it. A seam in ``shadow`` is asked and recorded (a
+#: ``decision`` event) but never acted on — for collecting live scores
+#: before trusting them (plan H6).
 DECISION_SEAMS = ("review", "confidence", "struggle", "citations")
 
 
@@ -978,6 +980,7 @@ class DecisionConfig:
     high_stakes_floor: float = 0.85
     timeout_s: float = 15.0
     seams: list = field(default_factory=lambda: list(DECISION_SEAMS))
+    shadow: list = field(default_factory=list)
 
 
 def check_decision_seams(value: Any) -> list:
@@ -1571,6 +1574,11 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
                 d.seams = check_decision_seams(dec["seams"])
             except ValueError as e:
                 log.warning("consultants config: decision.seams: %s", e)
+        if "shadow" in dec:
+            try:
+                d.shadow = check_decision_seams(dec["shadow"])
+            except ValueError as e:
+                log.warning("consultants config: decision.shadow: %s", e)
         if "api_key" in dec:
             log.warning("consultants config: decision.api_key is not read; "
                         "put the key in a file and set decision.key_file")
@@ -2020,6 +2028,10 @@ def _render(cfg: ConsultantsConfig, *,
         L.append(f"high_stakes_floor = {d.high_stakes_floor!r}")
         L.append(f"timeout_s = {d.timeout_s!r}")
         L.append("seams = [" + ", ".join(_toml_str(x) for x in d.seams) + "]")
+        if d.shadow:
+            L.append("# asked and recorded, never acted on")
+            L.append("shadow = [" + ", ".join(_toml_str(x) for x in d.shadow)
+                     + "]")
         L.append("")
     for name, ep in sorted(cfg.endpoints.items()):
         L.append(f"[endpoints.{name}]")
@@ -2371,7 +2383,8 @@ def set_decision(*, enabled: Optional[bool] = None,
                  floor: Optional[float] = None,
                  high_stakes_floor: Optional[float] = None,
                  timeout_s: Optional[float] = None,
-                 seams: Optional[Any] = None, reset: bool = False,
+                 seams: Optional[Any] = None,
+                 shadow: Optional[Any] = None, reset: bool = False,
                  scope: str = "user",
                  cwd: Optional[Path] = None) -> ConsultantsConfig:
     """Set ``[decision]`` (plan H). Unset arguments keep their value; an
@@ -2385,6 +2398,8 @@ def set_decision(*, enabled: Optional[bool] = None,
         if v is not None and not lo <= float(v) <= hi:
             raise ValueError(f"{name} must be in [{lo}, {hi}]")
     checked_seams = check_decision_seams(seams) if seams is not None else None
+    checked_shadow = (check_decision_seams(shadow) if shadow is not None
+                      else None)
     if key_file:
         kp = Path(key_file).expanduser()
         if not kp.is_file():
@@ -2407,6 +2422,8 @@ def set_decision(*, enabled: Optional[bool] = None,
         d.timeout_s = float(timeout_s)
     if checked_seams is not None:
         d.seams = checked_seams
+    if checked_shadow is not None:
+        d.shadow = checked_shadow
     cfg.decision = d
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 

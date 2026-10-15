@@ -27,7 +27,12 @@ field cut by ``decision_client.bound_text`` with the seam's own limit:
   a reading before it is a case (``label_source: "pending"``).
 * ``review`` — a parent council's final answer with the follow-up the
   reviewer asked next, for a reading of whether that follow-up says the
-  answer was wrong or incomplete (``pending``).
+  answer was wrong or incomplete (``pending``); and the last answer of
+  every consultancy the reviewer marked ``accepted`` (``truth: true``,
+  ``label_source: "accepted"`` — no reading needed). Each carries
+  ``live``: the scores the ``confidence`` / ``review`` seams recorded on
+  that answer at the time (``decision`` events, shadow or acting), so a
+  per-server mapping can be read off live scores without re-asking.
 
 Output (git-ignored; councils from other repos carry their code):
 ``results/<date>/decision-h6/candidates.json``. After the readings are
@@ -277,20 +282,70 @@ def citation_cases(texts: list[str], meta: dict) -> list[dict]:
 
 # --- review ---------------------------------------------------------------- #
 
-def review_candidates(sessions: dict) -> list[dict]:
+def live_scores(con) -> list[dict]:
+    """The synthesizer's recorded ``decision`` events: which server and
+    model answered, ``sound`` (confidence) and ``next`` (review), and
+    whether the seams were in shadow."""
+    try:
+        rows = con.execute("SELECT payload FROM runtime_events WHERE "
+                           "kind='decision' AND role='synthesizer' "
+                           "ORDER BY ts").fetchall()
+    except sqlite3.Error:
+        return []
+    out = []
+    for (payload,) in rows:
+        try:
+            body = json.loads(payload or "{}")
+        except ValueError:
+            continue
+        answers = body.get("answers") or {}
+        sound = (answers.get("sound") or {}).get("noul")
+        nxt = (answers.get("next") or {}).get("choice")
+        if sound is None and nxt is None:
+            continue
+        out.append({"model": body.get("served_by") or body.get("model"),
+                    "sound": sound, "next": nxt,
+                    "shadow": body.get("shadow") or []})
+    return out
+
+
+def _review_case(s: dict, origin: dict) -> dict:
+    return {"seam": "review", "kind": "noul", "truth": None,
+            "label_source": "pending", "origin": origin,
+            "live": s.get("live") or [],
+            "state": {"question": bound_text(s.get("question") or ""),
+                      "answer": bound_text(s["final_answer"])},
+            "instructions": REVIEW_Q}
+
+
+def _accepted(db: Path) -> Optional[str]:
+    """The sid whose answer the reviewer accepted: the newest session of
+    a consultancy whose ``consultancy.json`` says ``accepted``."""
+    try:
+        body = json.loads((db.parent / "consultancy.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if body.get("status") != "accepted":
+        return None
+    children = [c for c in body.get("child_sids") or [] if c]
+    return children[-1] if children else body.get("root_sid")
+
+
+def review_candidates(sessions: dict, accepted: set) -> list[dict]:
     out = []
     for sid, s in sessions.items():
         parent = sessions.get(s.get("parent_sid") or "")
         if not parent or not parent.get("final_answer"):
             continue
-        out.append({
-            "seam": "review", "kind": "noul", "truth": None,
-            "label_source": "pending",
-            "origin": {"sid": parent["sid"], "followed_by": sid,
-                       "follow_up": (s.get("question") or "")[:3000]},
-            "state": {"question": bound_text(parent.get("question") or ""),
-                      "answer": bound_text(parent["final_answer"])},
-            "instructions": REVIEW_Q})
+        out.append(_review_case(parent, {
+            "sid": parent["sid"], "followed_by": sid,
+            "follow_up": (s.get("question") or "")[:3000]}))
+    for sid in sorted(accepted):
+        s = sessions.get(sid)
+        if s and s.get("final_answer"):
+            case = _review_case(s, {"sid": sid, "accepted": True})
+            case.update(truth=True, label_source="accepted")
+            out.append(case)
     return out
 
 
@@ -324,6 +379,7 @@ def assemble(out: Path, *, progressing: int = 40, seed: int = 5) -> list[dict]:
             continue
         lanes.add(key)
         cases.append(c)
+    cases += [c for c in cand.values() if c.get("label_source") == "accepted"]
     for seam in ("citations", "review"):
         for cid, v in (labels.get(seam) or {}).items():
             c = dict(cand[cid], truth=bool(v[0]), label_source="read",
@@ -363,6 +419,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     cases: list[dict] = []
     sessions: dict = {}
+    accepted: set = set()
     dbs = transcripts(args.roots.split(","))
     for db in dbs:
         try:
@@ -375,7 +432,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                 continue
             meta["project"] = os.path.basename(meta.get("cwd") or "")
             final = _final_answer(db)
-            sessions[meta["sid"]] = {**meta, "final_answer": final}
+            sessions[meta["sid"]] = {**meta, "final_answer": final,
+                                     "live": live_scores(con)}
+            acc = _accepted(db)
+            if acc:
+                accepted.add(acc)
             goal = _plan(con) or meta.get("question") or ""
             st = struggle_cases(con, meta, goal)
             by_label: dict = {}
@@ -393,7 +454,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             pass
         finally:
             con.close()
-    cases += review_candidates(sessions)
+    cases += review_candidates(sessions, accepted)
     for c in cases:
         if "project" not in c:
             c["project"] = sessions.get(c["origin"]["sid"], {}).get("project", "")

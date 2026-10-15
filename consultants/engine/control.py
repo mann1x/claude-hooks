@@ -245,13 +245,18 @@ def runtime_control_defaults(
 
 def decision_settings(cfg: cc.ConsultantsConfig) -> dict:
     """``[decision]`` for the run record; empty unless enabled with at
-    least one seam."""
+    least one seam, acting or shadow. ``shadow`` only when set (M12
+    parity: a record without it reads as before)."""
     d = getattr(cfg, "decision", None)
-    if d is None or not d.enabled or not d.seams:
+    shadow = list(getattr(d, "shadow", None) or ())
+    if d is None or not d.enabled or not (d.seams or shadow):
         return {}
-    return {"url": d.url, "model": d.model, "key_file": d.key_file,
-            "floor": d.floor, "high_stakes_floor": d.high_stakes_floor,
-            "timeout_s": d.timeout_s, "seams": list(d.seams)}
+    out = {"url": d.url, "model": d.model, "key_file": d.key_file,
+           "floor": d.floor, "high_stakes_floor": d.high_stakes_floor,
+           "timeout_s": d.timeout_s, "seams": list(d.seams)}
+    if shadow:
+        out["shadow"] = shadow
+    return out
 
 
 def compaction_layers(cfg: cc.ConsultantsConfig) -> dict:

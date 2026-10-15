@@ -741,6 +741,16 @@ escalator and the low-confidence interrupt. Open: a per-server mapping for
 review cases from the seam's own `decision` events once it runs in shadow.
 No default changed.
 
+**Owner decision (2026-10-15): the scored confidence is advice, never an
+override.** It is always given to the model as an input (the critic's
+and synthesizer's own confidence stays theirs), and the model decides
+whether to use it. Today's acting `confidence` path replaces the
+self-rating on the channel; it is rebuilt to that shape before the seam
+acts. First, `[decision] shadow` (built 2026-10-15) asks and records the
+score on live councils without acting, so the live scores can be read
+against the reviewer's next move (`mine_decision_cases.py`: follow-ups
+and `accept` as labels, `live` scores per answer).
+
 **Exit H:** the seams are inert when off (parity tests); every failure path
 keeps today's behaviour; the bench is recorded; H6 before any default
 changes.

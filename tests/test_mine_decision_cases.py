@@ -118,3 +118,33 @@ def test_citation_candidates_by_where_the_symbol_is(repo):
     assert case["truth"] is None and case["label_source"] == "pending"
     assert "44:     def target():" not in case["state"]["c0"]["code"]
     assert "44: def target():" in case["state"]["c0"]["code"]
+
+
+def test_live_scores_and_accepted_answers(tmp_path):
+    sdir = tmp_path / "csl-a"
+    sdir.mkdir()
+    con = sqlite3.connect(sdir / "transcript.db")
+    con.execute("CREATE TABLE runtime_events (ts REAL, kind TEXT, role TEXT, "
+                "payload TEXT)")
+    rows = [("synthesizer", {"served_by": "jev-1.13", "shadow": ["confidence"],
+                             "answers": {"sound": {"noul": 0.31}}}),
+            ("critic", {"answers": {"enough": {"noul": 0.9}}}),
+            ("synthesizer", {"error": "down"})]
+    for i, (role, body) in enumerate(rows):
+        con.execute("INSERT INTO runtime_events VALUES (?, 'decision', ?, ?)",
+                    (float(i), role, json.dumps(body)))
+    con.commit()
+    assert m.live_scores(con) == [{"model": "jev-1.13", "sound": 0.31,
+                                   "next": None, "shadow": ["confidence"]}]
+    con.close()
+    (sdir / "consultancy.json").write_text(json.dumps(
+        {"status": "accepted", "root_sid": "csl-a", "child_sids": ["csl-b"]}))
+    assert m._accepted(sdir / "transcript.db") == "csl-b"
+    (sdir / "consultancy.json").write_text(json.dumps(
+        {"status": "ready_to_review", "root_sid": "csl-a"}))
+    assert m._accepted(sdir / "transcript.db") is None
+    sessions = {"csl-b": {"sid": "csl-b", "question": "q", "final_answer": "a",
+                          "live": [{"sound": 0.8}]}}
+    [case] = m.review_candidates(sessions, {"csl-b"})
+    assert case["truth"] is True and case["label_source"] == "accepted"
+    assert case["live"] == [{"sound": 0.8}]

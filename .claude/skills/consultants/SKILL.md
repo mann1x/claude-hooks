@@ -1218,12 +1218,17 @@ Read `decision` from `config show`. Off by default. Then ask:
   critic's and synthesizer's own; `struggle`: one nudge to a researcher
   lane that repeats itself; `citations`: flags cites whose code does not
   show the claim.
+- **Shadow** — `--shadow confidence` (any subset of the seams): asked
+  and recorded as `decision` events, never acted on. For collecting live
+  scores before a seam is trusted; with `--seams ''` nothing acts at all.
 - **Floors / timeout** — `--floor` (0.6), `--high-stakes-floor` (0.85,
   the struggle nudge), `--timeout-s` (15).
 
 ```
 claude-consultants config set-decision --enabled on --key-file ~/jev.key \
     --model jev-latest --seams review,confidence,struggle,citations
+claude-consultants config set-decision --enabled on --key-file ~/jev.key \
+    --seams '' --shadow confidence      # record scores, act on nothing
 claude-consultants config set-decision --enabled off
 ```
 

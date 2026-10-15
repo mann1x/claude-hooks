@@ -1434,8 +1434,20 @@ claude-consultants config set-decision --enabled on \
 # a local decision model instead
 claude-consultants config set-decision --url http://localhost:11434 --model tev1:latest
 claude-consultants decision-models
+# shadow: ask and record, never act (collect live scores first)
+claude-consultants config set-decision --enabled on --key-file ~/jev.key \
+    --seams '' --shadow confidence
 claude-consultants config set-decision --enabled off
 ```
+
+**Shadow.** A seam in `[decision] shadow` is asked and recorded exactly
+as an acting one, and its answer is then dropped: no scored confidence
+on the channel, no recommendation in `result`, no struggle nudge, no
+citation note. Shadow wins over `seams`. The recorded `decision` events
+carry `shadow`, and `benchmarks/consultants/mine_decision_cases.py`
+pairs each answer's live scores with what the reviewer did next (a
+follow-up, or `accept`), which is how a per-server mapping is measured
+before a seam acts (plan H6).
 
 Each call is a `decision` event in `transcript.db` (seam, model,
 latency, answers, or the error). What Jev sees is the question and the
