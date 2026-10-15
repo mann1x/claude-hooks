@@ -117,6 +117,20 @@ def test_empty_reply_is_asked_again_without_spending_a_retry():
     assert out["timings"]["empty_retries"] == 2
 
 
+def test_empty_reply_is_reasked_with_the_reminder_once():
+    # Plan D15: the resend is not identical; the reminder is added once.
+    seq = _Seq([_Resp(_ok(content="")), _Resp(_ok(content="")),
+                _Resp(_ok("answer"))])
+    with patch("urllib.request.urlopen", side_effect=seq):
+        ChatClient("http://stub", max_retries=0).chat(
+            {"model": "m", "messages": [{"role": "user", "content": "q"}]})
+    first, second, third = (_sent(seq, i)["messages"] for i in range(3))
+    assert first == [{"role": "user", "content": "q"}]
+    assert second != first, "the empty reply was resent unchanged"
+    assert second[-1] == {"role": "user", "content": cc.EMPTY_TURN_REMINDER}
+    assert third == second
+
+
 def test_empty_reply_gives_up_after_two_and_returns_it():
     seq = _Seq([_Resp(_ok(content=""))] * 3)
     with patch("urllib.request.urlopen", side_effect=seq):

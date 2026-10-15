@@ -300,6 +300,31 @@ EMPTY_RETRIES = 2
 EMPTY_RETRY_DELAY_S = 0.25
 
 
+#: Plan D15 (Cerebriline ``EMPTY_TURN_REMINDER``): added once to the
+#: request an empty reply is re-asked with. The resend was identical, and
+#: a request with a fixed seed tends to answer the same nothing again.
+EMPTY_TURN_REMINDER = (
+    "[SYSTEM MESSAGE] Your last reply was empty: nothing arrived — no "
+    "answer, no tool call. Take the smallest useful next step instead: make "
+    "one tool call, or write one short paragraph. If the work you were "
+    "planning does not fit in one reply, do the part that fits and continue "
+    "in the next turn.")
+
+
+def _with_empty_turn_reminder(body: dict) -> bool:
+    """Append :data:`EMPTY_TURN_REMINDER` to a chat body once; whether
+    the body changed."""
+    msgs = body.get("messages")
+    if not isinstance(msgs, list):
+        return False
+    if msgs and isinstance(msgs[-1], dict) \
+            and msgs[-1].get("content") == EMPTY_TURN_REMINDER:
+        return False
+    body["messages"] = list(msgs) + [{"role": "user",
+                                      "content": EMPTY_TURN_REMINDER}]
+    return True
+
+
 def _is_empty_reply(data: dict) -> bool:
     msg = data.get("message") or {}
     if (msg.get("content") or "").strip() or msg.get("tool_calls"):
@@ -1125,6 +1150,8 @@ class ChatClient:
                         "%s: %s answered with nothing (no content, tool "
                         "call or reasoning); asking again (%d/%d)",
                         what, model_tag, empty_retries, EMPTY_RETRIES)
+                    if _with_empty_turn_reminder(body):
+                        encoded = json.dumps(body).encode()
                     time.sleep(EMPTY_RETRY_DELAY_S)
                     attempts.hold()
                     continue
