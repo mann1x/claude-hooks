@@ -463,8 +463,7 @@ def build_meta_critic_messages(
         f"USER QUESTION:\n{question.strip()}",
         f"\nPLANNER'S PLAN:\n{plan.strip()}",
     ]
-    for i, r in enumerate(research_rounds, start=1):
-        parts.append(f"\nRESEARCHER REPORT (round {i}):\n{r.strip()}")
+    parts.extend(_research_parts(research_rounds, pager=False))
     if not critic_verdicts:
         parts.append(
             "\n(no critic verdicts — meta-critic invoked with no "
@@ -775,18 +774,30 @@ def build_researcher_messages(question: str, plan: str,
     return msgs
 
 
+def _research_parts(reports: list[str], *, pager: bool) -> list[str]:
+    """The researcher reports as prompt parts. Reports that fit the plan
+    D8 budget render exactly as before; past it, an index of every report,
+    whole reports while they fit, the rest named (``lane_digest``)."""
+    from consultants.engine import lane_digest
+    digest = lane_digest.render(list(reports), pager=pager)
+    if digest is not None:
+        return digest
+    return [f"\nRESEARCHER REPORT (round {i}):\n{r.strip()}"
+            for i, r in enumerate(reports, start=1)]
+
+
 def build_critic_messages(question: str, plan: str,
                           research_rounds: list[str],
                           *,
                           additional_context=None,
                           strictness: str = "normal",
-                          adversarial_focus: str = "") -> list[dict]:
+                          adversarial_focus: str = "",
+                          pager: bool = False) -> list[dict]:
     parts = [
         f"USER QUESTION:\n{question.strip()}",
         f"\nPLANNER'S PLAN:\n{plan.strip()}",
     ]
-    for i, r in enumerate(research_rounds, start=1):
-        parts.append(f"\nRESEARCHER REPORT (round {i}):\n{r.strip()}")
+    parts.extend(_research_parts(research_rounds, pager=pager))
     extra = _additional_context_block(additional_context)
     if extra:
         parts.append("\n" + extra)
@@ -805,13 +816,13 @@ def build_synthesizer_messages(question: str, plan: str,
                                critique: Optional[str],
                                *, self_critic: bool = False,
                                additional_context=None,
-                               coder_artifacts: Optional[list] = None) -> list[dict]:
+                               coder_artifacts: Optional[list] = None,
+                               pager: bool = False) -> list[dict]:
     parts = [
         f"USER QUESTION:\n{question.strip()}",
         f"\nPLANNER'S PLAN:\n{plan.strip()}",
     ]
-    for i, r in enumerate(research_rounds, start=1):
-        parts.append(f"\nRESEARCHER REPORT (round {i}):\n{r.strip()}")
+    parts.extend(_research_parts(research_rounds, pager=pager))
     if critique:
         parts.append(f"\nCRITIC'S VERDICT:\n{critique.strip()}")
     # M10: surface coder lane outputs (when present) so the
@@ -3321,10 +3332,17 @@ def critic_node(state: dict, *, chat_client, model: str,
     extra_ctx_critic = _additional_context_for(state, "critic")
     # M4: live critic dial (strictness + injected adversarial focus).
     _crit_strict, _crit_focus = _read_critic_dial(state)
+    from consultants.engine import lane_digest
+    _reports = list(state.get("research") or [])
+    tool_specs, tool_executor = lane_digest.with_pager(
+        _reports, tool_specs, tool_executor)
     msgs = build_critic_messages(
-        state["question"], state["plan"], state.get("research") or [],
+        state["question"], state["plan"], _reports,
         additional_context=extra_ctx_critic,
         strictness=_crit_strict, adversarial_focus=_crit_focus,
+        pager=bool(tool_specs) and any(
+            (t.get("function") or {}).get("name") == lane_digest.PAGER_TOOL
+            for t in tool_specs),
     )
     msgs = _with_claims_framing(msgs, state)
     t0 = time.monotonic()
@@ -3620,9 +3638,15 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
         # line") most often needs to land — it shapes the final
         # answer the user sees.
         extra_ctx_syn = _additional_context_for(state, "synthesizer")
+        # Plan D8: past the report budget, every lane is indexed and the
+        # ones left out can be paged in when the synthesizer has tools.
+        from consultants.engine import lane_digest
+        _reports = list(state.get("research") or [])
+        tool_specs, tool_executor = lane_digest.with_pager(
+            _reports, tool_specs, tool_executor)
         msgs = build_synthesizer_messages(
             state["question"], state.get("plan", ""),
-            state.get("research") or [],
+            _reports,
             state.get("critique"),
             self_critic=self_critic,
             additional_context=extra_ctx_syn,
@@ -3630,6 +3654,8 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
             # contributed to this consultation. The block is omitted
             # when the channel is empty / absent.
             coder_artifacts=state.get("coder_artifacts") or [],
+            pager=any((t.get("function") or {}).get("name")
+                      == lane_digest.PAGER_TOOL for t in tool_specs or []),
         )
         msgs = _with_claims_framing(msgs, state)
     # 2026-05-07: serial fallback chain. The synthesizer always tries
