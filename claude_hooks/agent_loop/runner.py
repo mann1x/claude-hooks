@@ -147,6 +147,21 @@ class LoopConfig:
     on_guard: Optional[Callable[[dict], None]] = None
 
 
+#: Plan D13: every message the harness writes into a conversation opens
+#: with this one tag, so a model never takes it for the user's words.
+HARNESS_TAG = "[SYSTEM MESSAGE]"
+
+
+def harness_note(text: str) -> dict:
+    """A user-role message the harness wrote: tagged once, and marked
+    ``_harness`` so the compaction planner never takes it for a typed
+    prompt."""
+    body = text or ""
+    if not body.lstrip().startswith(HARNESS_TAG):
+        body = f"{HARNESS_TAG} {body}"
+    return {"role": "user", "content": body, "_harness": True}
+
+
 def _json_args(tc: dict) -> bool:
     args = (tc.get("function") or {}).get("arguments")
     if isinstance(args, dict):
@@ -337,7 +352,7 @@ def _continue_truncated_answer(final: dict, payload: dict, chat_fn: ChatFn,
                            + capped_thinking.as_discarded_turn_note(note))
         messages = messages + [
             {"role": "assistant", "content": "".join(parts)},
-            {"role": "user", "content": instruction, "_harness": True},
+            harness_note(instruction),
         ]
         cont_payload = dict(payload)
         cont_payload["messages"] = messages
@@ -821,7 +836,7 @@ def _forced_report(payload: dict, history: list, instruction: str,
     payload["think"] = False
     payload["reasoning_effort"] = "none"
     payload["messages"] = list(history) + [
-        {"role": "user", "content": instruction, "_harness": True}]
+        harness_note(instruction)]
     t0 = time.monotonic()
     final = chat_fn(payload)
     _notify_response(config, payload, final)
@@ -955,7 +970,7 @@ def run_loop(
                 last["content"] = f"{last.get('content') or ''}\n\n{text}"
             else:
                 payload["messages"] = list(payload["messages"]) + [
-                    {"role": "user", "content": text, "_harness": True}]
+                    harness_note(text)]
             _emit_guard(config, {"guard": "iteration_cap", "action": "warn",
                                  "iteration": i,
                                  "cap": config.max_iterations})
@@ -1005,7 +1020,7 @@ def run_loop(
                        or "").strip()
             payload["messages"] = list(payload["messages"]) + (
                 [{"role": "assistant", "content": partial}] if partial else []
-            ) + [{"role": "user", "content": reminder, "_harness": True}]
+            ) + [harness_note(reminder)]
             continue
         iter_ms = int((time.monotonic() - t_iter) * 1000)
         _notify_response(config, payload, final)
@@ -1067,7 +1082,7 @@ def run_loop(
                 text += "\n\n" + note
             payload = dict(payload)
             payload["messages"] = history + [
-                {"role": "user", "content": text, "_harness": True}]
+                harness_note(text)]
             continue
         if finish_reason != "tool_calls" or not tool_calls:
             if (force_first and not has_called_tool
@@ -1091,7 +1106,7 @@ def run_loop(
                 payload = dict(payload)
                 payload["messages"] = list(payload["messages"]) + [
                     {"role": "assistant", "content": prior_content},
-                    {"role": "user", "content": retry, "_harness": True},
+                    harness_note(retry),
                 ]
                 continue
             reminder = silent.reask(final, msg, tools_offered=bool(
@@ -1106,7 +1121,7 @@ def run_loop(
                     history.append({"role": "assistant",
                                     "content": msg["content"]})
                 payload["messages"] = history + [
-                    {"role": "user", "content": text, "_harness": True}]
+                    harness_note(text)]
                 continue
             final = _continue_truncated_answer(
                 final, payload, chat_fn, config, on_iter, i)
@@ -1244,11 +1259,11 @@ def run_loop(
                     f"{tool_msgs[-1].get('content') or ''}\n\n{text}")
             else:
                 payload["messages"].append(
-                    {"role": "user", "content": text, "_harness": True})
+                    harness_note(text))
         nudge = nudger.inspect(capped_thinking.thinking_text(msg), i)
         if nudge:
             payload["messages"].append(
-                {"role": "user", "content": nudge, "_harness": True})
+                harness_note(nudge))
             _emit_guard(config, {"guard": "reasoning_repetition",
                                  "action": "nudge", "iteration": i,
                                  **nudger.last.public_dict()})

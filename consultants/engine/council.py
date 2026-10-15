@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from claude_hooks import capped_thinking, token_calib, truncation
+from claude_hooks.agent_loop.runner import harness_note
 from consultants.engine import budget
 from consultants.engine.storage import RoleTurn
 from consultants.engine.recorder import guard_sink
@@ -1788,7 +1789,7 @@ def _single_shot(chat_client, model: str, messages: list[dict],
                             + capped_thinking.as_discarded_turn_note(block))
         convo = convo + [
             {"role": "assistant", "content": "".join(text_parts)},
-            {"role": "user", "content": instruction, "_harness": True},
+            harness_note(instruction),
         ]
         # What capped the turn decides what happens next.
         #
@@ -3202,17 +3203,13 @@ def researcher_node(state: dict, *,
         # results. ``_loop_messages`` is set by run_loop on every
         # return.
         loop_msgs = final.get("_loop_messages") or payload["messages"]
-        summary_msgs = list(loop_msgs) + [{
-            "role": "user",
-            "content": (
-                "Write your findings now as a focused report based on "
-                "the tool outputs above. One bullet per finding with "
-                "`path:line` reference. Do NOT call tools. If the "
-                "tool outputs above are genuinely empty (no matches, "
-                "no readable files), say so explicitly — never return "
-                "empty."
-            ),
-        }]
+        summary_msgs = list(loop_msgs) + [harness_note(
+            "Write your findings now as a focused report based on "
+            "the tool outputs above. One bullet per finding with "
+            "`path:line` reference. Do NOT call tools. If the "
+            "tool outputs above are genuinely empty (no matches, "
+            "no readable files), say so explicitly — never return "
+            "empty.")]
         try:
             # Via _single_shot rather than chat_client.chat directly:
             # this call *is* the lane's report when it fires, so it
@@ -3788,7 +3785,7 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
 #: New tool results between two struggle checks (plan H ``struggle``).
 STRUGGLE_CHECK_EVERY = 6
 STRUGGLE_NUDGE = (
-    "Harness note: your last tool calls read as repeating without new "
+    "[SYSTEM MESSAGE] Your last tool calls read as repeating without new "
     "information. Stop re-running the same searches and reads. Say in one "
     "line what you have established, then either take a different approach "
     "(another file, another search term, the caller instead of the callee) "
@@ -3842,8 +3839,7 @@ def _struggle_watch(state: dict, prepare, *, recorder=None,
         if verdict and verdict.get("confident"):
             log.info("researcher lane %s: decision model reads it as stuck "
                      "(p=%.2f); nudging once", lane_idx, verdict["p"])
-            msgs.append({"role": "user", "content": STRUGGLE_NUDGE,
-                         "_harness": True})
+            msgs.append(harness_note(STRUGGLE_NUDGE))
             payload["messages"] = msgs
             seen["nudged"] = True
         return result
