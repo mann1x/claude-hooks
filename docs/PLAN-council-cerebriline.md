@@ -697,7 +697,7 @@ consultants skill and the council, a precious addition". Cerebriline
 | H3 | **Seams** `consultants/engine/decision.py`, every one a no-op when off or failed: `review` (accept / followup / research on the final answer → `decision_review` state → `ConsultationResult.decision` → `show`), `confidence` (scored p beside the critic's and synthesizer's `CONFIDENCE:` line; the scored value goes on the channel the escalator, low-confidence interrupt and adversary checkpoint read), `struggle` (stuck-vs-progressing every 6 tool results; one harness nudge per lane at the high-stakes floor), `citations` (does the cited code support the claim, after the CitationLinter's existence checks; `[unsupported — …]` annotation) | done |
 | H4 | **Bench** `benchmarks/consultants/decision_bench.py` over `questions/decision/cases.json` (25 council-shaped cases) | done, 2026-10-14 |
 | H5 | The `/consultants` review loop reads `decision` from `show` as one input to accept / follow-up | skill text |
-| H6 | Re-bench on cases mined from real `transcript.db` councils before any default changes; floors tuned per server (TypeSafe's and Ollama's confidence differ in definition) | open |
+| H6 | Re-bench on cases mined from real `transcript.db` councils before any default changes; floors tuned per server (TypeSafe's and Ollama's confidence differ in definition) | done, 2026-10-15 — `mine_decision_cases.py`, report below; the `confidence` mapping per server is open |
 
 Owner decisions (2026-10-14): **Jev cloud for every seam for now** ("I
 don't have sensible code that I don't want to leak out", adjust later);
@@ -718,6 +718,28 @@ tev1's misses all sat under the floor (gated to "unsure"); nimble was
 confidently wrong on a compaction-kept-a-fact case (p = 0.98). The cases
 are hand-written and cleaner than real council output: Jev's 50/50 is a
 ceiling, not an estimate (H6).
+
+**H6 (2026-10-15, 199 cases from 144 real councils, through
+`decision_client.evaluate`;
+`benchmarks/consultants/results/2026-10-15/decision-h6/report.md`):**
+
+| target | accuracy | citations @0.6: caught · false notes | struggle @0.85: false nudges | review AUC |
+|---|---|---|---|---|
+| Jev `jev-latest` | 177/199 | 11/19 · 1/82 | 0/77 | 0.85 |
+| `clef-flash:latest` | 168/199 | 4/19 · 1/82 | 1/77 | 0.56 |
+| `nimble:latest` | 166/199 | 5/19 · 0/82 | 0/77 | 0.74 |
+| `tev1:latest` | 142/199 | 4/19 · 0/82 | 0/77 | 0.67 |
+
+Labels come from the lane's own later calls (struggle), a recorded reading
+of claim and code at the council's commit (citations), and the reviewer's
+own next message (review). Real lanes almost never get stuck (1 of 547
+windows), so struggle is harmless at 0.85 but unproven. Jev ranks answers
+but rates the ones the reviewer accepted at a mean p of 0.46: put on the
+`confidence` channel as-is, it would read sound answers as shaky to the
+escalator and the low-confidence interrupt. Open: a per-server mapping for
+`confidence` (20 review cases are too few to fit one), and more labelled
+review cases from the seam's own `decision` events once it runs in shadow.
+No default changed.
 
 **Exit H:** the seams are inert when off (parity tests); every failure path
 keeps today's behaviour; the bench is recorded; H6 before any default
