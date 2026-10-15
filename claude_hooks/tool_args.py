@@ -120,4 +120,50 @@ def coerce(args: dict, parameters: Optional[dict]) -> Union[dict, str]:
     return out
 
 
-__all__ = ["parse_arguments", "coerce", "MALFORMED_ARRAY_MESSAGE"]
+_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+
+
+def recover_tool_name(name: str, tools: dict) -> Optional[str]:
+    """The offered tool a provider-mangled ``name`` can only mean, or
+    ``None`` (plan D4; Cerebriline ``0ca7a8475``). ``tools`` maps each
+    offered name to its parameter schema. A name already offered is never
+    touched. Three shapes, measured on our transcripts (40 calls answered
+    "unknown tool"):
+
+    marker     ``…<tool_call>read_file``: the bare identifier after the last
+               marker (the fork's shape).
+    delimited  ``read_file(path``, ``read_file:end_line=2230``,
+               ``read_file<tool_call>path``: an offered name followed by a
+               character no identifier holds.
+    glued      ``read_fileend_line``, ``grep_path``, ``grepcase_insensitive``:
+               an offered name followed by one of *its own* parameter names.
+
+    The caller recovers only a call whose arguments parse.
+    """
+    if not name or name in tools:
+        return None
+    if "<tool_call>" in name:
+        tail = name.rsplit("<tool_call>", 1)[1].strip()
+        if tail in tools and _IDENT.match(tail):
+            return tail
+    hits = []
+    for known in tools:
+        if not known or not name.startswith(known) or name == known:
+            continue
+        rest = name[len(known):]
+        if not (rest[0].isalnum() or rest[0] == "_"):
+            hits.append(known)
+            continue
+        params = ((tools.get(known) or {}).get("properties") or {})
+        if rest.lstrip("_") in params:
+            hits.append(known)
+    # Exactly one reading: the longest offered prefix, unless two offered
+    # names of that length both fit (impossible for distinct names).
+    if not hits:
+        return None
+    best = max(hits, key=len)
+    return best if sum(1 for h in hits if len(h) == len(best)) == 1 else None
+
+
+__all__ = ["parse_arguments", "coerce", "recover_tool_name",
+           "MALFORMED_ARRAY_MESSAGE"]

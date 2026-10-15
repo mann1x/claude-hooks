@@ -281,3 +281,53 @@ def test_grep_told_false_stays_case_sensitive(tmp_path):
         "grep", json.dumps({"pattern": "needle", "case_insensitive": "true"}),
         str(tmp_path))
     assert "a.txt" in out
+
+
+# --- a name the provider mangled (D4, measured in our transcripts) ------- #
+
+TOOLS = {s["function"]["name"]: s["function"]["parameters"]
+         for s in caliber_tools.openai_tool_specs()}
+
+
+def test_measured_mangled_names_are_recovered():
+    seen = {  # verbatim from researcher tool_call rows in transcript.db
+        "read_file(path": "read_file", "read_file(end_line": "read_file",
+        "read_fileend_line": "read_file", "read_file:end_line=2230": "read_file",
+        "read_file:end_line==3875": "read_file", "read_filepath": "read_file",
+        "read_file<tool_call>path": "read_file", "read_file_path": "read_file",
+        "read_file<tool_call>end_line": "read_file", "read_file'": "read_file",
+        "list_files(path": "list_files", "grep_path": "grep",
+        "grep_case_insensitive": "grep", "grepcase_insensitive": "grep",
+        "glob_pattern_check = glob  # placeholder</think><tool_call>read_file":
+            "read_file",
+    }
+    for sent, want in seen.items():
+        assert tool_args.recover_tool_name(sent, TOOLS) == want, sent
+
+
+def test_names_with_no_single_reading_are_left_alone():
+    for sent in ("bash", "exec", "read_files", "grepper", "read_file",
+                 "prose<tool_call>read_text", "please_read_file_now"):
+        assert tool_args.recover_tool_name(sent, TOOLS) is None, sent
+
+
+def test_the_loop_renames_a_mangled_call_only_when_its_arguments_parse():
+    def turn(name, args):
+        return {"choices": [{"message": {"role": "assistant", "content": "",
+                "tool_calls": [{"id": "c", "type": "function", "function": {
+                    "name": name, "arguments": args}}]},
+                "finish_reason": "tool_calls"}]}
+    script = [turn("read_file(path", '{"path": "a.py"}'),
+              turn("grep_path", '{"pattern": "x"'), _say("Answer.")]
+    ran, events = [], []
+    runner.run_loop(
+        {"model": "m", "messages": [{"role": "user", "content": "q"}]}, "/tmp",
+        config=runner.LoopConfig(force_first_tool_call=False, force_answer_after=0,
+                                 on_guard=events.append),
+        tool_specs=caliber_tools.openai_tool_specs(),
+        chat_fn=lambda p: script.pop(0),
+        tool_executor=lambda n, a, c: ran.append(n) or "ok")
+    # The first is renamed; the second's arguments do not parse, so it is
+    # not (the executor answers it as unknown).
+    assert ran == ["read_file", "grep_path"]
+    assert [e["tool"] for e in events if e.get("guard") == "tool_name"] == ["read_file"]

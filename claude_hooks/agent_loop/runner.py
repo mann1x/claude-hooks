@@ -742,6 +742,35 @@ def _reasoning_loop_note(msg: dict, payload: dict, chat_fn: "ChatFn",
         capped_thinking.as_thinking_block(note))
 
 
+def _recover_tool_names(tool_calls: list, payload: dict, config: "LoopConfig",
+                        iteration: int) -> list:
+    """Plan D4: a call whose name the provider mangled (an argument glued
+    on, the turn's text in front) is renamed to the offered tool it can
+    only mean, when its arguments parse; anything else is left for the
+    executor to answer as unknown."""
+    from claude_hooks import tool_args
+    offered = {(t.get("function") or {}).get("name"):
+               (t.get("function") or {}).get("parameters") or {}
+               for t in payload.get("tools") or []}
+    if not offered:
+        return tool_calls
+    out = []
+    for tc in tool_calls:
+        fn = tc.get("function") or {}
+        name = fn.get("name") or ""
+        fixed = (tool_args.recover_tool_name(name, offered)
+                 if name not in offered and _json_args(tc) else None)
+        if fixed:
+            log.info("tool name %r recovered as %r on iter %d",
+                     name[:80], fixed, iteration)
+            _emit_guard(config, {"guard": "tool_name", "action": "recover",
+                                 "iteration": iteration,
+                                 "sent": name[:200], "tool": fixed})
+            tc = {**tc, "function": {**fn, "name": fixed}}
+        out.append(tc)
+    return out
+
+
 def _unparsable_fault(exc: BaseException) -> Optional[BaseException]:
     """The ``tool_call_unparsable`` fault in ``exc`` or what it wraps."""
     seen = 0
@@ -1139,6 +1168,7 @@ def run_loop(
             break
         has_called_tool = True
         silent.reset()
+        tool_calls = _recover_tool_names(tool_calls, payload, config, i)
 
         # Collapse identical tool_calls within one assistant turn, then
         # cap. Preserves distinct calls; suppresses gemma-style bursts.
