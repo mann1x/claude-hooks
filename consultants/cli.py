@@ -1290,6 +1290,12 @@ def cmd_config_set_guards(args, base: str) -> int:
     return _emit_config(cfg, args)
 
 
+def cmd_config_set_xauto_retry(args, base: str) -> int:
+    cfg = cc.set_xauto_retry(enabled=args.state == "on",
+                             **_resolve_active_scope(args))
+    return _emit_config(cfg, args)
+
+
 def cmd_config_set_decision(args, base: str) -> int:
     enabled = None
     if args.enabled is not None:
@@ -2878,6 +2884,16 @@ def build_parser() -> argparse.ArgumentParser:
     cgd.add_argument("--role", choices=cc.GUARD_ROLES)
     _add_scope_args(cgd)
     cgd.set_defaults(fn=cmd_config_set_guards)
+
+    cxr = cfg_sub.add_parser(
+        "set-xauto-retry",
+        help="Plan D9: whether an xauto run reruns, once and before the "
+             "critic, the first-round lanes that failed on infrastructure "
+             "(default on). Other tiers never do; `retry-lanes` is the "
+             "after-the-run verb.")
+    cxr.add_argument("state", choices=["on", "off"])
+    _add_scope_args(cxr)
+    cxr.set_defaults(fn=cmd_config_set_xauto_retry)
 
     cde = cfg_sub.add_parser(
         "set-decision",

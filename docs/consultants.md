@@ -679,8 +679,24 @@ record carries `retry_lanes`).
 Limits: only first-round lanes (a critic re-route's lane was asked the
 critic's gaps, which are not stored); the groups and models are rebuilt
 from today's `FANOUT_MAX_LANES` and config, so a change between the run
-and the retry moves lanes — the response lists exactly what it runs. The
-xauto automatic retry before synthesis is not built.
+and the retry moves lanes — the response lists exactly what it runs.
+
+**xauto does it on its own, once.** On an xauto run
+(`[runtime] xauto_retry_infra_lanes`, default on;
+`claude-consultants config set-xauto-retry on|off`) a `lane_retry` node
+sits between the first research round and the critic. It reads this
+session's D7 rows (the recorder commits each), so it picks lanes by the
+same rule — but only `infra`: a missing model or an overflow would fail
+the same way again inside the same run. The lanes are rebuilt by the
+same `retry_specs` and sent with the same `Send` as the child above
+(`graph._retry_lane_send`), come back through the node, and the run goes
+on to the critic with their reports beside the tombstones. Once per run:
+a lane that fails again stays failed. A retry is not a research round —
+the node takes back the rounds the retried lanes add, so the critic's
+re-route budget is unchanged. Not done when the run is wrapping up,
+cancelled or past its deadline, and never on another tier (the node is
+not wired). Each retry is a `lane_retry` row in `runtime_events`. Not
+with `tool_executor` lanes, where the researcher routes itself.
 
 **Routers must not loop on a stopped run.** A skipped node writes
 nothing, so a router that reads its last verdict (a critic's "needs more

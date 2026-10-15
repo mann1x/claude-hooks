@@ -407,9 +407,14 @@ class RuntimeConfig:
       dynamic interrupt when the synthesizer's self-rating dips
       below ``confidence_target``. Off by default because the same
       signal normally drives xauto escalation, not a human pause.
+    - ``xauto_retry_infra_lanes`` (default ``True``) — plan D9: an xauto
+      run reruns, once and before the critic, the first-round researcher
+      lanes that failed on infrastructure (``failure_class = infra``), as
+      ``retry-lanes`` would after the run. Other tiers never do.
     """
     review_before_synthesis: bool = False
     interrupt_on_low_confidence: bool = False
+    xauto_retry_infra_lanes: bool = True
 
 
 @dataclass
@@ -1322,6 +1327,9 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
         if "interrupt_on_low_confidence" in rt:
             base.runtime.interrupt_on_low_confidence = \
                 bool(rt["interrupt_on_low_confidence"])
+        if "xauto_retry_infra_lanes" in rt:
+            base.runtime.xauto_retry_infra_lanes = \
+                bool(rt["xauto_retry_infra_lanes"])
 
     # store (M8)
     tl = raw.get("tools") or {}
@@ -1769,6 +1777,10 @@ def _render(cfg: ConsultantsConfig, *,
              "self-rates below confidence_target")
     L.append("interrupt_on_low_confidence = "
              f"{'true' if cfg.runtime.interrupt_on_low_confidence else 'false'}")
+    L.append("# xauto_retry_infra_lanes: xauto reruns lanes that failed on "
+             "infrastructure, once, before the critic")
+    L.append("xauto_retry_infra_lanes = "
+             f"{'true' if cfg.runtime.xauto_retry_infra_lanes else 'false'}")
     L.append("")
     L.append("[tools]")
     L.append("# The council's tool surface (M-A). Every tool is dispatched")
@@ -2374,6 +2386,14 @@ def set_guards(*, profile: Optional[str] = None, role: Optional[str] = None,
         cfg.guards.roles.pop(role, None)
     else:
         cfg.guards.roles[role] = checked
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_xauto_retry(*, enabled: bool, scope: str = "user",
+                    cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set ``[runtime] xauto_retry_infra_lanes`` (plan D9)."""
+    cfg = _load_for_edit(scope, cwd)
+    cfg.runtime.xauto_retry_infra_lanes = bool(enabled)
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 

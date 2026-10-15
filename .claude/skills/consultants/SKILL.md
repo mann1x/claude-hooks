@@ -848,6 +848,10 @@ and **More…** opens the next batch (ending with **Done**):
     nudged. Per run: `ask` / `follow-up --guards strict`. Not the same
     knob as `adversary_strictness` (that tunes the critic's judgement,
     not lane behaviour). The loop guards are always on in both profiles.
+15. **xauto lane retry** — `claude-consultants config set-xauto-retry
+    on|off` (default on). An xauto run reruns, once and before the
+    critic, the first-round lanes that failed on infrastructure. Other
+    tiers never do; after any run, `retry-lanes <sid>` does it by hand.
 
 Loop back to step 1 after each successful change; exit on **Done**.
 

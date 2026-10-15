@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import operator
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
@@ -120,6 +121,9 @@ class CouncilState(TypedDict, total=False):
     # Plan H: the decision model's accept / followup / research
     # recommendation on the final answer (the ``review`` seam).
     decision_review: Optional[dict]
+    # Plan D9: the xauto automatic lane retry — 0 not yet decided,
+    # 1 retrying, 2 done. Written only by the ``lane_retry`` node.
+    lane_retry: int
     # Send-injected, per-lane fields. Set on a researcher invocation
     # spawned by the fan-out conditional edge after planner; absent
     # on the single-researcher path used by critic re-routes.
@@ -374,6 +378,10 @@ class GraphDeps:
     # unread. ``None`` — every caller that builds a graph without a
     # session — leaves every node byte-identical to pre-gate.
     run_control: Optional[Any] = None
+    # Plan D9: rerun first-round lanes that failed on infrastructure,
+    # once, before the critic. The runner sets it for xauto runs only
+    # (``[runtime] xauto_retry_infra_lanes``); off, the node is not wired.
+    xauto_lane_retry: bool = False
     # Called with (kind, payload) for gate events (``node_cancelled`` /
     # ``awaiting_resume`` / ``resumed``). The runner passes a recorder
     # bridge; ``None`` means the gate still works, silently.
@@ -435,6 +443,99 @@ def _wrap_up_kw(deps: GraphDeps) -> dict:
 def _wrapping_up(deps: GraphDeps) -> bool:
     rc = getattr(deps, "run_control", None)
     return rc is not None and bool(rc.wrapping_up)
+
+
+def _retry_lane_send(state: dict, spec: dict) -> Any:
+    """One researcher lane rerun from a ``retry_lanes.retry_specs`` spec
+    (plan D9): the ``retry-lanes`` child and the xauto automatic retry
+    build it the same way."""
+    from langgraph.types import Send
+    return Send("researcher", {
+        "question": state.get("question"),
+        "plan": state.get("plan", ""),
+        "cwd": state.get("cwd"),
+        # A Send lane sees only the keys in its own dict (see the
+        # planner fan-out in build_council_graph).
+        "extra_roots": list(state.get("extra_roots") or []),
+        "runtime_control": dict(state.get("runtime_control") or {}),
+        "effort": state.get("effort"),
+        "models": state.get("models", {}),
+        "topology": state.get("topology"),
+        "plan_item": spec.get("plan_item") or state.get("plan", ""),
+        "lane_idx": spec.get("lane_idx"),
+        "model_override": spec.get("model") or None,
+        "research": [],
+        "turns": [],
+        "research_rounds_used": 0,
+        "total_prompt_tokens": 0,
+        "total_completion_tokens": 0,
+    })
+
+
+#: Plan D9: the failure classes an xauto run retries on its own. Narrower
+#: than ``retry_lanes.RETRYABLE_CLASSES``: a missing model or an overflow
+#: fails the same way again inside the same run.
+AUTO_RETRY_CLASSES = frozenset({"infra"})
+
+
+def _wrap_lane_retry(deps: GraphDeps, *, next_node: str):
+    """Plan D9: the xauto automatic retry. A pass-through barrier after the
+    first research round; when lanes failed on infrastructure it reruns
+    them once, as ``retry-lanes`` would after the run, and they come back
+    through it before the run goes on to ``next_node``. Lanes are chosen
+    from this session's D7 ``node_exit`` rows (the recorder commits each),
+    so the rule is ``retry-lanes``' own. Returns ``(node, router)``."""
+    from consultants.engine import retry_lanes as rl
+    from consultants.engine.control import runtime_deadline_passed
+
+    def _specs(state: dict) -> list[dict]:
+        db = getattr(deps.recorder, "db_path", None)
+        if not db:
+            return []
+        lanes = rl.failed_lanes(rl.lane_stops(Path(db)), AUTO_RETRY_CLASSES)
+        if not lanes:
+            return []
+        models = [deps.models.get("researcher", "")] + list(
+            deps.extra_models_by_role.get("researcher") or [])
+        return rl.retry_specs(lanes, plan=state.get("plan", ""),
+                              plan_items=state.get("plan_items"),
+                              models_per_lane=models)
+
+    def _node(state: dict) -> dict:
+        phase = int(state.get("lane_retry") or 0)
+        if phase == 1:
+            return {"lane_retry": 2}
+        if phase:
+            return {}
+        if _stopping(deps) or runtime_deadline_passed(state):
+            return {"lane_retry": 2}
+        specs = _specs(state)
+        if not specs:
+            return {"lane_retry": 2}
+        log.info("xauto lane retry: rerunning lanes %s",
+                 [s["lane_idx"] for s in specs])
+        if deps.recorder is not None:
+            try:
+                deps.recorder.record_event(
+                    kind="lane_retry", role="xauto_lane_retry", round=1,
+                    lane_idx=None, payload={"lanes": [
+                        {"lane_idx": s["lane_idx"], "model": s["model"]}
+                        for s in specs], "classes": sorted(AUTO_RETRY_CLASSES)})
+            except Exception:  # pragma: no cover
+                log.exception("xauto lane retry: recorder raised; ignored")
+        # Every lane adds 1 to the additive round counter the critic budgets
+        # re-routes against; the retried lanes add theirs again, so take
+        # them back here: a retry is not a research round.
+        return {"lane_retry": 1, "research_rounds_used": -len(specs)}
+
+    def _router(state: dict) -> Any:
+        if int(state.get("lane_retry") or 0) == 1:
+            specs = _specs(state)
+            if specs:
+                return [_retry_lane_send(state, s) for s in specs]
+        return next_node
+
+    return _node, _router
 
 
 def _stopping(deps: GraphDeps) -> bool:
@@ -1178,6 +1279,12 @@ def build_council_graph(deps: GraphDeps,
     # 3. M6: The researcher -> {next} edge when tool_executor is
     #    enabled (replaced by the route_after_researcher conditional
     #    below).
+    # Plan D9: the xauto automatic lane retry sits on the researcher's way
+    # out. Not with tool_executor lanes: there the researcher alternates
+    # PLAN / REPORT through its own router.
+    lane_retry_on = (bool(getattr(deps, "xauto_lane_retry", False))
+                     and "researcher" in enabled and not tool_executor_enabled)
+    lane_retry_next: Any = None
     for src, dst in plan_topology(enabled):
         if (fanout_router is not None
                 and src == "planner" and dst == "researcher"):
@@ -1193,6 +1300,10 @@ def build_council_graph(deps: GraphDeps,
         if dst == "synthesizer" and coder_enabled:
             dst = synthesizer_target
         dst_node = END if dst == "END" else dst
+        if lane_retry_on and src == "researcher":
+            lane_retry_next = dst_node
+            sg.add_edge("researcher", "lane_retry")
+            continue
         sg.add_edge(src_node, dst_node)
 
     if fanout_router is not None:
@@ -1226,7 +1337,11 @@ def build_council_graph(deps: GraphDeps,
         # Unconditional edge from the predecessor barriers any
         # upstream Send fan-out (researcher).
         pred_node = START if critic_predecessor == "START" else critic_predecessor
-        sg.add_edge(pred_node, "research_barrier")
+        if lane_retry_on and pred_node == "researcher":
+            lane_retry_next = "research_barrier"
+            sg.add_edge("researcher", "lane_retry")
+        else:
+            sg.add_edge(pred_node, "research_barrier")
 
         # Conditional fan-out from the single-invocation barrier
         # node fires exactly once → exactly C critic Sends.
@@ -1545,6 +1660,12 @@ def build_council_graph(deps: GraphDeps,
             ["researcher"],
         )
 
+    if lane_retry_on and lane_retry_next is not None:
+        _lr_node, _lr_router = _wrap_lane_retry(deps, next_node=lane_retry_next)
+        sg.add_node("lane_retry", _lr_node)
+        sg.add_conditional_edges("lane_retry", _lr_router,
+                                 ["researcher", lane_retry_next])
+
     # M7: xauto escalator wiring.
     #
     # Inserts a pass-through node BEFORE the critic's conditional
@@ -1770,7 +1891,6 @@ def build_follow_up_graph(deps: GraphDeps,
     """
     try:
         from langgraph.graph import StateGraph, START, END
-        from langgraph.types import Send
     except ImportError as e:  # pragma: no cover
         raise RuntimeError(
             "langgraph is not installed. The /consultants engine "
@@ -1817,26 +1937,7 @@ def build_follow_up_graph(deps: GraphDeps,
         lanes = [dict(spec) for spec in retry_lanes]
 
         def _fanout_retried_lanes(state: dict) -> Any:
-            return [Send("researcher", {
-                "question": state.get("question"),
-                "plan": state.get("plan", ""),
-                "cwd": state.get("cwd"),
-                # A Send lane sees only the keys in its own dict (see the
-                # planner fan-out in build_council_graph).
-                "extra_roots": list(state.get("extra_roots") or []),
-                "runtime_control": dict(state.get("runtime_control") or {}),
-                "effort": state.get("effort"),
-                "models": state.get("models", {}),
-                "topology": state.get("topology"),
-                "plan_item": spec.get("plan_item") or state.get("plan", ""),
-                "lane_idx": spec.get("lane_idx"),
-                "model_override": spec.get("model") or None,
-                "research": [],
-                "turns": [],
-                "research_rounds_used": 0,
-                "total_prompt_tokens": 0,
-                "total_completion_tokens": 0,
-            }) for spec in lanes]
+            return [_retry_lane_send(state, spec) for spec in lanes]
         sg.add_conditional_edges(START, _fanout_retried_lanes, ["researcher"])
     else:
         sg.add_edge(START, "researcher")

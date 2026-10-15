@@ -330,6 +330,10 @@ def make_runner(*, ollama_base_url: str):
             synthesizer_fallback_models=synthesizer_fallback,
             store=consultants_store,
             sid=state.sid,
+            # Plan D9: xauto reruns its infra-failed first-round lanes
+            # once, before the critic. Never wired on another tier.
+            xauto_lane_retry=(cfg.effort == "xauto" and bool(getattr(
+                cfg.runtime, "xauto_retry_infra_lanes", True))),
             # M10: coder sandbox caps. Consulted only when ``coder``
             # is in ``enabled`` (otherwise the coder node is never
             # registered, so these values are irrelevant).

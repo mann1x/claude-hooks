@@ -520,6 +520,10 @@ class CouncilStateV2(TypedDict, total=False):
     # Plan H: the decision model's recommendation on the final answer.
     decision_review: Optional[dict]
 
+    # Plan D9: the xauto automatic lane retry (0 / 1 retrying / 2 done),
+    # written only by the ``lane_retry`` node.
+    lane_retry: int
+
     # Synthesizer's work-in-progress draft. Overwritten on each
     # iteration. The HITL interrupt-before-synthesis flow shows this
     # to the user.
