@@ -94,7 +94,8 @@ class TestTools:
         big = "x" * (200 * 1024)  # 200 KB
         (tmp_path / "big.txt").write_text(big)
         out = tools.read_file({"path": "big.txt"}, str(tmp_path))
-        assert "truncated" in out
+        # Plan D5: one line past the cap is shown as its head, and says so.
+        assert "line 1 is longer than ~48 KB" in out.splitlines()[0]
 
     def test_glob_match(self, tmp_path: Path):
         (tmp_path / "a.py").write_text("")

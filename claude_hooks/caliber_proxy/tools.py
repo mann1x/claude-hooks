@@ -29,6 +29,10 @@ _LIST_MAX_ENTRIES = 500
 _GLOB_MAX_ENTRIES = 500
 _GREP_MAX_MATCHES = 200
 _GREP_MAX_FILE_BYTES = 2 * 1024 * 1024
+#: Plan D5 (Cerebriline ``84ac149b1``): context up to 50 lines either side,
+#: the whole answer stopped at 48,000 characters with a note saying so.
+_GREP_MAX_CONTEXT = 50
+_GREP_MAX_CHARS = 48_000
 
 
 # -- Path resolution --------------------------------------------------- #
@@ -217,22 +221,36 @@ def read_file(args: dict, cwd: str,
     if e < s:
         return f"error: end_line {e} is before start_line {s}"
 
-    selected = lines[s - 1:e]
-    # Enforce byte cap — the model doesn't need 50KB per chunk.
-    body = "".join(selected)
-    truncated = False
-    if len(body.encode("utf-8", errors="replace")) > _READ_MAX_BYTES:
-        body = body.encode("utf-8", errors="replace")[:_READ_MAX_BYTES].decode(
-            "utf-8", errors="replace"
-        )
-        truncated = True
+    # Plan D5: the cap cuts on whole lines, and the header names the lines
+    # actually shown. It used to cut mid-line and keep the requested range
+    # in the header, so a lane could cite ``path:e`` for lines it never saw.
+    shown: list[str] = []
+    used = 0
+    for line in lines[s - 1:e]:
+        size = len(line.encode("utf-8", errors="replace"))
+        if used + size > _READ_MAX_BYTES:
+            break
+        shown.append(line.rstrip("\r\n"))
+        used += size
+    cut_line = ""
+    if not shown:
+        # One line bigger than the cap: its head, marked as a head.
+        head = lines[s - 1].encode("utf-8", errors="replace")[:_READ_MAX_BYTES]
+        shown = [head.decode("utf-8", errors="ignore").rstrip("\r\n")]
+        cut_line = (f"  [line {s} is longer than ~48 KB; only its first "
+                    f"{len(shown[0]):,} characters are shown]")
+    last = s + len(shown) - 1
 
-    header = f"{_render_path(abs_path, cwd)}:{s}-{e}  (file has {total} lines)"
-    if truncated:
-        header += "  [output truncated to ~48 KB — use a smaller line range for more]"
+    header = f"{_render_path(abs_path, cwd)}:{s}-{last}  (file has {total} lines)"
+    if cut_line:
+        header += cut_line
+    if last < e:
+        header += (f"  [output stopped at line {last} of the requested "
+                   f"{s}-{e} (~48 KB cap); lines {last + 1}-{e} are not shown "
+                   f"— next: start_line={last + 1}]")
     # Number each line so the model can cite path:line confidently.
     numbered = "\n".join(
-        f"{s + i:>6}: {line.rstrip()}" for i, line in enumerate(body.splitlines())
+        f"{s + i:>6}: {line.rstrip()}" for i, line in enumerate(shown)
     )
     return f"{header}\n{numbered}"
 
@@ -305,6 +323,11 @@ def grep(args: dict, cwd: str,
     pattern = str(args.get("pattern") or "")
     path = str(args.get("path") or ".")
     case_insensitive = bool(args.get("case_insensitive", False))
+    try:
+        context = int(args.get("context_lines") or 0)
+    except (TypeError, ValueError):
+        return "error: context_lines must be a whole number from 0 to 50"
+    context = max(0, min(_GREP_MAX_CONTEXT, context))
     if not pattern:
         return "error: pattern is required"
     try:
@@ -318,9 +341,21 @@ def grep(args: dict, cwd: str,
         return f"error: invalid regex: {e}"
 
     matches: list[str] = []
+    hits = 0
+    chars = 0
+    stopped = False
+
+    def _emit(text: str) -> bool:
+        nonlocal chars, stopped
+        if chars + len(text) + 1 > _GREP_MAX_CHARS:
+            stopped = True
+            return False
+        matches.append(text)
+        chars += len(text) + 1
+        return True
 
     def _match_file(abs_file: str) -> None:
-        nonlocal matches
+        nonlocal hits
         try:
             sz = os.path.getsize(abs_file)
         except OSError:
@@ -329,17 +364,39 @@ def grep(args: dict, cwd: str,
             return
         try:
             with open(abs_file, "r", encoding="utf-8", errors="replace") as f:
-                for lineno, line in enumerate(f, 1):
-                    if rx.search(line):
-                        # Render relative to primary cwd when the file
-                        # lives there; otherwise absolute so the model
-                        # gets an unambiguous handle for non-cwd roots.
-                        rel = _render_path(abs_file, cwd)
-                        matches.append(f"{rel}:{lineno}: {line.rstrip()[:200]}")
-                        if len(matches) >= _GREP_MAX_MATCHES:
-                            return
+                lines = f.read().splitlines()
         except OSError:
             return
+        # Render relative to primary cwd when the file lives there;
+        # otherwise absolute so the model gets an unambiguous handle for
+        # non-cwd roots. Context lines use ``path-N-`` (grep's own
+        # spelling) so they never read as matches, and a gap between
+        # groups is ``--``.
+        rel = None
+        shown_to = 0
+        for idx, line in enumerate(lines):
+            if not rx.search(line):
+                continue
+            rel = rel or _render_path(abs_file, cwd)
+            lo = max(shown_to, idx - context)
+            if context and matches and shown_to and lo > shown_to:
+                if not _emit("--"):
+                    return
+            for c in range(lo, min(len(lines), idx + context + 1)):
+                if c < shown_to:
+                    continue
+                if c == idx or rx.search(lines[c]):
+                    sep, n_hit = ":", 1
+                else:
+                    sep, n_hit = "-", 0
+                if c > idx and n_hit:
+                    break  # the next match opens its own window
+                if not _emit(f"{rel}{sep}{c + 1}{sep} {lines[c].rstrip()[:200]}"):
+                    return
+                shown_to = c + 1
+            hits += 1
+            if hits >= _GREP_MAX_MATCHES:
+                return
 
     if os.path.isfile(abs_root):
         _match_file(abs_root)
@@ -351,16 +408,20 @@ def grep(args: dict, cwd: str,
                         "build", ".cache", "target"}]
             for name in files:
                 _match_file(os.path.join(root, name))
-                if len(matches) >= _GREP_MAX_MATCHES:
+                if hits >= _GREP_MAX_MATCHES or stopped:
                     break
-            if len(matches) >= _GREP_MAX_MATCHES:
-                matches.append(f"... (truncated at {_GREP_MAX_MATCHES})")
+            if hits >= _GREP_MAX_MATCHES or stopped:
                 break
     else:
         return f"error: not a file or directory: {path}"
 
     if not matches:
         return f"(no matches for /{pattern}/ in {path})"
+    if stopped:
+        matches.append(f"... (output stopped at {_GREP_MAX_CHARS} characters "
+                       "— narrow the pattern, or pass a smaller path)")
+    elif hits >= _GREP_MAX_MATCHES:
+        matches.append(f"... (truncated at {_GREP_MAX_MATCHES})")
     return "\n".join(matches)
 
 
@@ -722,8 +783,10 @@ def openai_tool_specs() -> list[dict[str, Any]]:
                 "name": "grep",
                 "description": (
                     "Search for a regex pattern across files under a path. "
-                    "Returns matching lines prefixed with `path:line:`. "
-                    "Capped at 200 matches."
+                    "Returns matching lines prefixed with `path:line:`; "
+                    "with context_lines, the lines around them as "
+                    "`path-line-`. Capped at 200 matches and 48,000 "
+                    "characters."
                 ),
                 "parameters": {
                     "type": "object",
@@ -738,6 +801,11 @@ def openai_tool_specs() -> list[dict[str, Any]]:
                             "Defaults to project root.",
                         },
                         "case_insensitive": {"type": "boolean"},
+                        "context_lines": {
+                            "type": "integer",
+                            "description": "Lines to show either side of "
+                            "each match, 0 to 50. Default 0.",
+                        },
                     },
                     "required": ["pattern"],
                 },
