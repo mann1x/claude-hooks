@@ -154,6 +154,14 @@ def _emit_tool_call(role: str, *, round: int, lane_idx: Optional[int],
 # Node
 # ============================================================== #
 
+#: Plan D12: tools tool_executor lanes never called — 0 of 215 calls over
+#: 377 tool-bearing requests in 104 recorded councils (2026-10-15,
+#: benchmarks/consultants/tool_use_by_role.py). A lane
+#: runs one planned call; it neither surveys nor recalls. Dropping them
+#: saves their schema on every request. Re-measure before adding one back.
+UNUSED_TOOLS = frozenset({"survey_project", "recall_memory"})
+
+
 def tool_executor_node(state: dict,
                        *,
                        chat_client,
@@ -262,6 +270,11 @@ def tool_executor_node(state: dict,
     msgs = build_tool_executor_messages(
         item, grounding_msgs, question=state.get("question") or "",
     )
+    # Plan D12: tools this role never calls are not offered (measured).
+    if tool_specs is not None:
+        tool_specs = [t for t in tool_specs
+                      if (t.get("function") or {}).get("name")
+                      not in UNUSED_TOOLS]
     # The tool-plan prompt the researcher wrote against enumerates six
     # tools in prose (``TOOL_PLAN_*``), so a provider-supplied extra is
     # in the payload but absent from anything the executor was told
