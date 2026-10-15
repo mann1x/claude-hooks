@@ -474,8 +474,46 @@ def cmd_show(args, base: str) -> int:
     samplers = _session_samplers(sdir / storage.TRANSCRIPT_DB_FILENAME)
     if samplers:
         out["samplers"] = samplers
+    lanes = _session_lane_stops(sdir / storage.TRANSCRIPT_DB_FILENAME)
+    if lanes:
+        out["lanes"] = lanes
     print(json.dumps(out, indent=2))
     return 0
+
+
+def _session_lane_stops(db_path: Path) -> list[dict]:
+    """How each node ended (plan D7): ``stop_reason`` and
+    ``failure_class`` from the ``node_exit`` rows that carry them, in the
+    order they finished. Empty for a session recorded before D7."""
+    if not db_path.exists():
+        return []
+    import sqlite3
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                "SELECT role, round, lane_idx, payload FROM runtime_events "
+                "WHERE kind = 'node_exit' ORDER BY ts").fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return []
+    out = []
+    for role, rnd, lane, payload in rows:
+        try:
+            body = json.loads(payload or "{}")
+        except ValueError:
+            continue
+        if not body.get("stop_reason"):
+            continue
+        row = {"role": role, "round": rnd, "lane_idx": lane,
+               "stop_reason": body["stop_reason"]}
+        if body.get("failure_class"):
+            row["failure_class"] = body["failure_class"]
+        if body.get("error"):
+            row["error"] = str(body["error"])[:300]
+        out.append(row)
+    return out
 
 
 def _session_samplers(db_path: Path) -> list[dict]:

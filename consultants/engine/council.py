@@ -75,16 +75,37 @@ def _emit_finished(role: str, *,
                    lane_idx: Optional[int] = None,
                    duration_ms: int = 0,
                    ok: bool = True,
-                   error: Optional[str] = None) -> None:
+                   error: Optional[str] = None,
+                   stop_reason: Optional[str] = None,
+                   failure_class: Optional[str] = None) -> None:
     """Emit a :class:`NodeFinished` event. Never raises."""
     try:
         from consultants.engine.events import NodeFinished, emit
         emit(NodeFinished(role=role, round=round,
                            lane_idx=lane_idx,
                            duration_ms=duration_ms,
-                           ok=ok, error=error))
+                           ok=ok, error=error,
+                           stop_reason=stop_reason,
+                           failure_class=failure_class))
     except Exception:  # pragma: no cover
         log.exception("emit NodeFinished raised; ignored")
+
+
+def _record_failed_exit(recorder, role: str, round: int,
+                        lane_idx: Optional[int], duration_ms: int,
+                        exc: BaseException, failure_class: str) -> None:
+    """Plan D7: a failed node's ``node_exit`` row, with its class, so a
+    tombstoned lane is visible in ``transcript.db`` and ``show``. Never
+    raises."""
+    if recorder is None:
+        return
+    try:
+        recorder.record_node(
+            role=role, kind="node_exit", round=round, lane_idx=lane_idx,
+            duration_ms=duration_ms, error=f"{type(exc).__name__}: {exc}",
+            stop_reason=failure_class, failure_class=failure_class)
+    except Exception:  # pragma: no cover
+        log.exception("recorder.record_node raised; ignored")
 
 
 # ---------- M0: self-confidence extraction ------------------------ #
@@ -2822,11 +2843,16 @@ def researcher_node(state: dict, *,
         except Exception as e:
             log.exception("researcher_node (M6 mode) failed: %s", e)
             dt_ms = int((time.monotonic() - t0) * 1000)
+            from consultants.engine.events import failure_class_of
+            failed_as = failure_class_of(e)
             _emit_finished(
                 "researcher", round=this_round, lane_idx=lane_idx,
                 duration_ms=dt_ms, ok=False,
                 error=f"{type(e).__name__}: {e}",
+                stop_reason=failed_as, failure_class=failed_as,
             )
+            _record_failed_exit(recorder, "researcher", this_round,
+                                lane_idx, dt_ms, e, failed_as)
             tomb_text = f"(researcher lane failed: {e})"
             # #103: the legacy ``awaiting_tool_results=False`` key
             # is dropped — the router now derives the dispatch
@@ -2841,6 +2867,7 @@ def researcher_node(state: dict, *,
                     content=tomb_text,
                     prompt_tokens=0, completion_tokens=0,
                     duration_seconds=0.0,
+                    stop_reason=failed_as, failure_class=failed_as,
                 )],
             }
         dt = time.monotonic() - t0
@@ -3119,11 +3146,16 @@ def researcher_node(state: dict, *,
         final = loop_runner(payload, cwd, **loop_kwargs)
     except Exception as e:
         log.exception("researcher_node failed: %s", e)
+        from consultants.engine.events import failure_class_of
+        failed_as = failure_class_of(e)
         _emit_finished(
             "researcher", round=this_round, lane_idx=lane_idx,
             duration_ms=int((time.monotonic() - t0) * 1000),
             ok=False, error=f"{type(e).__name__}: {e}",
+            stop_reason=failed_as, failure_class=failed_as,
         )
+        _record_failed_exit(recorder, "researcher", this_round, lane_idx,
+                            int((time.monotonic() - t0) * 1000), e, failed_as)
         # Tombstone return so the additive reducers record the
         # failure visibly. Without this, a crashed lane silently
         # contributes nothing — the synthesizer never sees the gap
@@ -3139,6 +3171,7 @@ def researcher_node(state: dict, *,
                 role="researcher", round=this_round, content=err_text,
                 prompt_tokens=0, completion_tokens=0,
                 duration_seconds=0.0,
+                stop_reason=failed_as, failure_class=failed_as,
             )],
         }
     dt = time.monotonic() - t0
@@ -3231,17 +3264,24 @@ def researcher_node(state: dict, *,
     # ``research_rounds_used`` and ``total_*_tokens`` similarly use
     # additive reducers so concurrent fan-out lanes' counts merge.
     # ``turns`` likewise.
+    # Plan D7: how the lane's loop ended rides on its turn, its node_exit
+    # row and its NodeFinished event.
+    from consultants.engine.events import loop_stop
+    stop_reason, failure_class = loop_stop(final)
+    turn.stop_reason, turn.failure_class = stop_reason, failure_class
     if recorder is not None:
         try:
             recorder.record_node(
                 role="researcher", kind="node_exit",
                 round=this_round, lane_idx=lane_idx,
                 duration_ms=int(dt * 1000),
+                stop_reason=stop_reason, failure_class=failure_class,
             )
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
     _emit_finished("researcher", round=this_round, lane_idx=lane_idx,
-                    duration_ms=int(dt * 1000), ok=True)
+                    duration_ms=int(dt * 1000), ok=True,
+                    stop_reason=stop_reason, failure_class=failure_class)
     # #204: v1 inline-loop researcher exit — same lint pattern as the
     # M6 REPORT and PLAN-empty branches.
     linted_text = _lint_research_text(text)

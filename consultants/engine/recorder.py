@@ -466,8 +466,12 @@ class MessageRecorder:
         lane_idx: Optional[int] = None,
         duration_ms: Optional[int] = None,
         error: Optional[str] = None,
+        stop_reason: Optional[str] = None,
+        failure_class: Optional[str] = None,
     ) -> None:
-        """Append a node-boundary event. Cheap to skip if a caller
+        """Append a node-boundary event. ``stop_reason`` /
+        ``failure_class`` (plan D7) ride on the ``runtime_events`` row,
+        whose payload is JSON, so the ``events`` schema is unchanged. Cheap to skip if a caller
         doesn't care; debugging tools query these to render the graph
         timeline.
 
@@ -503,6 +507,8 @@ class MessageRecorder:
                 "ts": now,
                 "duration_ms": duration_ms,
                 "error": error,
+                **({"stop_reason": stop_reason} if stop_reason else {}),
+                **({"failure_class": failure_class} if failure_class else {}),
             },
         )
         # Per-role INFO log on node_enter — single source of truth

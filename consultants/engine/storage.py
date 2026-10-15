@@ -64,6 +64,10 @@ class RoleTurn:
     duration_seconds: float = 0.0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # Plan D7: how the turn's loop ended, and the failure class when it
+    # failed or a guard stopped it (``consultants.engine.events``).
+    stop_reason: Optional[str] = None
+    failure_class: Optional[str] = None
 
 
 @dataclass
