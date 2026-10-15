@@ -486,38 +486,10 @@ def cmd_show(args, base: str) -> int:
 
 
 def _session_lane_stops(db_path: Path) -> list[dict]:
-    """How each node ended (plan D7): ``stop_reason`` and
-    ``failure_class`` from the ``node_exit`` rows that carry them, in the
-    order they finished. Empty for a session recorded before D7."""
-    if not db_path.exists():
-        return []
-    import sqlite3
-    try:
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        try:
-            rows = con.execute(
-                "SELECT role, round, lane_idx, payload FROM runtime_events "
-                "WHERE kind = 'node_exit' ORDER BY ts").fetchall()
-        finally:
-            con.close()
-    except sqlite3.Error:
-        return []
-    out = []
-    for role, rnd, lane, payload in rows:
-        try:
-            body = json.loads(payload or "{}")
-        except ValueError:
-            continue
-        if not body.get("stop_reason"):
-            continue
-        row = {"role": role, "round": rnd, "lane_idx": lane,
-               "stop_reason": body["stop_reason"]}
-        if body.get("failure_class"):
-            row["failure_class"] = body["failure_class"]
-        if body.get("error"):
-            row["error"] = str(body["error"])[:300]
-        out.append(row)
-    return out
+    """How each node ended (plan D7); see
+    :func:`consultants.engine.retry_lanes.lane_stops`."""
+    from consultants.engine.retry_lanes import lane_stops
+    return lane_stops(db_path)
 
 
 def _session_samplers(db_path: Path) -> list[dict]:
@@ -1732,6 +1704,27 @@ def cmd_cancel(args, base: str) -> int:
     return 0
 
 
+def cmd_retry_lanes(args, base: str) -> int:
+    """POST /v1/consult/<sid>/retry-lanes — plan D9: the parent's lanes
+    that failed for a reason the question did not cause, run again as a
+    child session that re-answers the parent's question."""
+    body: dict = {"cwd": args.cwd or os.getcwd()}
+    if args.lanes:
+        try:
+            body["lanes"] = [int(x) for x in args.lanes.split(",") if x.strip()]
+        except ValueError:
+            raise CLIError(f"--lanes must be numbers: {args.lanes!r}")
+    if args.effort:
+        body["effort"] = args.effort
+    out = _http("POST", f"{base}/v1/consult/{args.sid}/retry-lanes", body=body)
+    print(json.dumps(out, indent=2))
+    if out.get("reason") == "no_retryable_lanes":
+        print("note: no lane of this run failed in a retryable way "
+              "(infra / model_missing / context_overflow).", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_wrap_up(args, base: str) -> int:
     """POST /v1/consult/<sid>/wrap-up — plan D9's graceful stop: the
     run ends on an answer from the research it has, marked ``partial``.
@@ -2480,6 +2473,23 @@ def build_parser() -> argparse.ArgumentParser:
     can.add_argument("--reason", default="user-cancel",
                      help="Human-readable cancel reason (logged).")
     can.set_defaults(fn=cmd_cancel)
+
+    # retry-lanes — rerun a finished run's failed lanes (plan D9).
+    rl = sub.add_parser(
+        "retry-lanes",
+        help="Run a finished consultation's researcher lanes that failed "
+             "on infra / model_missing / context_overflow again, then "
+             "answer its question again (as a child session).",
+    )
+    rl.add_argument("sid")
+    rl.add_argument("--lanes", default=None,
+                    help="Comma-separated lane numbers (default: every "
+                         "retryable one; see `show <sid>` lanes).")
+    rl.add_argument("--effort", default=None,
+                    help="Effort for the retry (default: the parent's).")
+    rl.add_argument("--cwd", default=None,
+                    help="Project dir, when the parent is not loaded.")
+    rl.set_defaults(fn=cmd_retry_lanes)
 
     # wrap-up — stop and synthesize what the run has (plan D9).
     wu = sub.add_parser(

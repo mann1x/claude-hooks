@@ -1745,7 +1745,8 @@ def build_council_graph(deps: GraphDeps,
 def build_follow_up_graph(deps: GraphDeps,
                           *, checkpointer: Optional[Any] = None,
                           interrupt_before: Optional[list[str]] = None,
-                          tracer: Optional[Any] = None):
+                          tracer: Optional[Any] = None,
+                          retry_lanes: Optional[list[dict]] = None):
     """Compile the SHORTENED follow-up graph.
 
     Topology (same conventions as ``build_council_graph``):
@@ -1761,9 +1762,15 @@ def build_follow_up_graph(deps: GraphDeps,
     with the parent's plan + research as ``prior_rounds`` and the
     follow-up question as ``plan_item``. Synthesizer produces a
     fresh ``final_answer`` based on the merged evidence.
+
+    ``retry_lanes`` (plan D9, ``retry-lanes``): START fans out one
+    researcher Send per ``{"lane_idx", "plan_item", "model"}`` — the
+    parent's failed lanes, asked what they were asked — instead of the
+    single follow-up lane.
     """
     try:
         from langgraph.graph import StateGraph, START, END
+        from langgraph.types import Send
     except ImportError as e:  # pragma: no cover
         raise RuntimeError(
             "langgraph is not installed. The /consultants engine "
@@ -1806,7 +1813,33 @@ def build_follow_up_graph(deps: GraphDeps,
     if adversary_on:
         sg.add_node("adversary", _wrap("adversary", _wrap_adversary(deps)))
 
-    sg.add_edge(START, "researcher")
+    if retry_lanes:
+        lanes = [dict(spec) for spec in retry_lanes]
+
+        def _fanout_retried_lanes(state: dict) -> Any:
+            return [Send("researcher", {
+                "question": state.get("question"),
+                "plan": state.get("plan", ""),
+                "cwd": state.get("cwd"),
+                # A Send lane sees only the keys in its own dict (see the
+                # planner fan-out in build_council_graph).
+                "extra_roots": list(state.get("extra_roots") or []),
+                "runtime_control": dict(state.get("runtime_control") or {}),
+                "effort": state.get("effort"),
+                "models": state.get("models", {}),
+                "topology": state.get("topology"),
+                "plan_item": spec.get("plan_item") or state.get("plan", ""),
+                "lane_idx": spec.get("lane_idx"),
+                "model_override": spec.get("model") or None,
+                "research": [],
+                "turns": [],
+                "research_rounds_used": 0,
+                "total_prompt_tokens": 0,
+                "total_completion_tokens": 0,
+            }) for spec in lanes]
+        sg.add_conditional_edges(START, _fanout_retried_lanes, ["researcher"])
+    else:
+        sg.add_edge(START, "researcher")
     if "critic" in enabled:
         sg.add_edge("researcher", "critic")
         sg.add_conditional_edges(

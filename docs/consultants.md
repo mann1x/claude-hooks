@@ -655,6 +655,30 @@ It is refused (409) on a cancelled run and a no-op on one not running.
 Cancel arriving after a wrap-up still wins. A wrap-up is not carried
 across an engine restart: a suspended council resumes as a normal run.
 
+### retry-lanes: run the failed lanes again
+
+`POST /v1/consult/{sid}/retry-lanes` (`claude-consultants retry-lanes
+<sid> [--lanes 1,3]`) is the other half of plan D9. A lane whose
+first-round exit (D7) failed with `infra`, `model_missing` or
+`context_overflow` failed for a reason the question did not cause;
+`consultants/engine/retry_lanes.py` finds them (`failed_lanes`), rebuilds
+what each was asked the way the planner fan-out did (lane `i` is plan
+group `i // n_models` on model `i % n_models`, `retry_specs`), and the
+route starts a child session through the follow-up machinery with
+`runner_input["retry_lanes"]`. `build_follow_up_graph(retry_lanes=)`
+fans those lanes out from START; the researcher state is seeded with the
+parent's surviving reports (`surviving_reports` drops the tombstones),
+and the synthesizer answers the parent's question afresh, not as a
+follow-up turn. The retry is a consultancy child but does not count
+against `max_followups`; it survives an engine restart (the in-flight
+record carries `retry_lanes`).
+
+Limits: only first-round lanes (a critic re-route's lane was asked the
+critic's gaps, which are not stored); the groups and models are rebuilt
+from today's `FANOUT_MAX_LANES` and config, so a change between the run
+and the retry moves lanes — the response lists exactly what it runs. The
+xauto automatic retry before synthesis is not built.
+
 **Routers must not loop on a stopped run.** A skipped node writes
 nothing, so a router that reads its last verdict (a critic's "needs more
 research", an unconsumed tool plan) would send the run back round the

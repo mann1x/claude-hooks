@@ -752,7 +752,11 @@ def make_follow_up_runner(*, ollama_base_url: str):
         # ``_role_messages`` is None for v1.0 parents — fall back to
         # today's behavior cleanly in that case.
         prior_messages_by_role: dict[str, list[dict]] = {}
-        if (parent_state is not None
+        # Plan D9: a retry-lanes run re-answers the parent's question from
+        # all of its research, so the synthesizer starts fresh rather than
+        # continuing the parent's thread as a follow-up would.
+        retry_lanes = list(runner_input.get("retry_lanes") or [])
+        if (not retry_lanes and parent_state is not None
                 and parent_state._role_messages is not None):
             for role in ("researcher", "synthesizer"):
                 thread = parent_state._role_messages.get(role)
@@ -909,6 +913,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
         compiled = build_follow_up_graph(
             deps, tracer=tracer, checkpointer=fu_checkpointer,
             interrupt_before=["synthesizer"],
+            **({"retry_lanes": retry_lanes} if retry_lanes else {}),
         )
         fu_review_before_synthesis = False
         try:
@@ -956,7 +961,17 @@ def make_follow_up_runner(*, ollama_base_url: str):
         )
         initial["plan_item"] = question
         initial["lane_idx"] = 0
-        if prior_messages_by_role:
+        if retry_lanes:
+            # The parent's reports that stand; its tombstones are replaced
+            # by the retried lanes' reports.
+            from consultants.engine.retry_lanes import surviving_reports
+            initial.pop("plan_item", None)
+            initial.pop("lane_idx", None)
+            initial["plan_items"] = list(
+                getattr(parent_state, "plan_items", None) or [])
+            initial["research"] = surviving_reports(
+                getattr(parent_state, "research", None) or [])
+        elif prior_messages_by_role:
             initial["research"] = []
         else:
             prior_research: list[str] = []

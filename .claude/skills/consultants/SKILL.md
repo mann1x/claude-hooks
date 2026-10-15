@@ -1585,6 +1585,23 @@ carries `partial: {"reason": "wrap_up", ...}`. Refused (409) on a
 cancelled run. Use this, not `cancel`, when the user wants an answer now
 ("that's enough, tell me what you have").
 
+### retry-lanes — rerun the lanes that failed on infrastructure
+
+```
+claude-consultants retry-lanes <sid> [--lanes 1,3] [--effort ...]
+```
+
+After a run finished with tombstoned researcher lanes (`show <sid>` →
+`lanes` with `failure_class` `infra`, `model_missing` or
+`context_overflow`): starts a child session that runs only those lanes,
+asked what they were asked, and answers the original question again
+from the parent's surviving reports plus the new ones. It does not count
+against the follow-up cap. Answers `no_retryable_lanes` (exit 1) when no
+lane failed that way. A lane that failed on its task (`task_error`) is
+not retried: the same question to the same model would fail the same
+way. Offer it when an answer was written around missing lanes because
+the backend flapped.
+
 ### events — live monitor (SSE stream)
 
 This is the **engine's real-time monitor channel** — the canonical way

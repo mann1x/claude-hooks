@@ -844,6 +844,60 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
     # planning + fan-out and the warm clients skip /api/show.
     @app.post("/v1/consult/{sid}/follow-up")
     def follow_up(sid: str, body: dict) -> dict:
+        return _start_follow_up(sid, body)
+
+    @app.post("/v1/consult/{sid}/retry-lanes")
+    def retry_lanes_route(sid: str, body: Optional[dict] = None) -> dict:
+        """Plan D9: run the parent's failed researcher lanes again — those
+        whose first-round exit (D7) is ``infra`` / ``model_missing`` /
+        ``context_overflow`` — asked what they were asked, then answer
+        the parent's question again from all of its research. Runs as a
+        child session (like a follow-up, without counting against the
+        follow-up cap). ``lanes`` narrows it to some of them."""
+        from consultants.engine import retry_lanes as rl
+        body = body or {}
+        parent = _resolve_parent_for_follow_up(app, sid, body.get("cwd"))
+        db = (storage.session_dir(Path(parent.cwd), sid)
+              / storage.TRANSCRIPT_DB_FILENAME)
+        stops = rl.lane_stops(db)
+        lanes = rl.failed_lanes(stops)
+        wanted = body.get("lanes")
+        if wanted is not None:
+            if not isinstance(wanted, list) or not all(
+                    isinstance(x, int) for x in wanted):
+                raise HTTPException(400, "lanes must be a list of integers")
+            refused = sorted(set(wanted) - set(lanes))
+            if refused:
+                raise HTTPException(400, (
+                    f"lanes {refused} did not fail in a retryable way; "
+                    f"retryable: {lanes}"))
+            lanes = sorted(set(wanted))
+        if not lanes:
+            return {"ok": False, "reason": "no_retryable_lanes",
+                    "sid": None, "parent_sid": sid,
+                    "retryable_classes": sorted(rl.RETRYABLE_CLASSES),
+                    "lanes": [r for r in stops if r.get("role") == "researcher"]}
+        cfg = cc.load_config(Path(parent.cwd))
+        cfg.effort = body.get("effort") or parent.effort
+        extras = (list(cfg.roles["researcher"].extra_models or [])
+                  if cc.extras_active(cfg.effort) else [])
+        primary = ((parent.models or {}).get("researcher")
+                   or cfg.roles["researcher"].model)
+        specs = rl.retry_specs(
+            lanes, plan=parent.plan or "",
+            plan_items=getattr(parent, "plan_items", None),
+            models_per_lane=[primary] + extras)
+        if not specs:
+            raise HTTPException(409, (
+                "the failed lanes could not be rebuilt from the parent's "
+                "plan (its items or the fan-out width changed)"))
+        out = _start_follow_up(sid, {**body, "message": parent.question},
+                               retry_lanes=specs)
+        out["retry_lanes"] = specs
+        return out
+
+    def _start_follow_up(sid: str, body: dict, *,
+                         retry_lanes: Optional[list] = None) -> dict:
         if app.state.run_follow_up is None:
             raise HTTPException(
                 status_code=503,
@@ -901,7 +955,10 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             except (TypeError, ValueError):
                 allow_extra = 0
         effective_cap = croot.max_followups + croot.extra_granted
-        if croot.followup_count >= effective_cap and allow_extra <= 0:
+        # A retry-lanes run repairs the parent rather than iterating on
+        # it, so the follow-up cap does not apply to it (plan D9).
+        if (not retry_lanes and croot.followup_count >= effective_cap
+                and allow_extra <= 0):
             croot.consultancy_status = CONSULTANCY_AWAITING
             _persist_consultancy(croot)
             return {
@@ -997,7 +1054,8 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         # happens when this run completes). Persist the sidecar.
         if allow_extra > 0:
             croot.extra_granted += allow_extra
-        croot.followup_count += 1
+        if not retry_lanes:
+            croot.followup_count += 1
         croot.consultancy_children.append(child_sid)
         croot.consultancy_status = CONSULTANCY_IN_PROGRESS
         croot.bump_activity()
@@ -1038,6 +1096,8 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             # tool sandbox still confines every read to the roots.
             "skip_preflight": bool(body.get("skip_preflight")),
         }
+        if retry_lanes:
+            runner_input["retry_lanes"] = list(retry_lanes)
         inflight.register({
             "sid": child_sid, "kind": "follow-up",
             "cwd": parent.cwd,
@@ -1049,6 +1109,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             "skip_preflight": bool(body.get("skip_preflight")),
             "root_sid": croot.sid, "parent_sid": sid,
             "started_at": child.started_at,
+            **({"retry_lanes": list(retry_lanes)} if retry_lanes else {}),
         })
         _submit_run(app, app.state.run_follow_up, child, runner_input)
 
@@ -1570,6 +1631,8 @@ def _resume_one(app, rec: dict) -> bool:
     if kind == "follow-up":
         parent = _ensure_loaded(app, rec.get("parent_sid"), cwd)
         runner_input["parent_state"] = parent
+        if rec.get("retry_lanes"):
+            runner_input["retry_lanes"] = list(rec["retry_lanes"])
         if parent is not None and sid not in parent.follow_up_sids:
             parent.follow_up_sids.append(sid)
         # The ready-to-review flip on completion looks the root up in
