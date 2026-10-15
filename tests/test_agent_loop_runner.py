@@ -87,7 +87,14 @@ class TestRunLoopBasic:
 
     def test_iteration_cap(self):
         # Always tool-call; loop should bail at max_iterations.
+        calls = []
+
         def chat(p):
+            calls.append(p)
+            if "tools" not in p:
+                return {"choices": [{"message": {"role": "assistant",
+                                                 "content": "report"},
+                                     "finish_reason": "stop"}]}
             return _tool("echo", '{"i":1}')
 
         out = runner.run_loop(
@@ -100,7 +107,11 @@ class TestRunLoopBasic:
             chat_fn=chat,
             tool_executor=lambda n, a, c: "x",
         )
-        assert out["choices"][0]["finish_reason"] == "tool_calls"
+        # Plan D6: the cap asks one tool-less report instead of returning
+        # the last tool-call turn.
+        assert len(calls) == 4
+        assert out["choices"][0]["message"]["content"] == "report"
+        assert out["_stop_reason"] == "iteration_cap"
 
 
 class TestForceAnswerAfter:
@@ -121,8 +132,9 @@ class TestForceAnswerAfter:
             chat_fn=chat,
             tool_executor=lambda n, a, c: "x",
         )
-        # iters 0,1 have tools; 2,3 must NOT.
-        assert seen_tools == [True, True, False, False]
+        # iters 0,1 have tools; 2,3 must NOT. (The 5th call is plan D6's
+        # tool-less report at the cap.)
+        assert seen_tools[:4] == [True, True, False, False]
 
     def test_zero_disables_strip(self):
         seen_tools: list[bool] = []
@@ -141,7 +153,9 @@ class TestForceAnswerAfter:
             chat_fn=chat,
             tool_executor=lambda n, a, c: "x",
         )
-        assert all(seen_tools)
+        # Every loop iteration keeps its tools; only plan D6's report at
+        # the cap goes without.
+        assert seen_tools == [True, True, True, False]
 
 
 class TestForceFirstToolCall:

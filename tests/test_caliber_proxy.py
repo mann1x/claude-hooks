@@ -539,8 +539,9 @@ class TestAgentLoop:
                 str(tmp_path),
                 max_iterations=4,
             )
-        # iters 0,1 have tools; 2,3 must NOT.
-        assert seen_tools == [True, True, False, False]
+        # iters 0,1 have tools; 2,3 must NOT. The 5th call is plan D6's
+        # tool-less report at the cap.
+        assert seen_tools == [True, True, False, False, False]
 
     def test_force_first_tool_call_pins_required(
         self, tmp_path: Path, monkeypatch,

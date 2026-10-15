@@ -434,6 +434,28 @@ LOOP_GUARD_LAST_WARNING = (
     "loop guard stops ends this task. Send something different, or give "
     "your answer with what you have.")
 
+def cap_warning_margin(cap: int) -> int:
+    """Turns before the cap at which a loop is told to wrap up (plan D6,
+    Cerebriline ``capWarningMargin``): a tenth of the cap, 1 to 5."""
+    return min(5, max(1, int(cap * 0.1 + 0.5)))
+
+
+CAP_WARNING = (
+    "[SYSTEM MESSAGE] This is turn {turn} of the {cap} this task may take. "
+    "Wrap up: finish the step you are on, then end with your answer — what "
+    "you found, with its evidence, and what remains open. If you cannot "
+    "finish in time, say exactly where you stopped.")
+
+#: Plan D6: the last turn of a loop stopped at its cap. At the cap a loop's
+#: last output is usually a tool call's preamble — "Now let me check line
+#: 90" as the report of the whole run (Cerebriline ``FINAL_REPORT_NOTE``).
+CAP_FINAL_REPORT = (
+    "[SYSTEM MESSAGE] Your turn budget is spent and your work is being "
+    "taken as it is. Do not call any tool. In this one reply, report: what "
+    "you found, with its evidence, what you verified and how, and what is "
+    "still open or unfinished — exactly where you stopped.")
+
+
 LOOP_GUARD_FINAL = (
     "[SYSTEM MESSAGE] The harness is ending this task: {why} Tools are off. "
     "Write your report now from what you have already established: what "
@@ -871,6 +893,7 @@ def run_loop(
 
     final: dict[str, Any] = {}
     tools_stripped = False
+    cap_warned = False
     has_called_tool = False
     force_first = (config.force_first_tool_call
                    if config.tools_available else False)
@@ -920,6 +943,22 @@ def run_loop(
                 payload.pop("tools", None)
                 payload.pop("tool_choice", None)
             tools_stripped = True
+        # Plan D6: once per loop, a margin before the cap, say so — rather
+        # than let the cap cut the lane off mid-step.
+        if (config.tools_available and not tools_stripped and not cap_warned
+                and i > 0 and config.max_iterations - (i + 1)
+                < cap_warning_margin(config.max_iterations)):
+            cap_warned = True
+            text = CAP_WARNING.format(turn=i + 1, cap=config.max_iterations)
+            last = (payload.get("messages") or [None])[-1]
+            if isinstance(last, dict) and last.get("role") == "tool":
+                last["content"] = f"{last.get('content') or ''}\n\n{text}"
+            else:
+                payload["messages"] = list(payload["messages"]) + [
+                    {"role": "user", "content": text, "_harness": True}]
+            _emit_guard(config, {"guard": "iteration_cap", "action": "warn",
+                                 "iteration": i,
+                                 "cap": config.max_iterations})
         if config.tools_available and not tools_stripped:
             if force_first and not has_called_tool:
                 payload["tool_choice"] = "required"
@@ -1215,6 +1254,18 @@ def run_loop(
                                  **nudger.last.public_dict()})
     else:
         log.warning("agent loop hit max_iterations=%d", config.max_iterations)
+        # Plan D6: the cap ended a turn that was still calling tools. Its
+        # report is asked for once, tools off, rather than returned as a
+        # tool-call turn with no text.
+        last_msg = ((final or {}).get("choices") or [{}])[0].get("message") or {}
+        if config.max_iterations > 0 and last_msg.get("tool_calls"):
+            _emit_guard(config, {"guard": "iteration_cap", "action": "stop",
+                                 "iteration": config.max_iterations - 1,
+                                 "cap": config.max_iterations})
+            payload, final = _forced_report(
+                payload, payload["messages"], CAP_FINAL_REPORT,
+                "iteration_cap", chat_fn, config, on_iter,
+                config.max_iterations)
     # Attach the final conversation transcript to the response so
     # callers that need to follow up (e.g., the consultants
     # researcher fallback when the loop ends with empty text) can
