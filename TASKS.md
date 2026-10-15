@@ -6,8 +6,8 @@
 
 ## Active (2)
 
-- [ch-8](.claude-hooks/tasks/ch-8.md) `consultants.guards` Council D — lane robustness: always-on loop guards, strict nudge profile, named terminal actions — 12h
-- [ch-12](.claude-hooks/tasks/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 1h
+- [ch-8](.claude-hooks/tasks/ch-8.md) `consultants.guards` Council D — lane robustness: always-on loop guards, strict nudge profile, named terminal actions — 13h
+- [ch-12](.claude-hooks/tasks/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 2h
 
 ## Ready (4)
 
@@ -22,7 +22,7 @@
 
 ## Recently closed (6 of 6)
 
-- [ch-7](.claude-hooks/tasks/archive/ch-7.md) **H** `consultants.compaction` Council C — compaction: reduced replay default, full 5-step per role, condensation, overflow — 16h
+- [ch-7](.claude-hooks/tasks/archive/ch-7.md) **H** `consultants.compaction` Council C — compaction: reduced replay default, full 5-step per role, condensation, overflow — 17h
 - [ch-6](.claude-hooks/tasks/archive/ch-6.md) **H** `consultants.budgets` Council B — output cap, context-window knob, thinking per backend, sampling diversity — 1d
 - [ch-4](.claude-hooks/tasks/archive/ch-4.md) **H** `mailbox.identity` Mailbox alias follows the session name (/rename); a second live session in a folder gets <alias>-N — 12d
 - [ch-2](.claude-hooks/tasks/archive/ch-2.md) `release` Cut the release that ships task tracking and the cloud mailbox relay — 13d
