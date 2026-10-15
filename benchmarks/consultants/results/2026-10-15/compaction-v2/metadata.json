@@ -1,0 +1,39 @@
+{
+  "date": "2026-10-15",
+  "task_version": 2,
+  "model": "qwen36-base-mtp_tb:27b-q4km-128k",
+  "base": "http://192.168.178.161:22434",
+  "window": 32768,
+  "think": false,
+  "trials": 4,
+  "arms": [
+    "reduced/system",
+    "reduced/user",
+    "full/system",
+    "full/user",
+    "basic/system"
+  ],
+  "commit": "mixed",
+  "max_iterations": 48,
+  "fork_baseline": {
+    "0": 0.85,
+    "1": 0.63,
+    "2": 0.5,
+    "3": 0.25
+  },
+  "segments": [
+    {
+      "trials": "#0-#2 (15)",
+      "started": "~04:13 CEST",
+      "code": "dev before b263f9e (C done, D1-D3 standard; no D4-D15)",
+      "server": "xOllama build before 0.40.4-xollama.1"
+    },
+    {
+      "trials": "#3 (5)",
+      "started": "06:25 CEST",
+      "code": "d9976a0 (D4-D15 in, incl. D5 read_file line cuts and D6 cap warning)",
+      "server": "0.40.4-xollama.1"
+    }
+  ],
+  "note": "paused 05:29-06:25 to let xollama upgrade the server and opencoti run a CPU bench; trials record no commit, the bench writes metadata at launch"
+}
