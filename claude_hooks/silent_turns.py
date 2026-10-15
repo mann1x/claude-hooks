@@ -123,6 +123,59 @@ def unparsed_reminder(found: UnparsedCall) -> str:
             "finish it, or send nothing and start the next turn fresh.")
 
 
+#: Plan D4: re-asks for a call the server rejected as unreadable
+#: (``ChatFault.fault_class == "tool_call_unparsable"``), in a row; counted
+#: apart from the HTTP retries, which never resend such a call.
+TOOL_CALL_REJECTED_RETRY_BUDGET = 2
+
+TOOL_CALL_UNPARSABLE_REMINDER = (
+    "[SYSTEM MESSAGE] Your last tool call did not parse, so it never ran and "
+    "nothing was changed by it. The text you wrote before it is still here "
+    "and still correct — the call around it was malformed, most often "
+    "because it was cut short. Send that one call again, complete, and "
+    "nothing else in this reply. If it carries a large argument, make the "
+    "argument smaller rather than sending the same one again: name a line "
+    "range instead of a whole file, or split the work across two calls.")
+
+
+def rejected_call_reminder(rejection: Optional[dict] = None) -> str:
+    """The reminder for a call the server rejected (Cerebriline
+    ``toolCallUnparsableReminder``). ``swallowed_key`` is the one measured
+    shape — a string argument full of code closed with a backtick from that
+    code, so the parser read the next argument into the value — and naming
+    that argument is the one thing that makes the next attempt different;
+    every other reason gets the generic text."""
+    if not rejection or rejection.get("reason") != "swallowed_key":
+        return TOOL_CALL_UNPARSABLE_REMINDER
+    tool, key = rejection.get("tool"), rejection.get("key")
+    call = f"`{tool}` call" if tool else "tool call"
+    into = (f"ran on into `{key}`, so the parser read `{key}` and what "
+            "followed as part of that value" if key else
+            "ran on into the next argument, so the parser read that argument "
+            "as part of the value")
+    return (f"[SYSTEM MESSAGE] Your last {call} was rejected before it ran, "
+            "and nothing was changed by it. A string argument in it never "
+            f"closed: it {into}. This happens when a string argument that "
+            "contains code is ended with a character from that code, such as "
+            "a backtick or a quote, instead of the tool-call format's own "
+            "string delimiter. Send that one call again, complete, and "
+            "nothing else in this reply, with every string argument closed by "
+            "the format's delimiter.")
+
+
+def truncated_arguments_answer(chars: int) -> str:
+    """The answer to a call whose arguments the output cap cut off. It is
+    not bad JSON, and a model told so hunts for a syntax error that is not
+    there (Cerebriline ``agent-runtime.ts`` ``finishReason == max-tokens``).
+    Starts with ``error`` so the strike counter sees a failure."""
+    return ("error: this call was cut off by the output budget before its "
+            f"arguments finished: the turn ended at the cap with {chars:,} "
+            "characters of arguments written. Nothing is wrong with what you "
+            "were writing — there was no room left to finish it. Nothing ran. "
+            "Send the same work in smaller pieces: one region or one range per "
+            "call, with arguments short enough to complete.")
+
+
 def announced_intent(text: str) -> Optional[str]:
     """The text when it ends on a promise of imminent work and claims no
     completion anywhere; else ``None``."""
@@ -158,6 +211,8 @@ def non_convergence_note(turns: int, reasoning_chars: int) -> str:
 __all__ = ["thinking_only", "unparsed_tool_call", "unparsed_reminder",
            "announced_intent", "announced_intent_reminder",
            "non_convergence_note", "UnparsedCall",
+           "rejected_call_reminder", "truncated_arguments_answer",
+           "TOOL_CALL_UNPARSABLE_REMINDER", "TOOL_CALL_REJECTED_RETRY_BUDGET",
            "THINKING_ONLY_REMINDER", "THINKING_ONLY_ANSWER_REMINDER",
            "TOOL_CALL_IN_THINKING_REMINDER", "THINKING_ONLY_RETRY_BUDGET",
            "TOOL_CALL_PARSE_RETRY_BUDGET", "ANNOUNCED_INTENT_BUDGET",

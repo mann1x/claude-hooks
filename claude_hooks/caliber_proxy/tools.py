@@ -573,12 +573,14 @@ def execute(name: str, raw_args: str, cwd: str,
     impl = TOOL_IMPLS.get(name)
     if impl is None:
         return f"error: unknown tool {name!r}"
-    try:
-        args = json.loads(raw_args) if raw_args else {}
-    except json.JSONDecodeError as e:
-        return f"error: tool arguments not valid JSON: {e}"
-    if not isinstance(args, dict):
-        return "error: tool arguments must be a JSON object"
+    # Plan D4: read the arguments as sent, where one reading exists.
+    from claude_hooks import tool_args
+    args = tool_args.parse_arguments(raw_args)
+    if isinstance(args, str):
+        return args
+    args = tool_args.coerce(args, _parameters_for(name))
+    if isinstance(args, str):
+        return args
     try:
         if name in _PATH_AWARE_TOOLS:
             result = impl(args, cwd, _extra_roots)
@@ -588,6 +590,18 @@ def execute(name: str, raw_args: str, cwd: str,
         log.warning("tool %s raised: %s", name, e)
         return f"error: tool raised: {e}"
     return result if isinstance(result, str) else str(result)
+
+
+_PARAMETERS: dict[str, dict] = {}
+
+
+def _parameters_for(name: str) -> Optional[dict]:
+    """The advertised JSON schema of a tool's parameters."""
+    if not _PARAMETERS:
+        for spec in openai_tool_specs():
+            fn = spec.get("function") or {}
+            _PARAMETERS[fn.get("name") or ""] = fn.get("parameters") or {}
+    return _PARAMETERS.get(name)
 
 
 def make_executor(extra_roots: tuple[str, ...] = ()):

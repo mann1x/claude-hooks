@@ -85,12 +85,16 @@ def is_outage(exc: BaseException, body: str = "") -> bool:
 #: ``transport`` (network, 5xx, a dead stream) is retried until the run's
 #: deadline; ``refusal`` (429, admission) is backed off; ``model_missing``
 #: moves to the next model in a role's chain without spending a retry;
-#: ``context_overflow`` asks for compaction; ``bad_request`` is ours to fix.
+#: ``context_overflow`` asks for compaction; ``bad_request`` is ours to fix;
+#: ``tool_call_unparsable`` (plan D4) is the model's own call the server
+#: could not read — never retried here, since resending the same request
+#: asks for the same call; the agent loop re-asks with the cause.
 TRANSPORT = "transport"
 REFUSAL = "refusal"
 MODEL_MISSING = "model_missing"
 CONTEXT_OVERFLOW = "context_overflow"
 BAD_REQUEST = "bad_request"
+TOOL_CALL_UNPARSABLE = "tool_call_unparsable"
 
 
 class ChatFault(RuntimeError):
@@ -98,14 +102,84 @@ class ChatFault(RuntimeError):
 
     A ``RuntimeError`` so every existing ``except RuntimeError`` keeps
     catching it; the message is unchanged from before the class existed.
+    ``rejection`` is what the server said about a rejected tool call
+    (``reason`` / ``key`` / ``tool``), ``partial`` the content streamed
+    before a mid-stream failure.
     """
 
     def __init__(self, message: str, *, fault_class: str,
-                 status: Optional[int] = None, body: str = ""):
+                 status: Optional[int] = None, body: str = "",
+                 rejection: Optional[dict] = None, partial: str = ""):
         super().__init__(message)
         self.fault_class = fault_class
         self.status = status
         self.body = body
+        self.rejection = rejection
+        self.partial = partial
+
+
+#: A tool call the server's parser could not read (Cerebriline
+#: ``error-classification.ts:249``): Ollama's XML tool parsers, generic
+#: "failed to parse tool call" wording, and llama.cpp's streaming parser
+#: (``Invalid diff: now finding less tool calls``), which ends the stream.
+_TOOL_CALL_UNPARSABLE_RX = (
+    re.compile(r"\bXML syntax error\b[\s\S]*</?(?:function|tool_call|"
+               r"parameter|invoke)\b", re.I),
+    re.compile(r"\b(?:failed to|could not|cannot|unable to)\s+parse\b"
+               r"[\s\S]{0,80}\b(?:tool[_\s-]?call|function[_\s-]?call|"
+               r"tool arguments|function arguments)\b", re.I),
+    re.compile(r"\b(?:invalid|malformed)\s+(?:tool[_\s-]?call|"
+               r"function[_\s-]?call|tool arguments|function arguments)\b",
+               re.I),
+    re.compile(r"\bInvalid diff:\s*now finding less tool calls\b", re.I),
+)
+#: opencoti's error ``type`` for a call it rejected (bug-3601); newer
+#: builds add ``reason`` (``swallowed_key``), ``key`` and ``tool``.
+TOOL_CALL_REJECTED_TYPE = "tool_call_rejected"
+
+
+def tool_call_rejection(body: Any, _depth: int = 0) -> Optional[dict]:
+    """The ``{reason, key?, tool?}`` an engine attached to a rejected call,
+    found in a body, a nested error, or a JSON-encoded string."""
+    if body is None or _depth > 6:
+        return None
+    if isinstance(body, str):
+        text = body.strip()
+        if not text.startswith(("{", "[")):
+            return None
+        try:
+            body = json.loads(text)
+        except ValueError:
+            return None
+        return tool_call_rejection(body, _depth + 1)
+    if isinstance(body, list):
+        for item in body:
+            found = tool_call_rejection(item, _depth + 1)
+            if found:
+                return found
+        return None
+    if not isinstance(body, dict):
+        return None
+    reason = body.get("reason")
+    if (body.get("type") == TOOL_CALL_REJECTED_TYPE
+            and isinstance(reason, str) and reason.strip()):
+        out = {"reason": reason.strip()}
+        for k in ("key", "tool"):
+            v = body.get(k)
+            if isinstance(v, str) and v.strip():
+                out[k] = v.strip()
+        return out
+    for k in ("error", "data", "cause", "message"):
+        found = tool_call_rejection(body.get(k), _depth + 1)
+        if found:
+            return found
+    return None
+
+
+def is_tool_call_unparsable(body: Any) -> bool:
+    text = body if isinstance(body, str) else json.dumps(body, default=str)
+    return (f'"{TOOL_CALL_REJECTED_TYPE}"' in (text or "")
+            or any(rx.search(text or "") for rx in _TOOL_CALL_UNPARSABLE_RX))
 
 
 _MODEL_MISSING_RX = re.compile(
@@ -116,7 +190,26 @@ _OVERFLOW_RX = re.compile(
     r"too many tokens|prompt is too long|context_window_exceeded", re.I)
 
 
+def _raise_stream_error(obj: dict, partial: str) -> None:
+    """A stream's error event: a tool call the server could not read is
+    :data:`TOOL_CALL_UNPARSABLE` (not retried); anything else is a dead
+    stream, ``OSError``, retried as transport."""
+    err = obj.get("error")
+    if is_tool_call_unparsable(obj):
+        raise ChatFault(f"stream error from server: {str(err)[:300]}",
+                        fault_class=TOOL_CALL_UNPARSABLE,
+                        status=obj.get("status") if isinstance(
+                            obj.get("status"), int) else None,
+                        body=json.dumps(obj, default=str)[:4000],
+                        rejection=tool_call_rejection(obj), partial=partial)
+    raise OSError(f"stream error from server: {str(err)[:300]}")
+
+
 def classify_http_fault(status: int, body: str) -> str:
+    # Ahead of the status gate: opencoti rejects a call with a 500, and
+    # what the model emitted is the fault whatever the status says.
+    if is_tool_call_unparsable(body):
+        return TOOL_CALL_UNPARSABLE
     if status == 404 or (400 <= status < 500 and _MODEL_MISSING_RX.search(body or "")):
         return MODEL_MISSING
     if status == 429:
@@ -1161,14 +1254,16 @@ class ChatClient:
                         continue
 
                 fault = classify_http_fault(e.code, err_body)
-                retryable = fault != MODEL_MISSING and (
+                retryable = fault not in (MODEL_MISSING, TOOL_CALL_UNPARSABLE) and (
                     e.code in RETRYABLE_STATUS
                     or (400 <= e.code < 500
                         and any(s in err_body
                                 for s in RETRYABLE_4XX_BODY_SUBSTRINGS))
                 )
-                if self._wait_out_outage(e, err_body, attempts, outage,
-                                         what=what, cancel_check=cancel_check):
+                if (fault != TOOL_CALL_UNPARSABLE
+                        and self._wait_out_outage(e, err_body, attempts, outage,
+                                                  what=what,
+                                                  cancel_check=cancel_check)):
                     continue
                 if retryable and attempt < self.max_retries:
                     delay = min(
@@ -1193,6 +1288,8 @@ class ChatClient:
                 raise ChatFault(
                     f"{what} HTTP {e.code}: {err_body}",
                     fault_class=fault, status=e.code, body=err_body,
+                    rejection=(tool_call_rejection(err_body)
+                               if fault == TOOL_CALL_UNPARSABLE else None),
                 ) from e
             except (urllib.error.URLError, OSError) as e:
                 last_exc = e
@@ -1262,6 +1359,11 @@ class ChatClient:
                 log.warning("ollama stream: skipping malformed line: %r",
                             line[:80])
                 continue
+            if obj.get("error"):
+                # A mid-stream failure: Ollama ends the stream with one
+                # ``{"error": ...}`` line (a tool parser's error among
+                # them), which used to be read past as a short reply.
+                _raise_stream_error(obj, "".join(content_parts))
             msg = obj.get("message") or {}
             if msg:
                 if "role" in msg:
@@ -1665,7 +1767,7 @@ class OpenAICompatChatClient(ChatClient):
                             data[:80])
                 continue
             if isinstance(obj.get("error"), dict) or obj.get("error"):
-                raise OSError(f"stream error from server: {str(obj.get('error'))[:300]}")
+                _raise_stream_error(obj, "".join(content))
             if obj.get("usage"):
                 usage = obj["usage"]
             if obj.get("timings"):

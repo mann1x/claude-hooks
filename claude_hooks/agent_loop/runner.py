@@ -496,7 +496,8 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
                        *,
                        on_tool: Optional[OnTool] = None,
                        repeats: Optional[dict[str, int]] = None,
-                       guards: Optional["ToolGuards"] = None) -> list[dict]:
+                       guards: Optional["ToolGuards"] = None,
+                       cut_off: bool = False) -> list[dict]:
     """Run each tool and return ``role: tool`` messages.
 
     Duplicate (name+args) calls within a single agent loop return a
@@ -519,6 +520,10 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
     verdict rides on the result; a hard one answers the call without
     running it. Each outcome then feeds the loop tracker and the mistake
     limit, and what fired is left in ``guards.hits`` for ``run_loop``.
+
+    Plan D4: on a turn the output cap ended (``cut_off``), a call whose
+    arguments do not parse is answered as cut off, not run — it was not
+    written wrong, it was not finished.
     """
     results: list[dict] = []
     for tc in tool_calls:
@@ -556,6 +561,11 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
             )
             dt_ms = 0
             log.info("tool %s(%s) -> DEDUP stub", name, args_str[:80])
+        elif cut_off and not _json_args(tc):
+            output = silent_turns.truncated_arguments_answer(len(args_str))
+            dt_ms = 0
+            log.info("tool %s: arguments cut off at the output cap (%d "
+                     "chars); not run", name, len(args_str))
         else:
             t0 = time.monotonic()
             try:
@@ -688,6 +698,17 @@ def _reasoning_loop_note(msg: dict, payload: dict, chat_fn: "ChatFn",
         capped_thinking.as_thinking_block(note))
 
 
+def _unparsable_fault(exc: BaseException) -> Optional[BaseException]:
+    """The ``tool_call_unparsable`` fault in ``exc`` or what it wraps."""
+    seen = 0
+    while exc is not None and seen < 4:
+        if getattr(exc, "fault_class", None) == "tool_call_unparsable":
+            return exc
+        exc = exc.__cause__ or exc.__context__
+        seen += 1
+    return None
+
+
 class _SilentTurns:
     """Plan D3 (standard): which silent turns are re-asked, with budgets.
     A tool-calling turn resets the streaks; the intent nudge and the
@@ -697,13 +718,28 @@ class _SilentTurns:
         self.thinking = 0
         self.parse = 0
         self.intent = 0
+        self.rejected = 0
         self.streak = 0
         self.streak_chars = 0
         self.non_convergence_spent = False
 
     def reset(self) -> None:
-        self.thinking = self.parse = 0
+        self.thinking = self.parse = self.rejected = 0
         self.streak = self.streak_chars = 0
+
+    def rejected_call(self, exc: BaseException) -> Optional[tuple[str, dict]]:
+        """Plan D4: ``(reminder, rejection)`` for a call the server could
+        not read, while the budget lasts; ``None`` to let the fault stand.
+        The payload is never repaired: a call cut mid-argument, patched up
+        and run, writes the fragment over the file it names."""
+        fault = _unparsable_fault(exc)
+        if fault is None:
+            return None
+        if self.rejected >= silent_turns.TOOL_CALL_REJECTED_RETRY_BUDGET:
+            return None
+        self.rejected += 1
+        rejection = getattr(fault, "rejection", None) or {}
+        return silent_turns.rejected_call_reminder(rejection), rejection
 
     def reask(self, response: dict, msg: dict, *, tools_offered: bool
               ) -> Optional[tuple[str, str]]:
@@ -906,7 +942,32 @@ def run_loop(
                 seen_calls.clear()
                 repeats.clear()
         t_iter = time.monotonic()
-        final = chat_fn(payload)
+        try:
+            final = chat_fn(payload)
+        except Exception as exc:
+            recovered = silent.rejected_call(exc)
+            if recovered is None:
+                raise
+            # Plan D4: nothing ran and nothing changed. Whatever streamed
+            # before the call is kept; the call is asked for again.
+            reminder, rejection = recovered
+            _emit_guard(config, {
+                "guard": "silent_turn", "kind": "tool_call_unparsable",
+                "action": "reask", "iteration": i,
+                "attempt": silent.rejected,
+                "limit": silent_turns.TOOL_CALL_REJECTED_RETRY_BUDGET,
+                **({"rejection": rejection} if rejection else {}),
+                "error": str(exc)[:300]})
+            log.warning("tool call rejected as unreadable on iter %d "
+                        "(%d/%d): %s", i, silent.rejected,
+                        silent_turns.TOOL_CALL_REJECTED_RETRY_BUDGET,
+                        str(exc)[:200])
+            partial = (getattr(_unparsable_fault(exc), "partial", "")
+                       or "").strip()
+            payload["messages"] = list(payload["messages"]) + (
+                [{"role": "assistant", "content": partial}] if partial else []
+            ) + [{"role": "user", "content": reminder, "_harness": True}]
+            continue
         iter_ms = int((time.monotonic() - t_iter) * 1000)
         _notify_response(config, payload, final)
         if on_iter is not None:
@@ -1092,6 +1153,8 @@ def run_loop(
         batch = execute_tool_calls(
             runnable, cwd, seen_calls, tool_executor,
             on_tool=on_tool, repeats=repeats, guards=guards,
+            cut_off=(choice.get("done_reason") or final.get("done_reason")
+                     or finish_reason) == "length",
         )
         payload["messages"].extend(batch)
         for tc in results_called:
