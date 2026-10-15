@@ -7,7 +7,7 @@ area: consultants.guards
 tags: [council, cerebriline]
 plan: docs/PLAN-council-cerebriline.md
 created: 2026-10-14T13:22:11Z
-updated: 2026-10-15T03:56:39Z
+updated: 2026-10-15T09:11:09Z
 sessions: [0a7a5bf4]
 ---
 
@@ -20,6 +20,7 @@ Milestone D (D1-D15) scoped for unattended runs per report 08: loop guards alway
 - [ ] strict profile configurable from menu and CLI, per project and per run
 
 ## Log
+- 2026-10-15 09:11Z [0a7a5bf4] D9 built on the owner's go: f52898c wrap-up (graceful stop: loops end on one report, the gate skips unstarted work, the synthesizer is told the research is partial, result.partial) plus a fix for a pre-existing bug: a cancel during a critic asking for more research looped to the recursion limit and ended "graph crashed" (bug-1022). a237f96 retry-lanes: first-round lanes failed on infra/model_missing/context_overflow rerun as a child session; not counted against the follow-up cap. Not built: the xauto auto-retry before synthesis, and carrying a wrap-up across an engine restart. Suite 7543. Milestone D complete except those two.
 - 2026-10-15 03:56Z [0a7a5bf4] 3c21e29 D7 for tool_executor and coder (per failover attempt: class / no_artifacts / empty_message as task_error); single-call roles not wired by design. d9976a0 rules bullet for D9 infra-wait. Suite 7522 passed / 33 skipped. Only D9 retry-lanes + graceful stop remain, waiting on the owner. Bench 15/20 held for opencoti's CPU timing run on eleven2go (~1 h from 05:52, they mail DONE).
 - 2026-10-15 03:40Z [0a7a5bf4] 06b25dc: mangled tool-name recovery (40 researcher calls in 104 transcripts answered "unknown tool"). 0de00fc D12: tool_use_by_role.py; tool_executor drops survey_project/recall_memory (0/215). Suite 7517. Open D: D9 (retry-lanes, graceful cancel, infra-wait event), D7 for non-researcher roles. Bench paused at 15/20 awaiting xollama AFTER mail.
 - 2026-10-15 03:30Z [0a7a5bf4] D3-strict committed 8bf43ed: [guards] profile standard|strict + roles; set-guards CLI, menu item 14, per-run --guards, seed only when non-default. Suite 7513. Bench paused 05:29 at 15/20 (results/2026-10-15/compaction-v2) for xollama v0.40.4-xollama.1 check; first kill hit the wrapper pid (bug-1020), corrected. Resume on xollama AFTER mail. Open D: D9, D12, D7 for other roles.
