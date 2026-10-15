@@ -145,6 +145,11 @@ class LoopConfig:
     mistake_limit: int = loop_detection.MISTAKE_LIMIT
     polling_tools: tuple[str, ...] = ()
     on_guard: Optional[Callable[[dict], None]] = None
+    # Plan §0.7 / D3: the nudge profile. "strict" (for small models)
+    # re-asks a thinking-only turn 3 times instead of 2 and warns at
+    # least 2 turns before the cap. The loop guards are in no profile.
+    # Callers pair it with ``force_first_tool_call`` for the lanes.
+    guard_profile: str = "standard"
 
 
 #: Plan D13: every message the harness writes into a conversation opens
@@ -449,10 +454,12 @@ LOOP_GUARD_LAST_WARNING = (
     "loop guard stops ends this task. Send something different, or give "
     "your answer with what you have.")
 
-def cap_warning_margin(cap: int) -> int:
+def cap_warning_margin(cap: int, *, strict: bool = False) -> int:
     """Turns before the cap at which a loop is told to wrap up (plan D6,
-    Cerebriline ``capWarningMargin``): a tenth of the cap, 1 to 5."""
-    return min(5, max(1, int(cap * 0.1 + 0.5)))
+    Cerebriline ``capWarningMargin``): a tenth of the cap, 1 to 5; at
+    least 2 under the strict profile (plan §0.7)."""
+    margin = min(5, max(1, int(cap * 0.1 + 0.5)))
+    return max(2, margin) if strict else margin
 
 
 CAP_WARNING = (
@@ -751,7 +758,10 @@ class _SilentTurns:
     A tool-calling turn resets the streaks; the intent nudge and the
     non-convergence line are spent once per loop."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, strict: bool = False) -> None:
+        self.thinking_budget = (silent_turns.THINKING_ONLY_RETRY_BUDGET_STRICT
+                                if strict else
+                                silent_turns.THINKING_ONLY_RETRY_BUDGET)
         self.thinking = 0
         self.parse = 0
         self.intent = 0
@@ -790,7 +800,7 @@ class _SilentTurns:
         found = None
         only = silent_turns.thinking_only(content, reasoning)
         if only is not None:
-            if self.thinking < silent_turns.THINKING_ONLY_RETRY_BUDGET:
+            if self.thinking < self.thinking_budget:
                 self.thinking += 1
                 found = (("tool_call_in_thinking",
                           silent_turns.TOOL_CALL_IN_THINKING_REMINDER)
@@ -921,7 +931,8 @@ def run_loop(
     nudger = reasoning_repetition.RepetitionNudger()
     guards = ToolGuards(config)
     supervisor = struggle_supervisor.StruggleSupervisor(config.max_iterations)
-    silent = _SilentTurns()
+    strict = getattr(config, "guard_profile", "standard") == "strict"
+    silent = _SilentTurns(strict=strict)
 
     if config.tools_available and preseed_builder is not None:
         preseed = preseed_builder(cwd)
@@ -962,7 +973,7 @@ def run_loop(
         # than let the cap cut the lane off mid-step.
         if (config.tools_available and not tools_stripped and not cap_warned
                 and i > 0 and config.max_iterations - (i + 1)
-                < cap_warning_margin(config.max_iterations)):
+                < cap_warning_margin(config.max_iterations, strict=strict)):
             cap_warned = True
             text = CAP_WARNING.format(turn=i + 1, cap=config.max_iterations)
             last = (payload.get("messages") or [None])[-1]

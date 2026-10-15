@@ -50,6 +50,7 @@ from typing import Any, Callable, Optional
 from consultants.engine.coder_defaults import language_from_path
 from consultants.engine.state_v2 import CoderArtifact, CoderTaskItem
 from consultants.engine.recorder import guard_sink
+from consultants.engine.council import _guard_profile
 
 log = logging.getLogger("consultants.engine.coder")
 
@@ -641,7 +642,9 @@ def coder_node(state: dict,
             force_answer_after=6,
             tools_available=True,
             think=think,
-            force_first_tool_call=False,
+            # Plan §0.7: strict lanes open with a tool call.
+            force_first_tool_call=_guard_profile(state, "coder") == "strict",
+            guard_profile=_guard_profile(state, "coder"),
             on_guard=guard_sink(recorder, role="coder",
                                  round=parent_round, lane_idx=lane_idx),
         )

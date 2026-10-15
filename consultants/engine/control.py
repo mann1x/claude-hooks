@@ -205,6 +205,11 @@ def runtime_control_defaults(
     protocol = getattr(cfg, "protocol", None)
     if protocol is not None and getattr(protocol, "typed", False):
         rc["typed_protocol"] = True
+    # Plan §0.7: the nudge profile, present only when not all standard.
+    guards = getattr(cfg, "guards", None)
+    if guards is not None and not guards.is_default():
+        rc["guards"] = {"profile": guards.profile,  # type: ignore[typeddict-item]
+                        "roles": dict(guards.roles)}
     layers = budget_layers(cfg)
     if layers:
         rc["budget"] = layers  # type: ignore[typeddict-item]

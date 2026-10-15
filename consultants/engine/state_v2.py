@@ -263,6 +263,7 @@ class RuntimeControl(TypedDict, total=False):
     # ---- topology gates ----
     enabled_roles: list[str]    # subset of the project's roles
     typed_protocol: bool        # plan G: roles hand in typed records
+    guards: dict                # plan §0.7: {profile, roles}, only when not all standard
     budget: dict                # plan B: budget knob layers (control.budget_layers)
     think: dict                 # plan B3: per-(role, model) think, "<role>@<model>"
     sampling_run: str           # plan B4: scopes per-run seed uniqueness

@@ -523,6 +523,20 @@ DEFAULT_IDLE_TIMEOUT_S = 1800.0      # 30 minutes
 DEFAULT_REAPER_INTERVAL_S = 60.0     # check every minute
 
 
+def _apply_guards_override(cfg, body: dict) -> None:
+    """Plan §0.7: a run's ``guards`` sets the nudge profile for that run
+    (every role); 400 on a value that is not a profile."""
+    want = body.get("guards")
+    if not want:
+        return
+    from fastapi import HTTPException
+    try:
+        cfg.guards.profile = cc.check_guard_profile(want)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    cfg.guards.roles = {}
+
+
 def create_app(*, run_council: Optional[RunCouncilFn] = None,
                max_workers: int = 4,
                idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S,
@@ -675,6 +689,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                             f"valid: {sorted(cc.EFFORT_BUDGETS)}"),
                 )
             cfg.effort = effort_override
+        _apply_guards_override(cfg, body)
 
         err = cc.validate_pipeline(cfg)
         if err:
@@ -861,6 +876,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                         f"valid: {sorted(cc.EFFORT_BUDGETS)}"),
             )
         cfg.effort = effort_override
+        _apply_guards_override(cfg, body)
 
         # ---- consultancy review-loop cap enforcement --------------- #
         # Resolve the consultancy root (the chain anchor), then enforce

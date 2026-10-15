@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 THINKING_ONLY_RETRY_BUDGET = 2
+#: Under ``[guards] profile = "strict"`` (plan §0.7): 3, the fork's own.
+THINKING_ONLY_RETRY_BUDGET_STRICT = 3
 TOOL_CALL_PARSE_RETRY_BUDGET = 2
 ANNOUNCED_INTENT_BUDGET = 1
 NON_CONVERGENCE_STREAK = 2
@@ -215,5 +217,6 @@ __all__ = ["thinking_only", "unparsed_tool_call", "unparsed_reminder",
            "TOOL_CALL_UNPARSABLE_REMINDER", "TOOL_CALL_REJECTED_RETRY_BUDGET",
            "THINKING_ONLY_REMINDER", "THINKING_ONLY_ANSWER_REMINDER",
            "TOOL_CALL_IN_THINKING_REMINDER", "THINKING_ONLY_RETRY_BUDGET",
+           "THINKING_ONLY_RETRY_BUDGET_STRICT",
            "TOOL_CALL_PARSE_RETRY_BUDGET", "ANNOUNCED_INTENT_BUDGET",
            "NON_CONVERGENCE_STREAK", "NON_CONVERGENCE_MIN_REASONING_CHARS"]

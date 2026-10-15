@@ -158,6 +158,8 @@ def cmd_consult(args, base: str) -> int:
     }
     if args.effort:
         body["effort"] = args.effort
+    if getattr(args, "guards", None):
+        body["guards"] = args.guards
     if getattr(args, "add_dir", None):
         # v1.8+: forward extra allowed roots to the engine. The engine
         # unions them with settings-file auto-discovery and stores the
@@ -291,6 +293,8 @@ def cmd_follow_up(args, base: str) -> int:
     body = {"message": args.message}
     if args.effort:
         body["effort"] = args.effort
+    if getattr(args, "guards", None):
+        body["guards"] = args.guards
     if args.trace is True or args.trace is False:
         _warn_trace_deprecated()
     # Always include cwd so cold-path follow-ups (parent evicted /
@@ -662,6 +666,8 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
             "http_port": cfg.service.http_port,
         },
         "protocol": {"typed": cfg.protocol.typed},
+        "guards": {"profile": cfg.guards.profile,
+                   "roles": dict(cfg.guards.roles)},
         "decision": {k: getattr(cfg.decision, k) for k in (
             "enabled", "url", "model", "key_file", "floor",
             "high_stakes_floor", "timeout_s", "seams")},
@@ -1301,6 +1307,15 @@ def cmd_config_set_protocol(args, base: str) -> int:
         typed = args.typed.lower() in ("on", "true", "yes", "1")
     try:
         cfg = cc.set_protocol(typed=typed, **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_config_set_guards(args, base: str) -> int:
+    try:
+        cfg = cc.set_guards(profile=args.profile, role=args.role,
+                            **_resolve_active_scope(args))
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
     return _emit_config(cfg, args)
@@ -2085,6 +2100,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Project root (default: current directory).")
     c.add_argument("--effort", choices=tuple(cc.EFFORT_BUDGETS),
                    help="Override effort tier for this consultation.")
+    c.add_argument("--guards", choices=cc.GUARD_PROFILES,
+                   help="Nudge profile for this run (plan §0.7): strict "
+                        "for small models. Default: the config's.")
     # DEPRECATED in v1.1 — kept as a no-op so muscle memory doesn't
     # break. v1.1 always writes the structured event log to
     # transcript.db; there's no on/off switch any more.
@@ -2144,6 +2162,8 @@ def build_parser() -> argparse.ArgumentParser:
     fu.add_argument("--effort", choices=tuple(cc.EFFORT_BUDGETS),
                     help="Override effort for this follow-up "
                          "(default: same as parent).")
+    fu.add_argument("--guards", choices=cc.GUARD_PROFILES,
+                    help="Nudge profile for this follow-up (plan §0.7).")
     fu.add_argument("--trace", dest="trace",
                     action="store_true", default=None,
                     help="DEPRECATED: no-op in v1.1.")
@@ -2810,6 +2830,18 @@ def build_parser() -> argparse.ArgumentParser:
     cpr.add_argument("--typed", choices=["on", "off"])
     _add_scope_args(cpr)
     cpr.set_defaults(fn=cmd_config_set_protocol)
+
+    cgd = cfg_sub.add_parser(
+        "set-guards",
+        help="The nudge profile (plan §0.7): --profile strict for small "
+             "models — lanes open with a tool call, the planner is re-asked "
+             "when its plan does not parse, 3 thinking-only re-asks, the cap "
+             "warning 2+ turns early. --role sets one role. The loop guards "
+             "are always on, in no profile.")
+    cgd.add_argument("--profile", required=True, choices=cc.GUARD_PROFILES)
+    cgd.add_argument("--role", choices=cc.GUARD_ROLES)
+    _add_scope_args(cgd)
+    cgd.set_defaults(fn=cmd_config_set_guards)
 
     cde = cfg_sub.add_parser(
         "set-decision",

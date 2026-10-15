@@ -56,6 +56,7 @@ from typing import Any, Optional
 
 from consultants.engine.state_v2 import ToolPlanItem, ToolResult
 from consultants.engine.recorder import guard_sink
+from consultants.engine.council import _guard_profile
 
 log = logging.getLogger("consultants.engine.tool_executor")
 
@@ -281,7 +282,9 @@ def tool_executor_node(state: dict,
             force_answer_after=5,
             tools_available=True,
             think=think,
-            force_first_tool_call=False,
+            # Plan §0.7: strict lanes open with a tool call.
+            force_first_tool_call=_guard_profile(state, "tool_executor") == "strict",
+            guard_profile=_guard_profile(state, "tool_executor"),
             on_guard=guard_sink(recorder, role="tool_executor",
                                  round=parent_round, lane_idx=lane_idx),
         )

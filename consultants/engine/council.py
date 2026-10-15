@@ -92,6 +92,29 @@ def _emit_finished(role: str, *,
         log.exception("emit NodeFinished raised; ignored")
 
 
+def _emit_guard(sink, event: dict) -> None:
+    if sink is not None:
+        try:
+            sink(event)
+        except Exception:  # pragma: no cover
+            log.exception("guard sink raised; ignored")
+
+
+def _guard_profile(state: dict, role: str) -> str:
+    """The nudge profile for ``role`` this run (plan §0.7): the role's own
+    override, else the run's, else ``standard``. Absent from
+    ``runtime_control`` means all standard."""
+    g = (state.get("runtime_control") or {}).get("guards") or {}
+    return ((g.get("roles") or {}).get(role) or g.get("profile")
+            or "standard")
+
+
+PLANNER_REASK_NOTE = (
+    "Your plan did not come through as a numbered list, so the research "
+    "lanes cannot be split from it. Write it again as a numbered list — "
+    "one investigation per line, `1.`, `2.`, … — and nothing else.")
+
+
 def _record_failed_exit(recorder, role: str, round: int,
                         lane_idx: Optional[int], duration_ms: int,
                         exc: BaseException, failure_class: str) -> None:
@@ -2411,6 +2434,32 @@ def planner_node(state: dict, *, chat_client, model: str,
                 duration_seconds=0.0,
             )],
         }
+    if (_guard_profile(state, "planner") == "strict"
+            and not parse_plan_items(plan)):
+        # Plan §0.7 (strict): one re-ask when the plan does not parse.
+        log.info("planner: plan did not parse as a list; re-asking once "
+                 "(strict profile)")
+        _emit_guard(guard_sink(recorder, role="planner", round=1), {
+            "guard": "silent_turn", "kind": "plan_unparsed",
+            "action": "reask", "profile": "strict"})
+        try:
+            plan2, pt2, ct2 = _role_turn(
+                chat_client, model, list(msgs) + [
+                    {"role": "assistant", "content": plan},
+                    harness_note(PLANNER_REASK_NOTE)],
+                think=_think_for(state, "planner", model, think),
+                recorder=recorder, role="planner", round=1,
+                tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
+                result=_typed_result_name(state, "planner"),
+                knobs=_budget_knobs(state, "planner", model),
+                sampling=_instance_sampling(state, "planner", model,
+                                            chat_client),
+            )
+            pt, ct = pt + pt2, ct + ct2
+            if parse_plan_items(plan2):
+                plan = plan2
+        except Exception:
+            log.exception("planner re-ask failed; keeping the first plan")
     dt = time.monotonic() - t0
     turn = RoleTurn(
         role="planner", round=1, content=plan,
@@ -3017,7 +3066,10 @@ def researcher_node(state: dict, *,
             force_answer_after=caps.researcher_force_answer_after,
             tools_available=True,
             think=_think_for(state, "researcher", model, think),
-            force_first_tool_call=False,
+            # Plan §0.7: strict lanes open with a tool call, and a report
+            # after none is re-asked once (the force-first retry).
+            force_first_tool_call=_guard_profile(state, "researcher") == "strict",
+            guard_profile=_guard_profile(state, "researcher"),
             prepare_payload=_struggle_watch(
                 state, _budgeter, recorder=recorder, lane_idx=lane_idx),
             on_response=_budgeter.observe,

@@ -919,6 +919,39 @@ class ProtocolConfig:
     typed: bool = False
 
 
+GUARD_PROFILES = ("standard", "strict")
+#: Roles the strict profile changes (plan §0.7). The critic, meta-critic,
+#: adversary, refuter and synthesizer are never nudged under either.
+GUARD_ROLES = ("planner", "researcher", "tool_executor", "coder")
+
+
+@dataclass
+class GuardsConfig:
+    """The nudge profile (plan §0.7, D3). ``strict`` is for councils on
+    small models: the lanes (researcher, tool_executor, coder) must open
+    with a tool call and a report after none is re-asked once; the
+    planner is re-asked once when its plan does not parse; thinking-only
+    re-asks go from 2 to 3; the wrap-up warning comes at least 2 turns
+    before the cap. ``roles`` overrides the profile per role. The loop
+    guards are in no profile: always on."""
+    profile: str = "standard"
+    roles: dict = field(default_factory=dict)
+
+    def for_role(self, role: str) -> str:
+        return self.roles.get(role) or self.profile
+
+    def is_default(self) -> bool:
+        return self.profile == "standard" and all(
+            v == "standard" for v in self.roles.values())
+
+
+def check_guard_profile(value: Any) -> str:
+    v = str(value or "").strip().lower()
+    if v not in GUARD_PROFILES:
+        raise ValueError(f"profile must be one of {', '.join(GUARD_PROFILES)}")
+    return v
+
+
 #: Where a decision model is asked (plan H). ``review``: an accept /
 #: followup / research recommendation on the council's answer;
 #: ``confidence``: a scored confidence beside the critic's and
@@ -1039,6 +1072,7 @@ class ConsultantsConfig:
     })
     endpoints: dict[str, EndpointConfig] = field(default_factory=dict)
     protocol: ProtocolConfig = field(default_factory=ProtocolConfig)
+    guards: GuardsConfig = field(default_factory=GuardsConfig)
     decision: DecisionConfig = field(default_factory=DecisionConfig)
     # Plan B: ``[budget]`` / ``[sampling]`` — only the keys a layer set.
     budget: dict[str, Any] = field(default_factory=dict)
@@ -1491,6 +1525,23 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
     if isinstance(proto, dict) and isinstance(proto.get("typed"), bool):
         base.protocol.typed = proto["typed"]
 
+    # nudge profile (plan §0.7)
+    gd = raw.get("guards") or {}
+    if isinstance(gd, dict) and gd:
+        try:
+            if "profile" in gd:
+                base.guards.profile = check_guard_profile(gd["profile"])
+        except ValueError as e:
+            log.warning("consultants config: guards.profile ignored: %s", e)
+        for role, v in (gd.get("roles") or {}).items():
+            try:
+                if role not in GUARD_ROLES:
+                    raise ValueError(f"role must be one of {', '.join(GUARD_ROLES)}")
+                base.guards.roles[role] = check_guard_profile(v)
+            except ValueError as e:
+                log.warning("consultants config: guards.roles.%s ignored: %s",
+                            role, e)
+
     # decision model (plan H)
     dec = raw.get("decision") or {}
     if isinstance(dec, dict) and dec:
@@ -1937,6 +1988,21 @@ def _render(cfg: ConsultantsConfig, *,
              "synthesizer stays prose. Off until benched.")
     L.append(f"typed = {'true' if cfg.protocol.typed else 'false'}")
     L.append("")
+    g = cfg.guards
+    if not g.is_default():
+        L.append("[guards]")
+        L.append("# The nudge profile (plan §0.7): \"strict\" for small "
+                 "models — lanes must open with a tool call, the planner is "
+                 "re-asked when its plan does not parse, 3 thinking-only "
+                 "re-asks, the cap warning 2+ turns early. Loop guards are "
+                 "always on, in no profile.")
+        L.append(f"profile = {_toml_value(g.profile)}")
+        if g.roles:
+            L.append("")
+            L.append("[guards.roles]")
+            for role in sorted(g.roles):
+                L.append(f"{role} = {_toml_value(g.roles[role])}")
+        L.append("")
     d = cfg.decision
     if d != DecisionConfig():
         L.append("[decision]")
@@ -2275,6 +2341,27 @@ def set_protocol(*, typed: Optional[bool] = None, scope: str = "user",
     cfg = _load_for_edit(scope, cwd)
     if typed is not None:
         cfg.protocol.typed = bool(typed)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_guards(*, profile: Optional[str] = None, role: Optional[str] = None,
+               scope: str = "user",
+               cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set ``[guards] profile``, or one role's override with ``role``
+    (``profile = "standard"`` on a role removes the override when the
+    run-wide profile is standard). Bad values raise ``ValueError``."""
+    if profile is None:
+        raise ValueError("--profile is required (standard or strict)")
+    checked = check_guard_profile(profile)
+    if role is not None and role not in GUARD_ROLES:
+        raise ValueError(f"role must be one of {', '.join(GUARD_ROLES)}")
+    cfg = _load_for_edit(scope, cwd)
+    if role is None:
+        cfg.guards.profile = checked
+    elif checked == cfg.guards.profile:
+        cfg.guards.roles.pop(role, None)
+    else:
+        cfg.guards.roles[role] = checked
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 

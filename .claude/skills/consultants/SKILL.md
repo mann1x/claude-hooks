@@ -833,6 +833,16 @@ and **More…** opens the next batch (ending with **Done**):
 13. **Decision model** — a scorer (TypeSafe's Jev, or a local
     `/v1/systemone` model such as tev1) the council asks at four seams:
     review recommendation, confidence, struggle, citations — see Subflow M
+14. **Guard profile** — `claude-consultants config set-guards --profile
+    standard|strict [--role planner|researcher|tool_executor|coder]`.
+    `strict` is for councils on small models: lanes must open with a tool
+    call (a report after none is re-asked once), the planner is re-asked
+    once when its plan does not parse, thinking-only turns are re-asked 3
+    times instead of 2, and the cap warning comes at least 2 turns early.
+    Critic, meta-critic, adversary, refuter and synthesizer are never
+    nudged. Per run: `ask` / `follow-up --guards strict`. Not the same
+    knob as `adversary_strictness` (that tunes the critic's judgement,
+    not lane behaviour). The loop guards are always on in both profiles.
 
 Loop back to step 1 after each successful change; exit on **Done**.
 
