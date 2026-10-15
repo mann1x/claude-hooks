@@ -1065,11 +1065,8 @@ def cmd_config_list_models(args, base: str) -> int:
     """Proxy /api/tags from the configured Ollama upstream and filter
     to tools-capable models. The skill uses this to populate the
     AskUserQuestion options."""
-    upstream = (
-        os.environ.get("CALIBER_GROUNDING_UPSTREAM")
-        or os.environ.get("OLLAMA_HOST")
-        or "http://192.168.178.2:11433"
-    )
+    from claude_hooks import ollama_upstream
+    upstream = ollama_upstream.url()
     try:
         with urllib.request.urlopen(f"{upstream}/api/tags",
                                     timeout=10.0) as resp:
@@ -3136,7 +3133,7 @@ def build_parser() -> argparse.ArgumentParser:
     se_coder.add_argument(
         "--ollama-base", default=None,
         help="Override the cloud proxy URL. Default: read from "
-             "config or 192.168.178.2:11433.",
+             "config or the host's Ollama URL.",
     )
     se_coder.add_argument(
         "--judge-model", default=None,
@@ -3203,7 +3200,7 @@ def build_parser() -> argparse.ArgumentParser:
     se_stall.add_argument(
         "--ollama-base", default=None,
         help="Override the cloud proxy URL. Default: read from "
-             "config or 192.168.178.2:11433.",
+             "config or the host's Ollama URL.",
     )
     se_stall.add_argument(
         "--output-dir", default=None,
@@ -3278,7 +3275,7 @@ def build_parser() -> argparse.ArgumentParser:
     se_te.add_argument(
         "--ollama-base", default=None,
         help="Override the cloud proxy URL. Default: read from "
-             "config or 192.168.178.2:11433.",
+             "config or the host's Ollama URL.",
     )
     se_te.add_argument(
         "--judge-model", default=None,

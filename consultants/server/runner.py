@@ -9,7 +9,6 @@ requiring LangChain in the test env. Production code calls
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from pathlib import Path
@@ -1939,22 +1938,8 @@ def _role_client(cfg, role: str, ollama_base_url: str):
 
 
 def default_ollama_url() -> str:
-    """Pick the Ollama base URL the consultants service should use.
-
-    Precedence:
-      1. ``CALIBER_GROUNDING_UPSTREAM`` — canonical proxy URL across
-         claude-hooks. If set, we trust it verbatim.
-      2. ``OLLAMA_HOST`` — only when it looks like a real URL
-         (``http://`` / ``https://`` prefix). It's frequently set to a
-         bare bind address (``0.0.0.0`` on pandorum) for the local
-         Ollama daemon, which is not a valid base URL — silently
-         ignore those.
-      3. The cluster-default proxy at 192.168.178.2:11433.
-    """
-    upstream = os.environ.get("CALIBER_GROUNDING_UPSTREAM")
-    if upstream:
-        return upstream
-    ollama_host = os.environ.get("OLLAMA_HOST")
-    if ollama_host and ollama_host.startswith(("http://", "https://")):
-        return ollama_host
-    return "http://192.168.178.2:11433"
+    """The Ollama base URL the consultants service uses:
+    :func:`claude_hooks.ollama_upstream.url` (env override, then the
+    host's ``ollama.url``, then Ollama's default)."""
+    from claude_hooks import ollama_upstream
+    return ollama_upstream.url()

@@ -134,13 +134,13 @@ def build_config(args: argparse.Namespace) -> Config:
         )
     return Config(
         dsn=dsn,
-        qdrant_url=args.qdrant_url or os.environ.get("QDRANT_URL", "http://192.168.178.2:6333"),
+        qdrant_url=args.qdrant_url or os.environ.get("QDRANT_URL", "http://localhost:6333"),
         qdrant_collection=args.qdrant_collection or os.environ.get("QDRANT_COLLECTION", "memory"),
         memory_kg_jsonl=Path(
             args.memory_kg_jsonl
             or os.environ.get("MEMORY_KG_JSONL", "/shared/config/mcp-memory/data/memory.jsonl")
         ),
-        ollama_url=args.ollama_url or os.environ.get("OLLAMA_URL", "http://192.168.178.2:11434"),
+        ollama_url=args.ollama_url or os.environ.get("OLLAMA_URL", "http://localhost:11434"),
         ollama_keep_alive=os.environ.get("OLLAMA_KEEP_ALIVE", "15m"),
         batch_size=args.batch_size,
         embed_batch_size=args.embed_batch_size,

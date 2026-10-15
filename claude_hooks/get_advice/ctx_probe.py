@@ -11,27 +11,22 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import urllib.error
 import urllib.request
 from typing import Optional
 
 log = logging.getLogger("claude_hooks.get_advice.ctx_probe")
 
-DEFAULT_BASE_URL = "http://192.168.178.2:11433"
 PROBE_TIMEOUT_S = 10.0
 
 _cache: dict[tuple[str, str], Optional[int]] = {}
 
 
 def base_url_default() -> str:
-    """Same env var the caliber proxy reads. One knob per host."""
-    raw = os.environ.get("CALIBER_GROUNDING_UPSTREAM", "").strip()
-    if not raw:
-        return DEFAULT_BASE_URL
-    if raw.endswith("/v1"):
-        raw = raw[: -len("/v1")]
-    return raw.rstrip("/")
+    """The host's Ollama URL, as the caliber proxy and the consultants
+    engine resolve it (:mod:`claude_hooks.ollama_upstream`)."""
+    from claude_hooks import ollama_upstream
+    return ollama_upstream.url()
 
 
 def probe_max_ctx(model: str, base_url: Optional[str] = None,

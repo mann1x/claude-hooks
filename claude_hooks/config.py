@@ -568,6 +568,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
             },
         },
     },
+    # The Ollama server the /consultants engine, /get-advice and the
+    # caliber grounding proxy use (claude_hooks/ollama_upstream.py).
+    # Empty: CALIBER_GROUNDING_UPSTREAM / a URL-shaped OLLAMA_HOST, else
+    # Ollama's own http://localhost:11434. Never ship a host here.
+    "ollama": {
+        "url": "",
+    },
     "reflect": {
         "enabled": True,
         "max_memories_to_analyze": 50,

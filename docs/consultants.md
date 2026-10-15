@@ -254,9 +254,12 @@ machinery beneath the store.
 ## Prerequisites
 
 - An **Ollama backend** reachable from the install host. The
-  engine reads its endpoint from
-  `~/.claude/consultants-config.toml` (which install.py seeds from
-  `CALIBER_GROUNDING_UPSTREAM` if present).
+  engine resolves it as /get-advice and the caliber proxy do
+  (`claude_hooks/ollama_upstream.py`): `CALIBER_GROUNDING_UPSTREAM`,
+  a URL-shaped `OLLAMA_HOST`, `ollama.url` in
+  `config/claude-hooks.json` (asked by `install.py`), else
+  `http://localhost:11434`. `python -m claude_hooks.ollama_upstream
+  --explain` and `scripts/verify_deploy.py` say which applies.
 - The `claude-consultants` CLI on PATH. install.py drops it as a
   POSIX-shell wrapper at `~/.local/bin/claude-consultants` (Linux
   / macOS) or `%LOCALAPPDATA%\claude-hooks\bin\claude-consultants[.cmd]`

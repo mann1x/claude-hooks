@@ -34,8 +34,11 @@ Exit code: 0 if every check passed, 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import sys
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -476,6 +479,40 @@ def check_version(r: Results) -> None:
         r.add(FAIL, "claude_hooks importable", str(e))
 
 
+def check_ollama_upstream(r: Results) -> None:
+    """The Ollama server /consultants, /get-advice and the caliber proxy
+    resolve (plan §8): which URL, from where, and whether it answers.
+    A WARN, never a FAIL — a cloud-only host may have no Ollama."""
+    print("ollama upstream")
+    try:
+        from claude_hooks import ollama_upstream
+        from claude_hooks.config import load_config
+        cfg = load_config()
+    except Exception as e:
+        r.add(WARN, "ollama upstream", f"unavailable: {type(e).__name__}")
+        return
+    url, source = ollama_upstream.resolve(cfg)
+    if source == "default":
+        # Hooks that name a remote Ollama while the engines fall back to
+        # localhost: almost always an upgraded host that predates
+        # ollama.url. Say so; never copy the value over.
+        named = [u for u in (
+            ((cfg.get("hooks") or {}).get("user_prompt_submit") or {}).get("hyde_url"),
+            (cfg.get("reflect") or {}).get("ollama_url"),
+        ) if isinstance(u, str) and u and not re.search(
+            r"//(localhost|127\.0\.0\.1|\[::1\])[:/]", u)]
+        if named:
+            r.add(WARN, "ollama.url",
+                  f"unset, engines use {url} while hooks name {named[0]} "
+                  "— set ollama.url in config/claude-hooks.json")
+    try:
+        with urllib.request.urlopen(f"{url}/api/version", timeout=5) as resp:
+            version = json.loads(resp.read() or b"{}").get("version")
+        r.add(PASS, f"ollama {url}", f"{source}, version {version}")
+    except Exception as e:
+        r.add(WARN, f"ollama {url}", f"{source}, not answering ({type(e).__name__})")
+
+
 # --------------------------------------------------------------------- #
 # Skills
 # --------------------------------------------------------------------- #
@@ -659,6 +696,7 @@ def main() -> int:
         check_skills(r)
     else:
         check_version(r)
+        check_ollama_upstream(r)
         check_providers(r)
         check_embedder(r)
         check_lsp_daemons(r)

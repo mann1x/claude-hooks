@@ -318,7 +318,8 @@ saved name is later removed from the runner, it silently drops out
 
 - **CLI returns `{"ok": false, "error": "..."}`** → surface the
   error. For `ask`, recommend `/get-advice model` to switch model
-  or check connectivity to the proxy (default `192.168.178.2:11433`).
+  or check connectivity to the host's Ollama server
+  (`python -m claude_hooks.ollama_upstream --explain`).
 - **Advisor reply empty** → try once more with a sharper question;
   treat a second empty reply as session failure.
 - **Network timeout (600s)** → session failure, do not retry silently.

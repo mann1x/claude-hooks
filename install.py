@@ -812,7 +812,7 @@ def _setup_proxy_orchestrator(
     # Independent of Q1 — pandorum points at solidpc's proxy without
     # installing one locally. Label reflects what's already in
     # settings.json:
-    #   - remote @ http://192.168.178.2:38080  (anything non-local,
+    #   - remote @ http://<proxy-host>:38080   (anything non-local,
     #                                           non-anthropic)
     #   - local  @ http://127.0.0.1:38080      (loopback / localhost)
     #   - no                                   (unset or official URL)
@@ -4050,7 +4050,8 @@ def _setup_embedding_engine(
 
         remote_llamafile_block: Optional[dict] = None
         if use_remote_llamafile:
-            default_url = remote_url_existing or "http://192.168.178.2:38092/embedding"
+            # No shipped host: the operator names the producer host.
+            default_url = remote_url_existing
             # 180 s default: a LAN llamafile pays the same superlinear
             # per-payload cost as a local one plus the network hop.
             # Prompt default reflects the current config so a scripted
@@ -4060,9 +4061,12 @@ def _setup_embedding_engine(
                 url = remote_url_existing or default_url
                 timeout = default_timeout
             else:
-                url = input(
-                    f"    Endpoint URL [{default_url}]: "
-                ).strip() or default_url
+                url = ""
+                while not url:
+                    url = input(
+                        f"    Endpoint URL [{default_url}]: " if default_url
+                        else "    Endpoint URL (e.g. http://<host>:38092/embedding): "
+                    ).strip() or default_url
                 raw_to = input(
                     f"    Timeout seconds [{default_timeout:g}]: "
                 ).strip()
@@ -4663,6 +4667,36 @@ def _setup_llamafile_chat_models(
               "config to enable.")
 
 
+def _setup_ollama_upstream(cfg: dict, *, non_interactive: bool) -> None:
+    """Ask for ``ollama.url``: the Ollama server the /consultants engine,
+    /get-advice and the caliber grounding proxy use
+    (``claude_hooks/ollama_upstream.py``). The default is the current
+    value; nothing host-specific is ever proposed. Non-interactive runs
+    keep what is there and write nothing new."""
+    from claude_hooks import ollama_upstream
+
+    block = cfg.setdefault("ollama", {})
+    current = ollama_upstream.normalise(str(block.get("url") or ""))
+    print("\n--- Ollama server (/consultants, /get-advice, caliber proxy) ---")
+    if non_interactive:
+        if current:
+            print(f"  --non-interactive: keeping ollama.url = {current}.")
+        else:
+            u, source = ollama_upstream.resolve(cfg)
+            print(f"  --non-interactive: ollama.url unset; resolves to {u} ({source}).")
+        return
+    proposed = current or ollama_upstream.DEFAULT_URL
+    ans = input(f"  Ollama base URL [{proposed}]: ").strip()
+    chosen = ollama_upstream.normalise(ans) or proposed
+    if chosen == ollama_upstream.DEFAULT_URL and not current:
+        # Ollama's own default needs no setting; leaving it empty keeps
+        # the env overrides in charge.
+        print(f"  Using {chosen} (Ollama's default; ollama.url left unset).")
+        return
+    block["url"] = chosen
+    print(f"  ollama.url = {chosen}")
+
+
 def _setup_chat_backends(
     cfg: dict, *, non_interactive: bool, dry_run: bool,
 ) -> None:
@@ -4672,6 +4706,7 @@ def _setup_chat_backends(
     used — Ollama-bare names and ``llamafile://<label>`` refs coexist
     in the same flows.
     """
+    _setup_ollama_upstream(cfg, non_interactive=non_interactive)
     _setup_ollama_chat(cfg, non_interactive=non_interactive, dry_run=dry_run)
     _setup_llamafile_chat_models(
         cfg, non_interactive=non_interactive, dry_run=dry_run,
@@ -8191,7 +8226,7 @@ def main() -> int:
         "--episodic-client",
         type=str,
         metavar="URL",
-        help="configure as episodic client, pushing transcripts to URL (e.g. http://192.168.178.2:11435)",
+        help="configure as episodic client, pushing transcripts to URL (e.g. http://<server-host>:11435)",
     )
     args = ap.parse_args()
 

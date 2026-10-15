@@ -102,7 +102,7 @@ All optional; defaults shown.
 |---|---|---|
 | `CALIBER_GROUNDING_HOST` | `127.0.0.1` | Bind interface — keep loopback unless you understand the trust model |
 | `CALIBER_GROUNDING_PORT` | `38090` | Bind port |
-| `CALIBER_GROUNDING_UPSTREAM` | `http://127.0.0.1:11434/v1` | Ollama OpenAI-compat endpoint. Override to a remote host (e.g. `http://192.168.178.2:11433/v1`) when Ollama lives elsewhere. |
+| `CALIBER_GROUNDING_UPSTREAM` | host's `ollama.url`, else `http://localhost:11434` | Ollama endpoint (a trailing `/v1` is accepted and dropped). Overrides `ollama.url` for this process. |
 | `CALIBER_GROUNDING_CWD` | `$(pwd)` | The project to ground against. **Must be set if you run the proxy from a different dir than the project** (e.g. as a systemd service). |
 | `CALIBER_GROUNDING_MAX_ITER` | `35` | Cap on tool-call rounds before the proxy strips tools and forces an answer |
 | `CALIBER_GROUNDING_FORCE_ANSWER_AFTER` | `5` | After this many tool rounds, drop `tools` / `tool_choice` so the model commits |
@@ -121,10 +121,12 @@ All optional; defaults shown.
 | `CALIBER_GROUNDING_RETRY_ON_EMPTY` | `1` | Retry 200-OK responses that arrive with empty content + no tool_calls + finish_reason ≠ "length" — a cloud-only soft-failure mode where Ollama returned success but dropped the body. Set `0` to disable. |
 | `CALIBER_GROUNDING_RETRY_EMPTY_MAX` | `5` | Separate (smaller) cap on empty-response retries so a model that legitimately produces empty replies doesn't burn the whole 5xx budget |
 
-`bin/caliber-grounding-proxy` defaults `CALIBER_GROUNDING_UPSTREAM` to
-`http://192.168.178.2:11433/v1` — that's the author's home-LAN
-Ollama proxy. **Override it for your install** via the systemd
-drop-in (see below) or shell environment.
+With `CALIBER_GROUNDING_UPSTREAM` unset the proxy uses the host's
+`ollama.url` in `config/claude-hooks.json` (asked by `install.py`),
+else Ollama's own `http://localhost:11434` — the same resolver as the
+/consultants engine and /get-advice (`claude_hooks/ollama_upstream.py`;
+`python -m claude_hooks.ollama_upstream --explain` says which applies).
+No host address is shipped.
 
 ### systemd drop-in for env overrides
 

@@ -371,6 +371,10 @@
       ]
     }
   },
+  "ollama": {
+    "_comment": "Ollama server for /consultants, /get-advice and the caliber grounding proxy. Empty = CALIBER_GROUNDING_UPSTREAM, a URL-shaped OLLAMA_HOST, else http://localhost:11434.",
+    "url": ""
+  },
   "reflect": {
     "enabled": true,
     "max_memories_to_analyze": 50,
