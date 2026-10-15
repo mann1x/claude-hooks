@@ -927,8 +927,14 @@ def register_control_routes(app: "FastAPI") -> None:
                      "wrap up")
         accepted = False
         if running:
-            accepted = s.run_control.request_wrap_up(
-                str(body.get("reason") or "user-wrap-up"))
+            reason = str(body.get("reason") or "user-wrap-up")
+            accepted = s.run_control.request_wrap_up(reason)
+            if accepted:
+                # Plan D9: carried across an engine restart — the next
+                # engine resumes the run already wrapping up.
+                from consultants.server import inflight
+                inflight.update(sid, wrap_up={"reason": reason,
+                                              "requested_at": time.time()})
             # The adversary checkpoint would hold the runner until its
             # deadline; a wrap-up wants the answer now.
             if hasattr(s, "ack_adversary"):

@@ -655,8 +655,10 @@ is the graceful stop (plan D9). It rides the same out-of-band
   `partial: wrap_up`.
 
 It is refused (409) on a cancelled run and a no-op on one not running.
-Cancel arriving after a wrap-up still wins. A wrap-up is not carried
-across an engine restart: a suspended council resumes as a normal run.
+Cancel arriving after a wrap-up still wins. A wrap-up survives an engine
+restart: the route writes it into the run's in-flight record (`wrap_up`:
+reason and time), and the next engine resumes the council already
+wrapping up — its result still says who asked and when.
 
 ### retry-lanes: run the failed lanes again
 

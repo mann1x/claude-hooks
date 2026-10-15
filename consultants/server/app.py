@@ -1638,6 +1638,14 @@ def _resume_one(app, rec: dict) -> bool:
         # The ready-to-review flip on completion looks the root up in
         # memory; load it now so a resumed follow-up still makes it.
         _ensure_loaded(app, rec.get("root_sid"), cwd)
+    wrap = rec.get("wrap_up")
+    if isinstance(wrap, dict):
+        # Plan D9: the previous engine was asked to wrap this run up; the
+        # resumed run is still wrapping up, not a fresh run.
+        at = wrap.get("requested_at")
+        state.run_control.request_wrap_up(
+            str(wrap.get("reason") or "user-wrap-up"),
+            now=float(at) if isinstance(at, (int, float)) else None)
     with app.state.sessions_lock:
         app.state.sessions[sid] = state
     inflight.update(sid, state="running",

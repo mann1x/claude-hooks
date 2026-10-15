@@ -208,6 +208,46 @@ class TestLifecycle:
         assert _wait(lambda: inflight.get("csl-left") is None)
         assert app.state.sessions["csl-left"].status == "completed"
 
+    def test_a_wrap_up_is_written_into_the_record(self, project_dir):
+        """Plan D9: a wrap-up asked of a running council outlives the
+        engine it was asked of."""
+        entered = threading.Event()
+        app = create_app(run_council=_suspendable_runner(entered),
+                         start_reaper=False)
+        c = TestClient(app)
+        sid = c.post("/v1/consult", json={
+            "message": "q", "cwd": str(project_dir)}).json()["sid"]
+        assert entered.wait(5)
+        try:
+            r = c.post(f"/v1/consult/{sid}/wrap-up", json={"reason": "enough"})
+            assert r.json()["wrap_up_accepted"] is True
+            assert inflight.get(sid)["wrap_up"]["reason"] == "enough"
+        finally:
+            # Release the runner even on a failure, or its thread holds
+            # pytest open.
+            suspend_running_councils(app, grace_s=5)
+
+    def test_a_wrapping_up_council_resumes_still_wrapping_up(self, project_dir):
+        inflight.register({
+            "sid": "csl-wrap", "kind": "consult", "cwd": str(project_dir),
+            "question": "unfinished", "effort": "high",
+            "extra_roots": [], "root_sid": "csl-wrap",
+            "started_at": time.time() - 600, "state": "suspended",
+            "wrap_up": {"reason": "enough", "requested_at": 1234.0},
+        })
+        seen = {}
+
+        def run(state, runner_input):
+            seen["wrapping"] = state.run_control.wrapping_up
+            seen["partial"] = state.run_control.partial()
+            _complete(state, runner_input)
+
+        create_app(run_council=run, start_reaper=False, resume_inflight=True)
+        assert _wait(lambda: "wrapping" in seen)
+        assert seen["wrapping"] is True
+        assert seen["partial"]["requested_by"] == "enough"
+        assert seen["partial"]["requested_at"] == 1234.0
+
     def test_a_follow_up_resumes_with_its_parent(self, project_dir):
         app = create_app(run_council=_complete, run_follow_up=_complete,
                          start_reaper=False)
