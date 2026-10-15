@@ -2,16 +2,19 @@
 
 # Tasks — claude-hooks
 
-6 ready · prefix `ch`
+1 active · 5 ready · prefix `ch`
 
-## Ready (6)
+## Active (1)
 
-- [ch-5](.claude-hooks/tasks/ch-5.md) **H** `consultants.providers` Council A — providers, capability probe, Ollama account, calibration, timings — 2h
-- [ch-7](.claude-hooks/tasks/ch-7.md) **H** `consultants.compaction` Council C — compaction: reduced replay default, full 5-step per role, condensation, overflow — 3h
-- [ch-8](.claude-hooks/tasks/ch-8.md) `consultants.guards` Council D — lane robustness: always-on loop guards, strict nudge profile, named terminal actions — 3h
-- [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 2h
-- [ch-10](.claude-hooks/tasks/ch-10.md) `consultants.polykv` Council F — PolyKV, complete (opencoti + xOllama), last — 3h
-- [ch-11](.claude-hooks/tasks/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 2h
+- [ch-8](.claude-hooks/tasks/ch-8.md) `consultants.guards` Council D — lane robustness: always-on loop guards, strict nudge profile, named terminal actions — 1m
+
+## Ready (5)
+
+- [ch-5](.claude-hooks/tasks/ch-5.md) **H** `consultants.providers` Council A — providers, capability probe, Ollama account, calibration, timings — 13h
+- [ch-7](.claude-hooks/tasks/ch-7.md) **H** `consultants.compaction` Council C — compaction: reduced replay default, full 5-step per role, condensation, overflow — 14h
+- [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 13h
+- [ch-10](.claude-hooks/tasks/ch-10.md) `consultants.polykv` Council F — PolyKV, complete (opencoti + xOllama), last — 14h
+- [ch-11](.claude-hooks/tasks/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 13h
 
 ## By plan
 
@@ -19,8 +22,8 @@
 
 ## Recently closed (5 of 5)
 
-- [ch-6](.claude-hooks/tasks/archive/ch-6.md) **H** `consultants.budgets` Council B — output cap, context-window knob, thinking per backend, sampling diversity — 1m
+- [ch-6](.claude-hooks/tasks/archive/ch-6.md) **H** `consultants.budgets` Council B — output cap, context-window knob, thinking per backend, sampling diversity — 11h
 - [ch-4](.claude-hooks/tasks/archive/ch-4.md) **H** `mailbox.identity` Mailbox alias follows the session name (/rename); a second live session in a folder gets <alias>-N — 11d
-- [ch-2](.claude-hooks/tasks/archive/ch-2.md) `release` Cut the release that ships task tracking and the cloud mailbox relay — 11d
-- [ch-3](.claude-hooks/tasks/archive/ch-3.md) `mailbox.statusline` Status-line mail badge: count waiting ack notes — 11d
-- [ch-1](.claude-hooks/tasks/archive/ch-1.md) **H** `tasks` Verify task tracking live in a restarted session — 11d
+- [ch-2](.claude-hooks/tasks/archive/ch-2.md) `release` Cut the release that ships task tracking and the cloud mailbox relay — 12d
+- [ch-3](.claude-hooks/tasks/archive/ch-3.md) `mailbox.statusline` Status-line mail badge: count waiting ack notes — 12d
+- [ch-1](.claude-hooks/tasks/archive/ch-1.md) **H** `tasks` Verify task tracking live in a restarted session — 12d

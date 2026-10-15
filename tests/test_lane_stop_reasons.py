@@ -144,3 +144,60 @@ def test_show_lists_the_lanes(tmp_path, monkeypatch):
     assert out["lanes"] == [{"role": "researcher", "round": 1, "lane_idx": 1,
                              "stop_reason": "loop_guard",
                              "failure_class": "loop_guard"}]
+
+
+def test_a_tool_executor_lane_carries_its_stop_reason(tmp_path, monkeypatch):
+    from consultants.engine.state_v2 import ToolPlanItem
+    from consultants.engine.tool_executor import tool_executor_node
+    seen = _finished(monkeypatch)
+    item = ToolPlanItem(intent="find X", why="audit", lane_idx=0,
+                        parent_round=1, suggested_tools=["grep"])
+    rec = _recorder(tmp_path)
+    try:
+        tool_executor_node(
+            {"tool_plan_item": item, "lane_idx": 0, "question": "q"},
+            chat_client=_CLIENT, tool_executor=lambda *a: "", tool_specs=[],
+            grounding_msgs=[], model="m", cwd="/tmp", recorder=rec,
+            loop_runner=lambda p, c, **k: {
+                "choices": [{"message": {"role": "assistant", "content": "x"},
+                             "finish_reason": "stop"}],
+                "_stop_reason": "loop_guard", "_failure_class": "loop_guard"})
+        done = [e for e in seen if isinstance(e, events.NodeFinished)]
+        assert done[-1].role == "tool_executor"
+        assert done[-1].stop_reason == "loop_guard"
+        lanes = cli._session_lane_stops(tmp_path / "transcript.db")
+        assert lanes[-1]["role"] == "tool_executor"
+        assert lanes[-1]["stop_reason"] == "loop_guard"
+    finally:
+        rec.close()
+
+
+def test_each_coder_attempt_carries_how_it_ended(tmp_path, monkeypatch):
+    from consultants.engine.coder import coder_node
+    from consultants.engine.state_v2 import CoderTaskItem
+    seen = _finished(monkeypatch)
+
+    def loop(payload, cwd, **kw):
+        if payload["model"] == "a":
+            raise ChatFault("gone", fault_class="model_missing")
+        return {"choices": [{"message": {"role": "assistant",
+                                         "content": "done"},
+                             "finish_reason": "stop"}]}
+
+    rec = _recorder(tmp_path)
+    try:
+        out = coder_node(
+            {"coder_task_item": CoderTaskItem(task="write x", lane_idx=0),
+             "lane_idx": 0, "question": "q"},
+            grounding_msgs=[], cwd=str(tmp_path), sid="csl-d7",
+            recorder=rec, loop_runner=loop,
+            model_chain_resolver=lambda lang: [(_CLIENT, "a"), (_CLIENT, "b")])
+        assert out["coder_artifacts"][0].error
+        done = [e for e in seen if isinstance(e, events.NodeFinished)]
+        assert [(e.stop_reason, e.failure_class) for e in done] == [
+            ("model_missing", "model_missing"), ("no_artifacts", "task_error")]
+        lanes = cli._session_lane_stops(tmp_path / "transcript.db")
+        assert [(r["role"], r["stop_reason"]) for r in lanes[-2:]] == [
+            ("coder", "model_missing"), ("coder", "no_artifacts")]
+    finally:
+        rec.close()

@@ -126,12 +126,15 @@ def _emit_started(role: str, *, round: int, lane_idx: Optional[int],
 
 def _emit_finished(role: str, *, round: int, lane_idx: Optional[int],
                    duration_ms: int, ok: bool,
-                   error: Optional[str] = None) -> None:
+                   error: Optional[str] = None,
+                   stop_reason: Optional[str] = None,
+                   failure_class: Optional[str] = None) -> None:
     try:
         from consultants.engine.events import NodeFinished, emit
         emit(NodeFinished(role=role, round=round, lane_idx=lane_idx,
                            duration_ms=duration_ms,
-                           ok=ok, error=error))
+                           ok=ok, error=error, stop_reason=stop_reason,
+                           failure_class=failure_class))
     except Exception:  # pragma: no cover
         log.exception("emit NodeFinished raised; ignored")
 
@@ -371,11 +374,18 @@ def tool_executor_node(state: dict,
         log.exception("tool_executor lane %s failed: %s",
                        lane_idx, e)
         dt_ms = int((time.monotonic() - t0) * 1000)
+        # Plan D7: the lane says how it ended.
+        from consultants.engine.council import _record_failed_exit
+        from consultants.engine.events import failure_class_of
+        failed_as = failure_class_of(e)
         _emit_finished(
             "tool_executor", round=parent_round,
             lane_idx=lane_idx, duration_ms=dt_ms,
             ok=False, error=f"{type(e).__name__}: {e}",
+            stop_reason=failed_as, failure_class=failed_as,
         )
+        _record_failed_exit(recorder, "tool_executor", parent_round,
+                            lane_idx, dt_ms, e, failed_as)
         return {
             "tool_results": [ToolResult(
                 intent=item.intent, content="",
@@ -390,18 +400,22 @@ def tool_executor_node(state: dict,
 
     final_text = _extract_final_content(result)
     dt_ms = int((time.monotonic() - t0) * 1000)
+    from consultants.engine.events import loop_stop
+    stop_reason, failure_class = loop_stop(result)
     if recorder is not None:
         try:
             recorder.record_node(
                 role="tool_executor", kind="node_exit",
                 round=parent_round, lane_idx=lane_idx,
                 duration_ms=dt_ms,
+                stop_reason=stop_reason, failure_class=failure_class,
             )
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
     _emit_finished("tool_executor", round=parent_round,
                     lane_idx=lane_idx,
-                    duration_ms=dt_ms, ok=True)
+                    duration_ms=dt_ms, ok=True,
+                    stop_reason=stop_reason, failure_class=failure_class)
 
     return {
         "tool_results": [ToolResult(

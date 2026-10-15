@@ -424,12 +424,15 @@ def _emit_started(role: str, *, round: int, lane_idx: Optional[int],
 
 def _emit_finished(role: str, *, round: int, lane_idx: Optional[int],
                    duration_ms: int, ok: bool,
-                   error: Optional[str] = None) -> None:
+                   error: Optional[str] = None,
+                   stop_reason: Optional[str] = None,
+                   failure_class: Optional[str] = None) -> None:
     try:
         from consultants.engine.events import NodeFinished, emit
         emit(NodeFinished(role=role, round=round, lane_idx=lane_idx,
                            duration_ms=duration_ms,
-                           ok=ok, error=error))
+                           ok=ok, error=error, stop_reason=stop_reason,
+                           failure_class=failure_class))
     except Exception:  # pragma: no cover
         log.exception("emit NodeFinished raised; ignored")
 
@@ -739,6 +742,7 @@ def coder_node(state: dict,
         attempt_failed = False
         failure_reason = ""
         failure_error: Optional[str] = None
+        failure_class: Optional[str] = None
         result: Any = None
         try:
             result = loop_runner(
@@ -759,6 +763,8 @@ def coder_node(state: dict,
             attempt_failed = True
             failure_reason = "raised"
             failure_error = f"{type(e).__name__}: {e}"
+            from consultants.engine.events import failure_class_of
+            failure_class = failure_class_of(e)
 
         final_text = "" if attempt_failed else _extract_final_content(result)
 
@@ -781,6 +787,16 @@ def coder_node(state: dict,
                     f"primary {model_name} returned empty final message"
                 )
 
+        # Plan D7: how the attempt ended. A loop that stopped on a guard
+        # names the guard; a loop that finished but wrote nothing (or
+        # said nothing) is a task error named after the trigger.
+        from consultants.engine.events import TASK_ERROR, loop_stop
+        if failure_reason == "raised":
+            stop_reason = failure_class
+        else:
+            stop_reason, failure_class = loop_stop(result)
+            if attempt_failed and failure_class is None:
+                stop_reason, failure_class = failure_reason, TASK_ERROR
         dt_attempt_ms = int((time.monotonic() - t0_attempt) * 1000)
         if recorder is not None:
             try:
@@ -788,6 +804,8 @@ def coder_node(state: dict,
                     role="coder", kind="node_exit",
                     round=parent_round, lane_idx=lane_idx,
                     duration_ms=dt_attempt_ms,
+                    error=failure_error if attempt_failed else None,
+                    stop_reason=stop_reason, failure_class=failure_class,
                 )
             except Exception:  # pragma: no cover
                 log.exception("recorder.record_node raised; ignored")
@@ -800,6 +818,7 @@ def coder_node(state: dict,
             _emit_finished(
                 "coder", round=parent_round, lane_idx=lane_idx,
                 duration_ms=dt_attempt_ms, ok=True,
+                stop_reason=stop_reason, failure_class=failure_class,
             )
             return {
                 "coder_artifacts": [CoderArtifact(
@@ -820,6 +839,7 @@ def coder_node(state: dict,
             "coder", round=parent_round, lane_idx=lane_idx,
             duration_ms=dt_attempt_ms, ok=False,
             error=f"{failure_reason}: {failure_error or ''}",
+            stop_reason=stop_reason, failure_class=failure_class,
         )
 
         # Decide: more attempts left, or chain exhausted?
