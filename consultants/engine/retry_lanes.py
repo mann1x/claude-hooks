@@ -108,6 +108,81 @@ def retry_specs(lanes: list[int], *, plan: str,
     return out
 
 
+#: Per-lane escalation (plan D): a lane a guard ended, or one that failed
+#: for a reason another model may not hit. ``infra`` is not here: the
+#: same model on a working server is the cheaper fix (``retry-lanes``).
+ESCALATE_STOPS = frozenset({"struggle", "loop_guard", "mistake_limit",
+                            "reasoning_loop"})
+ESCALATE_CLASSES = frozenset({"task_error", "context_overflow",
+                              "tool_call_unparsable", "model_missing"})
+
+_WHY = {
+    "struggle": "its thinking kept running out of budget, turn after turn",
+    "loop_guard": "it kept repeating the same tool call",
+    "mistake_limit": "too many tool calls in a row failed",
+    "reasoning_loop": "its reasoning fell into a repetition loop",
+    "task_error": "it failed",
+    "context_overflow": "its prompt no longer fit the model's window",
+    "tool_call_unparsable": "the server could not read its tool calls",
+    "model_missing": "its model was not available",
+}
+
+
+def escalation_lanes(stops: Iterable[dict], limit: int) -> list[dict]:
+    """The last first-round researcher exit of each lane that warrants an
+    expert, in lane order, at most ``limit``."""
+    last: dict[int, dict] = {}
+    for row in stops:
+        if row.get("role") != "researcher" or int(row.get("round") or 1) != 1:
+            continue
+        last[int(row.get("lane_idx") or 0)] = row
+    out = [dict(row, lane_idx=i) for i, row in sorted(last.items())
+           if row.get("stop_reason") in ESCALATE_STOPS
+           or row.get("failure_class") in ESCALATE_CLASSES]
+    return out[:max(0, int(limit))]
+
+
+def attempt_brief(db_path: Path, stop: dict, *, model: str = "",
+                  last_calls: int = 8) -> str:
+    """What the failed attempt did, for the lane that takes it over: why it
+    ended and its last tool calls, from this session's ``tool_call`` rows.
+    Never its transcript."""
+    import sqlite3
+    lane = stop.get("lane_idx")
+    calls: list[tuple] = []
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            calls = con.execute(
+                "SELECT tool, args, output, error FROM events "
+                "WHERE kind = 'tool_call' AND role = 'researcher' "
+                "AND round = 1 AND COALESCE(lane_idx, 0) = ? ORDER BY ts",
+                (int(lane or 0),)).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        calls = []
+    reason = stop.get("failure_class") or stop.get("stop_reason") or ""
+    why = _WHY.get(reason, f"it ended on {reason}")
+    if stop.get("error") and stop.get("failure_class"):
+        why += f" ({str(stop['error'])[:160]})"
+    who = f" on {model}" if model else ""
+    lines = [f"An earlier attempt at this item{who} ended without a usable "
+             f"report: {why}. It made {len(calls)} tool call"
+             f"{'' if len(calls) == 1 else 's'}."]
+    if calls:
+        lines.append(f"Its last {min(len(calls), last_calls)}:")
+        from claude_hooks.loop_detection import is_failed_output
+        for tool, args, output, error in calls[-last_calls:]:
+            failed = bool(error) or is_failed_output(str(output or ""))
+            head = " ".join(str(error or output or "").split())[:100]
+            lines.append(f"- {tool} {str(args or '')[:120]} -> "
+                         f"{'FAILED: ' if failed else ''}{head}")
+    lines.append("Use what it found, do not repeat the calls that failed, "
+                 "and write the report it could not.")
+    return "\n".join(lines)
+
+
 def surviving_reports(research: Iterable[str]) -> list[str]:
     """The parent's reports with its tombstones left out: the retried
     lanes write their own."""
@@ -116,5 +191,6 @@ def surviving_reports(research: Iterable[str]) -> list[str]:
             and not r.lstrip().startswith(_FAILED_PREFIXES)]
 
 
-__all__ = ["RETRYABLE_CLASSES", "failed_lanes", "lane_stops", "retry_specs",
-           "surviving_reports"]
+__all__ = ["RETRYABLE_CLASSES", "ESCALATE_STOPS", "ESCALATE_CLASSES",
+           "attempt_brief", "escalation_lanes", "failed_lanes", "lane_stops",
+           "retry_specs", "surviving_reports"]

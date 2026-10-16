@@ -700,6 +700,23 @@ cancelled or past its deadline, and never on another tier (the node is
 not wired). Each retry is a `lane_retry` row in `runtime_events`. Not
 with `tool_executor` lanes, where the researcher routes itself.
 
+**Per-lane model escalation.** With `[escalation] expert_model` set
+(`claude-consultants config set-escalation --model <tag|@endpoint/model>
+[--max N]`; empty, the default, is off and leaves the graph unchanged),
+the same node also hands a first-round lane to the expert model when a
+guard ended it (`struggle`, `loop_guard`, `mistake_limit`,
+`reasoning_loop`) or it failed on its task (`task_error`,
+`context_overflow`, `tool_call_unparsable`, `model_missing`) — never for
+`infra`, which the same model on a working server fixes. The rerun gets
+the lane's plan item led by a brief (`retry_lanes.attempt_brief`): why
+the attempt ended and its last calls, failed ones marked, read from this
+session's `tool_call` rows — never its transcript. At most
+`max_per_council` lanes (default 2), once each, a lane already on the
+expert skipped; any tier, as the harness decides. Each pass is a
+`lane_escalation` row in `runtime_events` naming the lane, both models
+and the reason. The researcher's client gets the expert added to its
+models so an `@endpoint` expert routes.
+
 **Routers must not loop on a stopped run.** A skipped node writes
 nothing, so a router that reads its last verdict (a critic's "needs more
 research", an unconsumed tool plan) would send the run back round the

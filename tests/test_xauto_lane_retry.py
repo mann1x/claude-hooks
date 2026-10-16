@@ -104,3 +104,91 @@ def test_config_and_cli():
     assert cc.ConsultantsConfig().runtime.xauto_retry_infra_lanes is True
     args = cli.build_parser().parse_args(["config", "set-xauto-retry", "off"])
     assert args.fn is cli.cmd_config_set_xauto_retry and args.state == "off"
+
+
+# --- per-lane model escalation (plan D) ------------------------------------ #
+
+def _run_escalation(tmp_path, *, expert="expert-m", exc=ValueError,
+                    fail_times=1, max_per_council=2, fail_on="read b"):
+    roles = ("planner", "researcher", "critic", "synthesizer")
+    clients = {"planner": _Stub(PLAN),
+               "researcher": _Stub("FINDING", fail_on=fail_on,
+                                   fail_times=fail_times, exc=exc),
+               "critic": _Stub("The research is sufficient.\nVERDICT: ready"),
+               "synthesizer": _Stub("ANSWER")}
+    rec = MessageRecorder(tmp_path / "transcript.db", meta=RecorderMeta(
+        sid="csl-e", cwd=str(tmp_path), question="q", effort="high",
+        topology="council", models={}))
+    deps = GraphDeps(chat_clients=clients, models={r: "m" for r in roles},
+                     enabled_roles=roles, cwd=str(tmp_path),
+                     tool_executor=lambda *a, **kw: "", tool_specs=[],
+                     grounding_msgs=[], disable_cache=True, recorder=rec,
+                     escalation_model=expert, escalation_max=max_per_council)
+    state = council.initial_state(question="the question", cwd=str(tmp_path),
+                                  models={}, topology="council", effort="high")
+    graph = build_council_graph(deps)
+    out = graph.invoke(state)
+    rec.close()
+    return graph, clients, out
+
+
+def test_a_lane_that_failed_on_its_task_reruns_on_the_expert(tmp_path):
+    graph, clients, out = _run_escalation(tmp_path)
+    assert "lane_retry" in graph.get_graph().nodes
+    tries = _asked(clients["researcher"], "read b")
+    assert [p["model"] for p in tries] == ["m", "expert-m"]
+    brief = tries[1]["messages"][-1]["content"]
+    assert "An earlier attempt at this item on m" in brief
+    assert "it failed" in brief
+    assert int(out.get("research_rounds_used") or 0) == 3
+    import sqlite3
+    con = sqlite3.connect(tmp_path / "transcript.db")
+    [(payload,)] = con.execute("SELECT payload FROM runtime_events "
+                               "WHERE kind='lane_escalation'").fetchall()
+    assert '"from_model": "m"' in payload and '"reason": "task_error"' in payload
+
+
+def test_infra_is_not_escalated_and_the_cap_holds(tmp_path):
+    _, clients, _ = _run_escalation(tmp_path, exc=ConnectionError)
+    assert len(_asked(clients["researcher"], "read b")) == 1
+    _, clients, _ = _run_escalation(tmp_path / "cap", fail_on="read",
+                                    fail_times=3, max_per_council=1)
+    assert [p["model"] for p in clients["researcher"].payloads].count(
+        "expert-m") == 1
+
+
+def test_no_expert_no_node(tmp_path):
+    graph, clients, _ = _run_escalation(tmp_path, expert="")
+    assert "lane_retry" not in graph.get_graph().nodes
+    assert len(_asked(clients["researcher"], "read b")) == 1
+
+
+def test_the_brief_names_the_calls_that_failed(tmp_path):
+    from consultants.engine import retry_lanes as rl
+    rec = MessageRecorder(tmp_path / "t.db", meta=RecorderMeta(
+        sid="csl-b", cwd=str(tmp_path), question="q", effort="high",
+        topology="council", models={}))
+    rec.record_tool(role="researcher", lane_idx=2, tool="read_file",
+                    args='{"path": "src/a.py"}', output="def a(): pass")
+    rec.record_tool(role="researcher", lane_idx=2, tool="grep",
+                    args='{"pattern": "zz"}', output="error: path not found")
+    rec.record_tool(role="researcher", lane_idx=1, tool="grep",
+                    args='{"pattern": "other lane"}', output="x")
+    rec.close()
+    brief = rl.attempt_brief(tmp_path / "t.db", {
+        "lane_idx": 2, "stop_reason": "mistake_limit"}, model="m")
+    assert "too many tool calls in a row failed" in brief
+    assert "It made 2 tool calls" in brief
+    assert "grep {\"pattern\": \"zz\"} -> FAILED: error: path not found" in brief
+    assert "other lane" not in brief
+
+
+def test_escalation_config_and_cli(tmp_path, monkeypatch):
+    from consultants import cli
+    from consultants import config as cc
+    assert cc.ConsultantsConfig().escalation.expert_model == ""
+    args = cli.build_parser().parse_args(
+        ["config", "set-escalation", "--model", "kimi-k2.6:cloud", "--max", "1"])
+    assert args.fn is cli.cmd_config_set_escalation and args.max == 1
+    with pytest.raises(ValueError):
+        cc.set_escalation(max_per_council=99, scope="project", cwd=tmp_path)

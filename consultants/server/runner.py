@@ -334,6 +334,12 @@ def make_runner(*, ollama_base_url: str):
             # once, before the critic. Never wired on another tier.
             xauto_lane_retry=(cfg.effort == "xauto" and bool(getattr(
                 cfg.runtime, "xauto_retry_infra_lanes", True))),
+            # Per-lane model escalation (plan D): off unless an expert
+            # model is configured.
+            escalation_model=getattr(getattr(cfg, "escalation", None),
+                                     "expert_model", "") or "",
+            escalation_max=int(getattr(getattr(cfg, "escalation", None),
+                                       "max_per_council", 2)),
             # M10: coder sandbox caps. Consulted only when ``coder``
             # is in ``enabled`` (otherwise the coder node is never
             # registered, so these values are irrelevant).
@@ -1936,8 +1942,14 @@ def _role_client(cfg, role: str, ollama_base_url: str):
     routes each call by its model; otherwise it is the plain client."""
     from claude_hooks.get_advice.chat_client import make_role_chat_client
     rc = cfg.roles[role]
+    models = [rc.model, *(rc.extra_models or [])]
+    expert = getattr(getattr(cfg, "escalation", None), "expert_model", "")
+    if role == "researcher" and expert and expert not in models:
+        # Per-lane escalation reruns a researcher lane on the expert model
+        # through this client, so it must route there too.
+        models.append(expert)
     return make_role_chat_client(
-        [rc.model, *(rc.extra_models or [])], ollama_base_url,
+        models, ollama_base_url,
         endpoints=getattr(cfg, "endpoints", None) or {})
 
 

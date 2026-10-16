@@ -950,6 +950,22 @@ class GuardsConfig:
             v == "standard" for v in self.roles.values())
 
 
+@dataclass
+class EscalationConfig:
+    """Per-lane model escalation (plan D, after D1/D2): a first-round
+    researcher lane that a guard ended (struggle, loop guard, mistake
+    limit, reasoning loop) or that failed on its task reruns its plan item
+    once on ``expert_model``, given a brief of the failed attempt instead
+    of its transcript; at most ``max_per_council`` lanes. The harness
+    decides. ``expert_model`` empty (the default): off, and the graph is
+    unchanged. A tag on the engine's server, or ``@endpoint/model``."""
+    expert_model: str = ""
+    max_per_council: int = 2
+
+
+ESCALATION_MAX = 10
+
+
 def check_guard_profile(value: Any) -> str:
     v = str(value or "").strip().lower()
     if v not in GUARD_PROFILES:
@@ -1081,6 +1097,7 @@ class ConsultantsConfig:
     endpoints: dict[str, EndpointConfig] = field(default_factory=dict)
     protocol: ProtocolConfig = field(default_factory=ProtocolConfig)
     guards: GuardsConfig = field(default_factory=GuardsConfig)
+    escalation: EscalationConfig = field(default_factory=EscalationConfig)
     decision: DecisionConfig = field(default_factory=DecisionConfig)
     # Plan B: ``[budget]`` / ``[sampling]`` — only the keys a layer set.
     budget: dict[str, Any] = field(default_factory=dict)
@@ -1553,6 +1570,20 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
                 log.warning("consultants config: guards.roles.%s ignored: %s",
                             role, e)
 
+    # per-lane model escalation (plan D)
+    es = raw.get("escalation") or {}
+    if isinstance(es, dict) and es:
+        if isinstance(es.get("expert_model"), str):
+            base.escalation.expert_model = es["expert_model"].strip()
+        mx = es.get("max_per_council")
+        if isinstance(mx, int) and not isinstance(mx, bool) \
+                and 0 <= mx <= ESCALATION_MAX:
+            base.escalation.max_per_council = mx
+        elif mx is not None:
+            log.warning("consultants config: escalation.max_per_council "
+                        "ignored: must be an integer in [0, %d]",
+                        ESCALATION_MAX)
+
     # decision model (plan H)
     dec = raw.get("decision") or {}
     if isinstance(dec, dict) and dec:
@@ -2008,6 +2039,15 @@ def _render(cfg: ConsultantsConfig, *,
              "synthesizer stays prose. Off until benched.")
     L.append(f"typed = {'true' if cfg.protocol.typed else 'false'}")
     L.append("")
+    es = cfg.escalation
+    if es.expert_model or es.max_per_council != EscalationConfig().max_per_council:
+        L.append("[escalation]")
+        L.append("# Per-lane model escalation: a lane a guard ended, or one "
+                 "that failed on its task, reruns once on expert_model with "
+                 "a brief of the failed attempt. Empty expert_model = off.")
+        L.append(f"expert_model = {_toml_value(es.expert_model)}")
+        L.append(f"max_per_council = {es.max_per_council}")
+        L.append("")
     g = cfg.guards
     if not g.is_default():
         L.append("[guards]")
@@ -2386,6 +2426,22 @@ def set_guards(*, profile: Optional[str] = None, role: Optional[str] = None,
         cfg.guards.roles.pop(role, None)
     else:
         cfg.guards.roles[role] = checked
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_escalation(*, model: Optional[str] = None,
+                   max_per_council: Optional[int] = None,
+                   scope: str = "user",
+                   cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set ``[escalation]``; ``model=""`` turns it off. Bad values raise
+    ``ValueError``; nothing is written then."""
+    if max_per_council is not None and not 0 <= int(max_per_council) <= ESCALATION_MAX:
+        raise ValueError(f"max must be in [0, {ESCALATION_MAX}]")
+    cfg = _load_for_edit(scope, cwd)
+    if model is not None:
+        cfg.escalation.expert_model = model.strip()
+    if max_per_council is not None:
+        cfg.escalation.max_per_council = int(max_per_council)
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 

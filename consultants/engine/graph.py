@@ -382,6 +382,12 @@ class GraphDeps:
     # once, before the critic. The runner sets it for xauto runs only
     # (``[runtime] xauto_retry_infra_lanes``); off, the node is not wired.
     xauto_lane_retry: bool = False
+    # Per-lane model escalation (plan D): a first-round lane a guard ended,
+    # or one that failed on its task, reruns once on this model with a
+    # brief of the attempt, at most ``escalation_max`` lanes. Empty: off,
+    # and with ``xauto_lane_retry`` off too the node is not wired.
+    escalation_model: str = ""
+    escalation_max: int = 2
     # Called with (kind, payload) for gate events (``node_cancelled`` /
     # ``awaiting_resume`` / ``resumed``). The runner passes a recorder
     # bridge; ``None`` means the gate still works, silently.
@@ -479,12 +485,20 @@ AUTO_RETRY_CLASSES = frozenset({"infra"})
 
 
 def _wrap_lane_retry(deps: GraphDeps, *, next_node: str):
-    """Plan D9: the xauto automatic retry. A pass-through barrier after the
-    first research round; when lanes failed on infrastructure it reruns
-    them once, as ``retry-lanes`` would after the run, and they come back
-    through it before the run goes on to ``next_node``. Lanes are chosen
-    from this session's D7 ``node_exit`` rows (the recorder commits each),
-    so the rule is ``retry-lanes``' own. Returns ``(node, router)``."""
+    """A pass-through barrier after the first research round that reruns
+    lanes once, then lets the run go on to ``next_node``:
+
+    - plan D9, xauto (``deps.xauto_lane_retry``): lanes that failed on
+      infrastructure, on their own model, as ``retry-lanes`` would after
+      the run;
+    - per-lane escalation (``deps.escalation_model``): lanes a guard ended
+      or that failed on their task, on the expert model, their plan item
+      led by a brief of the failed attempt (``retry_lanes.attempt_brief``),
+      at most ``deps.escalation_max``.
+
+    Lanes are chosen from this session's D7 ``node_exit`` rows (the
+    recorder commits each), so the rule is ``retry-lanes``' own. Returns
+    ``(node, router)``."""
     from consultants.engine import retry_lanes as rl
     from consultants.engine.control import runtime_deadline_passed
 
@@ -492,14 +506,36 @@ def _wrap_lane_retry(deps: GraphDeps, *, next_node: str):
         db = getattr(deps.recorder, "db_path", None)
         if not db:
             return []
-        lanes = rl.failed_lanes(rl.lane_stops(Path(db)), AUTO_RETRY_CLASSES)
-        if not lanes:
-            return []
+        stops = rl.lane_stops(Path(db))
         models = [deps.models.get("researcher", "")] + list(
             deps.extra_models_by_role.get("researcher") or [])
-        return rl.retry_specs(lanes, plan=state.get("plan", ""),
-                              plan_items=state.get("plan_items"),
-                              models_per_lane=models)
+        rebuild = lambda lanes: rl.retry_specs(  # noqa: E731
+            lanes, plan=state.get("plan", ""),
+            plan_items=state.get("plan_items"), models_per_lane=models)
+        out: list[dict] = []
+        if getattr(deps, "xauto_lane_retry", False):
+            lanes = rl.failed_lanes(stops, AUTO_RETRY_CLASSES)
+            out += [dict(s, why="retry") for s in rebuild(lanes)] if lanes else []
+        expert = getattr(deps, "escalation_model", "") or ""
+        if expert:
+            picked = rl.escalation_lanes(
+                stops, int(getattr(deps, "escalation_max", 2)))
+            by_lane = {s["lane_idx"]: s for s in rebuild(
+                [p["lane_idx"] for p in picked])} if picked else {}
+            for stop in picked:
+                spec = by_lane.get(stop["lane_idx"])
+                if spec is None or spec["model"] == expert:
+                    continue
+                brief = rl.attempt_brief(Path(db), stop, model=spec["model"])
+                item = spec.get("plan_item") or state.get("plan", "")
+                out.append({"lane_idx": spec["lane_idx"], "model": expert,
+                            "plan_item": f"{item}\n\nNote from the harness — "
+                                         f"{brief}",
+                            "why": "escalation",
+                            "from_model": spec["model"],
+                            "reason": stop.get("failure_class")
+                            or stop.get("stop_reason")})
+        return out
 
     def _node(state: dict) -> dict:
         phase = int(state.get("lane_retry") or 0)
@@ -512,17 +548,24 @@ def _wrap_lane_retry(deps: GraphDeps, *, next_node: str):
         specs = _specs(state)
         if not specs:
             return {"lane_retry": 2}
-        log.info("xauto lane retry: rerunning lanes %s",
-                 [s["lane_idx"] for s in specs])
+        log.info("lane retry: rerunning lanes %s",
+                 [(s["lane_idx"], s["why"], s["model"]) for s in specs])
         if deps.recorder is not None:
-            try:
-                deps.recorder.record_event(
-                    kind="lane_retry", role="xauto_lane_retry", round=1,
-                    lane_idx=None, payload={"lanes": [
-                        {"lane_idx": s["lane_idx"], "model": s["model"]}
-                        for s in specs], "classes": sorted(AUTO_RETRY_CLASSES)})
-            except Exception:  # pragma: no cover
-                log.exception("xauto lane retry: recorder raised; ignored")
+            for why, kind, role in (("retry", "lane_retry", "xauto_lane_retry"),
+                                    ("escalation", "lane_escalation",
+                                     "lane_escalation")):
+                mine = [s for s in specs if s["why"] == why]
+                if not mine:
+                    continue
+                try:
+                    deps.recorder.record_event(
+                        kind=kind, role=role, round=1, lane_idx=None,
+                        payload={"lanes": [
+                            {k: s[k] for k in ("lane_idx", "model",
+                                               "from_model", "reason")
+                             if s.get(k)} for s in mine]})
+                except Exception:  # pragma: no cover
+                    log.exception("lane retry: recorder raised; ignored")
         # Every lane adds 1 to the additive round counter the critic budgets
         # re-routes against; the retried lanes add theirs again, so take
         # them back here: a retry is not a research round.
@@ -1282,7 +1325,8 @@ def build_council_graph(deps: GraphDeps,
     # Plan D9: the xauto automatic lane retry sits on the researcher's way
     # out. Not with tool_executor lanes: there the researcher alternates
     # PLAN / REPORT through its own router.
-    lane_retry_on = (bool(getattr(deps, "xauto_lane_retry", False))
+    lane_retry_on = ((bool(getattr(deps, "xauto_lane_retry", False))
+                      or bool(getattr(deps, "escalation_model", "")))
                      and "researcher" in enabled and not tool_executor_enabled)
     lane_retry_next: Any = None
     for src, dst in plan_topology(enabled):

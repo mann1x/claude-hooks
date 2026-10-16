@@ -1290,6 +1290,15 @@ def cmd_config_set_guards(args, base: str) -> int:
     return _emit_config(cfg, args)
 
 
+def cmd_config_set_escalation(args, base: str) -> int:
+    try:
+        cfg = cc.set_escalation(model=args.model, max_per_council=args.max,
+                                **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
 def cmd_config_set_xauto_retry(args, base: str) -> int:
     cfg = cc.set_xauto_retry(enabled=args.state == "on",
                              **_resolve_active_scope(args))
@@ -2884,6 +2893,20 @@ def build_parser() -> argparse.ArgumentParser:
     cgd.add_argument("--role", choices=cc.GUARD_ROLES)
     _add_scope_args(cgd)
     cgd.set_defaults(fn=cmd_config_set_guards)
+
+    ces = cfg_sub.add_parser(
+        "set-escalation",
+        help="Per-lane model escalation: a first-round lane a guard ended "
+             "(struggle, loop guard, mistake limit, reasoning loop) or that "
+             "failed on its task reruns once on --model, given a brief of "
+             "the failed attempt; at most --max per council (default 2). "
+             "--model '' turns it off (the default).")
+    ces.add_argument("--model", help="The expert model: a tag on the "
+                     "engine's server or @endpoint/model; '' = off.")
+    ces.add_argument("--max", type=int, help="Lanes escalated per council "
+                     f"(0-{cc.ESCALATION_MAX}).")
+    _add_scope_args(ces)
+    ces.set_defaults(fn=cmd_config_set_escalation)
 
     cxr = cfg_sub.add_parser(
         "set-xauto-retry",

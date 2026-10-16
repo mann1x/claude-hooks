@@ -386,7 +386,11 @@ model, given a brief instead of the transcript, at most 2 per council. This is
 not compaction, so cross-model is fine here. The harness decides. Cerebriline's
 `escalate` tool, the forced one-turn offer, `requireApproval` and the expert-guard
 notes are not ported, because they all assume a model or a user making the
-decision (08 §2.13).
+decision (08 §2.13). *Status 2026-10-16: built — `[escalation] expert_model`
+(empty = off, no default model shipped), `max_per_council` 2, through the
+`lane_retry` node after the first research round; triggers are the D7 guard
+stops and the non-infra failure classes; the brief is the attempt's stop
+reason and last calls (`retry_lanes.attempt_brief`); `tests/test_xauto_lane_retry.py`.*
 
 **Thresholds fitted by replay (2026-10-16):** `benchmarks/consultants/guard_replay.py` drives 911 recorded tool-loop lanes (207 `transcript.db` files, 14,233 calls) through the guards and labels each stop by what the lane did next; report in `benchmarks/consultants/results/2026-10-16/guard-replay/`. Changed: D1 gains `block-cycle` (six ≈50k-token verbatim loops passed every fork signal); D3/D4 read MiniMax's `<invoke name=…>` (57 lanes had ended on one) and the promise-of-work pattern no longer matches "lets" or "would let me"; D2's length nudge also needs a stale window (443 → 3 nudges, 204 had landed on progressing lanes); D14 6 → 10 (every value under 10 cut more new calls than it saved). D10 kept.
 
