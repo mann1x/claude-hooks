@@ -7,7 +7,7 @@ area: consultants.sandbox
 tags: [council, cerebriline]
 plan: docs/PLAN-council-cerebriline.md
 created: 2026-10-14T13:22:15Z
-updated: 2026-10-16T04:48:31Z
+updated: 2026-10-16T05:17:32Z
 sessions: [0a7a5bf4]
 ---
 
@@ -22,6 +22,7 @@ Milestone E: E1 prerequisite fixes (runtime_permissions, control.py enum, per-la
 - [ ] Windows smoke passes
 
 ## Log
+- 2026-10-16 05:17Z [0a7a5bf4] E P1 done (43672c4): bwrap backend + seccomp + run_command (read mode) + --shell enablement/follow-up banking/restart note; escape suite 12/12 on solidpc, mutants caught. Left: launcher (static musl) + step_sandbox/check_sandbox, write views (worktree/reflink/overlay) + lifecycle + changes/apply/discard, Windows/macOS (E7), hardening (E8).
 - 2026-10-16 04:48Z [0a7a5bf4] pending → active
 - 2026-10-14 14:31Z [0a7a5bf4] E1 done (240448d; probe result in 95638ee: EOVERFLOW comes from a host-fs lower layer inside a user namespace, not xino). Left: E2+.
 - 2026-10-14 13:22Z [0a7a5bf4] created
