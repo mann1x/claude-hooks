@@ -167,6 +167,8 @@ def cmd_consult(args, base: str) -> int:
         body["extra_roots"] = list(args.add_dir)
     if getattr(args, "skip_preflight", False):
         body["skip_preflight"] = True
+    if getattr(args, "shell", None) is not None:
+        body["shell"] = args.shell
     # --trace / --no-trace are deprecated in v1.1 (the JSONL trace
     # was replaced by the per-session transcript.db). The flag is
     # still accepted but no longer forwarded to the engine; warn
@@ -309,6 +311,8 @@ def cmd_follow_up(args, base: str) -> int:
         body["extra_roots"] = list(args.add_dir)
     if getattr(args, "skip_preflight", False):
         body["skip_preflight"] = True
+    if getattr(args, "shell", None) is not None:
+        body["shell"] = args.shell
     # Consultancy review loop: ``--allow-extra [N]`` / ``--force`` is
     # the over-cap approval carrier. In the Claude Code harness the
     # skill re-issues the followup with this flag after the user
@@ -705,6 +709,9 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
             "all_roles": cfg.tools.all_roles,
             "default_level": cfg.tools.default_level,
             "permissions": dict(cfg.tools.permissions),
+            # Plan E: what `config set-shell` mutates.
+            "shell": {k: (list(v) if isinstance(v, list) else v)
+                      for k, v in vars(cfg.tools.shell).items()},
         },
         # M8 + M14 (#220): expose the cross-session store block so
         # `config show` reveals the same knobs that `set-store{,-ttl,
@@ -1288,6 +1295,62 @@ def cmd_config_set_guards(args, base: str) -> int:
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
     return _emit_config(cfg, args)
+
+
+def _add_shell_args(p) -> None:
+    g = p.add_mutually_exclusive_group()
+    g.add_argument(
+        "--shell", nargs="?", const="read", choices=("read",), default=None,
+        help="Give the researcher and tool_executor lanes a sandboxed "
+             "run_command (plan E): the project read-only at its real "
+             "path, a private /scratch, no network, limits on time, memory "
+             "and processes. On a follow-up it stays on for the rest of "
+             "the consultancy. Refused, before the run starts, on a host "
+             "that cannot sandbox it.")
+    g.add_argument(
+        "--no-shell", dest="shell", action="store_false",
+        help="No shell for this run (and, on a follow-up, the rest of the "
+             "consultancy), even with [tools.shell] default = \"always\".")
+
+
+def cmd_config_set_shell(args, base: str) -> int:
+    values: dict = {}
+    for k in ("default", "mode", "net", "backend", "timeout_s",
+              "max_timeout_s", "memory_mib", "pids", "cpu_pct",
+              "lane_disk_gib", "free_floor_gib", "free_floor_pct"):
+        v = getattr(args, k, None)
+        if v is not None:
+            values[k] = v
+    if args.clear_ro_binds or args.ro_bind:
+        base_binds = [] if args.clear_ro_binds else \
+            list(cc.load_config(cwd=Path(os.getcwd())).tools.shell.ro_binds)
+        values["ro_binds"] = base_binds + [str(Path(b).expanduser())
+                                           for b in args.ro_bind]
+    try:
+        cfg = cc.set_shell(values=values, reset=bool(args.reset),
+                           **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_shell_preflight(args, base: str) -> int:
+    """``shell-preflight``: can this host sandbox a council shell, and
+    which layers is it made of. Runs a real (trivial) sandboxed command."""
+    from claude_hooks.sandbox import backend_for
+    cfg = cc.load_config(cwd=Path(args.cwd or os.getcwd()))
+    pre = backend_for(cfg.tools.shell.backend).preflight(refresh=True)
+    if args.json:
+        print(json.dumps({"backend": pre.backend, "ok": pre.ok,
+                          "layers": pre.layers, "missing": pre.missing,
+                          "detail": pre.detail,
+                          "default": cfg.tools.shell.default}, indent=2))
+    else:
+        print(pre.reason())
+        for k, v in pre.layers.items():
+            print(f"  {k:10s} {v}")
+        print(f"[tools.shell] default = {cfg.tools.shell.default}")
+    return 0 if pre.ok else 1
 
 
 def cmd_config_set_escalation(args, base: str) -> int:
@@ -2156,6 +2219,7 @@ def build_parser() -> argparse.ArgumentParser:
             "are right."
         ),
     )
+    _add_shell_args(c)
     _add_wait_args(c)
     c.set_defaults(fn=cmd_consult)
 
@@ -2234,6 +2298,7 @@ def build_parser() -> argparse.ArgumentParser:
              "default number of extra rounds for this consultancy).",
     )
     _add_wait_args(fu)
+    _add_shell_args(fu)
     fu.set_defaults(fn=cmd_follow_up)
 
     # accept — consultancy review loop: mark the consultancy ACCEPTED.
@@ -2326,6 +2391,16 @@ def build_parser() -> argparse.ArgumentParser:
     gc_.add_argument("--dry-run", action="store_true",
                      help="Report what would be removed; remove nothing.")
     gc_.set_defaults(fn=cmd_gc)
+
+    # shell-preflight
+    sp_ = sub.add_parser(
+        "shell-preflight",
+        help="Can this host sandbox a council shell (--shell)? Runs one "
+             "trivial sandboxed command and lists each layer (local; exit "
+             "1 when a required layer is missing).")
+    sp_.add_argument("--cwd", help="Project root (default: cwd).")
+    sp_.add_argument("--json", action="store_true")
+    sp_.set_defaults(fn=cmd_shell_preflight)
 
     # show
     sh = sub.add_parser(
@@ -2893,6 +2968,34 @@ def build_parser() -> argparse.ArgumentParser:
     cgd.add_argument("--role", choices=cc.GUARD_ROLES)
     _add_scope_args(cgd)
     cgd.set_defaults(fn=cmd_config_set_guards)
+
+    csh = cfg_sub.add_parser(
+        "set-shell",
+        help="[tools.shell]: the sandboxed run_command (plan E). --default "
+             "always gives it to every run; off (the default) means only "
+             "runs started with --shell. Limits apply per command.")
+    csh.add_argument("--default", choices=("off", "always"))
+    csh.add_argument("--mode", choices=("read",),
+                     help="read: project read-only, private /scratch "
+                          "(write views are plan E3)")
+    csh.add_argument("--net", choices=("none",))
+    csh.add_argument("--backend", choices=("auto", "bwrap"))
+    csh.add_argument("--ro-bind", action="append", default=[],
+                     metavar="DIR", help="Toolchain dir shown read-only, its "
+                     "bin/ first on PATH (repeatable; appends)")
+    csh.add_argument("--clear-ro-binds", action="store_true")
+    csh.add_argument("--timeout", dest="timeout_s", type=int)
+    csh.add_argument("--max-timeout", dest="max_timeout_s", type=int)
+    csh.add_argument("--memory-mib", type=int)
+    csh.add_argument("--pids", type=int)
+    csh.add_argument("--cpu-pct", type=int)
+    csh.add_argument("--lane-disk-gib", type=float)
+    csh.add_argument("--free-floor-gib", type=float)
+    csh.add_argument("--free-floor-pct", type=float)
+    csh.add_argument("--reset", action="store_true",
+                     help="restore every [tools.shell] default first")
+    _add_scope_args(csh)
+    csh.set_defaults(fn=cmd_config_set_shell)
 
     ces = cfg_sub.add_parser(
         "set-escalation",

@@ -137,6 +137,14 @@ class SharedReadCache:
                 else _SHARED
 
     # ------------------------------------------------------------------ #
+    def _call(self, name, raw_args, cwd, lane, kw) -> str:
+        """The inner executor, given the lane when it takes one (the
+        registry does; a bare ``execute`` does not)."""
+        if lane is not None and getattr(self._executor, "accepts_lane", False):
+            kw = dict(kw, lane=lane)
+        return self._executor(name, raw_args, cwd, **kw)
+
+    # ------------------------------------------------------------------ #
     def __call__(self, name: str, raw_args: str, cwd: str, *,
                  lane: Optional[str] = None, **kw) -> str:
         if name not in self._cacheable:
@@ -150,17 +158,17 @@ class SharedReadCache:
                 # Possibly effectful: whatever it did, the cached reads
                 # may no longer describe the tree.
                 self.clear()
-            return self._executor(name, raw_args, cwd, **kw)
+            return self._call(name, raw_args, cwd, lane, kw)
         if self._uncached_when is not None:
             try:
                 gated = self._uncached_when(name)
             except Exception:
                 gated = True     # unsure: let the gate decide
             if gated:
-                return self._executor(name, raw_args, cwd, **kw)
+                return self._call(name, raw_args, cwd, lane, kw)
         base = self._key(name, raw_args, cwd)
         if base is None:
-            return self._executor(name, raw_args, cwd, **kw)
+            return self._call(name, raw_args, cwd, lane, kw)
         key = (self._scope(lane),) + base
 
         while True:
@@ -178,7 +186,7 @@ class SharedReadCache:
         self.misses += 1
         output = None
         try:
-            output = self._executor(name, raw_args, cwd, **kw)
+            output = self._call(name, raw_args, cwd, lane, kw)
             return output
         finally:
             # Store before waking the waiters: woken first, they would

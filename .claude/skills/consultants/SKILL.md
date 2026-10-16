@@ -206,6 +206,20 @@ need to rewrite `eval/scorers.py` as an absolute path before asking.
 Do still pass the root: a path with no root that contains it is what
 pre-flight refuses on.
 
+**Running things: `--shell`.** The council can only read unless a run
+asks for the sandboxed shell. Pass `--shell` when the answer needs
+execution — "does the test pass", "reproduce this", "what does the
+script print", "profile it". The research lanes then get `run_command`:
+the project and the roots read-only at their real paths, a private
+`/scratch`, no network, no host home directory, limits on time, memory
+and processes. It cannot change the user's files, so enabling it needs
+no confirmation, but **tell the user in one line that you did**. On a
+host that cannot sandbox it the engine refuses the run before it starts
+(HTTP 409, naming the missing layer): ask the user whether to run
+without it (`--no-shell`) or fix the host (`claude-consultants
+shell-preflight`). Never drop `--shell` silently and present the answer
+as if the council had run anything.
+
 Returns:
 
 ```json
@@ -444,7 +458,14 @@ claude-consultants follow-up <parent_sid> --message "<follow-up text>" --cwd "$(
 ```
 
 Optional `--effort ...` to override the tier for this follow-up
-(defaults to parent's). Returns:
+(defaults to parent's). `--shell` adds the sandboxed shell from this
+follow-up on — the fix when a council came back unsure because it could
+not run the tests. It stays on for the rest of the consultancy (every
+later answer ends with `shell: enabled since follow-up #k`) until a
+follow-up sends `--no-shell`. In an auto-issued follow-up of the review
+loop, add `--shell` only if the user turned on `[tools.shell] default =
+"always"` or already approved a shell in this consultancy; otherwise ask
+first. Returns:
 
 ```json
 {"ok": true, "sid": "csl-...-NEW", "parent_sid": "...",
@@ -858,6 +879,15 @@ and **More…** opens the next batch (ending with **Done**):
     reasoning loop) or that failed on its task reruns once on the expert
     model, given a brief of the failed attempt; at most N (default 2) per
     council. Ask which model; never pick one for the user.
+17. **Shell** — `claude-consultants config set-shell --default
+    off|always` (default off: only runs started with `--shell` get it),
+    plus limits (`--timeout`, `--max-timeout`, `--memory-mib`, `--pids`,
+    `--cpu-pct`, `--lane-disk-gib`) and `--ro-bind <dir>` for a
+    toolchain the jail should see (its `bin/` goes first on PATH). Show
+    `tools.shell` from `config show` first, and run `claude-consultants
+    shell-preflight` so the user sees whether this host can sandbox it
+    at all (each layer, and what is missing). Only `mode=read` and
+    `net=none` exist so far.
 
 Loop back to step 1 after each successful change; exit on **Done**.
 

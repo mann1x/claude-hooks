@@ -1592,6 +1592,94 @@ claude-consultants config set-tools --all-roles false --cwd "$(pwd)"
 Worth knowing before you do: the cost argument for turning it off did
 not survive measurement.
 
+### The sandboxed shell (`--shell`, plan E)
+
+A council can only read unless a run asks for the shell. With `--shell`
+(on `consult` or `follow-up`) the researcher and tool_executor lanes get
+`run_command`; the planner, critics, synthesizer and adversary never do,
+since a shell's state belongs to a lane.
+
+```bash
+claude-consultants consult --message "do the tests in tests/test_x.py pass on dev?" \
+  --cwd "$(pwd)" --shell
+claude-consultants follow-up <sid> --message "run them and see" --shell
+claude-consultants shell-preflight          # can this host do it, layer by layer
+claude-consultants config set-shell --default always   # every run gets it
+```
+
+**What a command sees** (P1, the `read` mode): the project and the
+other roots read-only at their real paths, a private writable
+`/scratch` (one per lane, kept between its commands, under
+`<cwd>/.claude-hooks/consultants/<sid>/lanes/<lane>/`) and `/tmp`, no
+network (`lo` only), no host home directory (`$HOME` is an empty
+tmpfs), an allowlisted environment (no tokens, keys, `OLLAMA_*`,
+`SSH_AUTH_SOCK`), and per-command limits: 120 s by default (a call may
+ask up to 600 s), 4 GiB memory, 256 processes, 400% CPU, 4096 open
+files, 1 GiB per file. Output is capped at 20,000 characters, head and
+tail kept, with the harness's truncation marker.
+
+**How it is built** (Linux, `claude_hooks/sandbox/linux_bwrap.py`) —
+programs that each set one layer and `exec` the next:
+
+```
+systemd-run --scope -p MemoryMax= -p TasksMax= -p CPUQuota=   cgroup
+  prlimit --core=0 --nofile= --fsize=                         rlimits
+    setpriv --reuid=65534 ... --nnp --bounding-set=-all       nobody, no caps
+      bwrap --unshare-all ... --seccomp FD                    namespaces, fresh root
+        <command>
+```
+
+Two orders in it were measured on solidpc and are not stylistic. Root
+running `bwrap --uid 65534` maps the inside uid back to the caller's,
+so a file written inside belonged to host uid 0: the engine drops to
+nobody *before* bwrap. And `/root/.claude.json` is world-readable on
+that host, so being nobody does not protect it — not mounting it does,
+which is why the root is a fresh tmpfs (remounted read-only once set
+up) rather than a read-only bind of `/`. The seccomp program
+(`claude_hooks/sandbox/seccomp.py`, generated in Python and read by
+bwrap from an fd) refuses `mount`, `unshare`/`setns`, `clone` with any
+`CLONE_NEW*` flag, `ptrace`, `bpf`, `io_uring`, `kexec`, keyrings,
+module loading, `TIOCSTI` and raw sockets with `EPERM`, and kills a
+foreign-architecture or x32 call. Landlock is optional and absent on
+solidpc.
+
+**A missing layer means no shell, never a weaker one.** A run asking
+for the shell on a host that cannot sandbox it is refused before it
+starts (HTTP 409 naming the layer); `shell-preflight` lists every layer.
+Windows (AppContainer + Job Object) and macOS (Seatbelt) are plan E7
+and not built: those hosts report the shell unavailable.
+
+**Permissions.** `run_command` goes through the ladder per call, by a
+cost/reach table (`claude_hooks/sandbox/classify.py`), because the jail
+— not the table — is the safety boundary: reading and test runners
+(`ls`, `git log`, `pytest`, `cargo test`, ...) are `auto`; interpreters,
+builds and anything unknown are `ask_assistant`; a command that can
+spend money (`aws`, `kubectl`, `runpod`, `curl`, ...) is `ask_human`
+except that with no network it cannot, so it is `ask_assistant`; a call
+asking more than 120 s is `ask_assistant`. `[tools.permissions]` and
+`POST /control` still win over the table.
+
+**Inheritance.** A follow-up that turns the shell on banks it on the
+consultancy: later follow-ups keep it until one sends `--no-shell`.
+Every answer of a run with the shell ends with
+`shell: enabled since <the ask | follow-up #k | config> (read, net none)`,
+so an inherited shell is never invisible.
+
+**Restarts.** A council suspended mid-command resumes with its shell.
+The command itself died with the engine (`--die-with-parent` and the
+scope), and is never re-run — commands are not idempotent. The lane's
+next result opens with a note naming the interrupted command; its
+partial writes stay in `/scratch`.
+
+**Disk.** A lane refuses to run when the disk holding its scratch is
+below max(20 GiB, 10%) free, or its `/scratch` is over 2 GiB
+(`--lane-disk-gib`). Scratch dirs go with the session's other files.
+
+Writable views of the project (git worktrees, reflinks, overlays), the
+`changes` / `apply` / `discard` verbs and the static `council-sandbox`
+launcher are the rest of Milestone E (`docs/PLAN-council-cerebriline.md`
+§5).
+
 ### CLI
 
 If you don't want the AskUserQuestion walk-through (e.g. scripting,

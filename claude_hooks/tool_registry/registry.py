@@ -70,6 +70,9 @@ class ToolRegistry:
                 bare = p.strip_prefix(name)
                 self.gate.provider_defaults.setdefault(
                     name, p.default_level(bare))
+                if type(p).call_level is not ToolProvider.call_level:
+                    self.gate.call_levels.setdefault(
+                        name, lambda raw, p=p, bare=bare: p.call_level(bare, raw))
                 if p.is_read_only(bare):
                     self.gate.read_only_tools = (
                         self.gate.read_only_tools | {name})
@@ -121,7 +124,8 @@ class ToolRegistry:
 
     # ------------------------------------------------------------------ #
     def dispatch(self, tool: str, raw_args: str, cwd: str, *,
-                 runtime_permissions: Optional[dict] = None) -> str:
+                 runtime_permissions: Optional[dict] = None,
+                 lane: Optional[str] = None) -> str:
         """Gate, then run. Returns the tool result string.
 
         Every refusal is returned as an ``error: ...`` string rather
@@ -149,6 +153,8 @@ class ToolRegistry:
                         f"{decision.reason}. Try a different approach.")
 
         try:
+            if getattr(owner, "accepts_lane", False):
+                return owner.execute(tool, raw_args, cwd, lane=lane)
             return owner.execute(tool, raw_args, cwd)
         except Exception as e:  # pragma: no cover - providers shouldn't raise
             log.exception("provider %s raised executing %s",
@@ -190,7 +196,8 @@ class ToolRegistry:
         lets ``POST /control`` tighten a council that is already
         running; a dict is fixed when the executor is built.
         """
-        def _executor(name: str, raw_args: str, cwd: str) -> str:
+        def _executor(name: str, raw_args: str, cwd: str, *,
+                      lane: Optional[str] = None) -> str:
             perms = runtime_permissions
             if callable(perms):
                 try:
@@ -203,7 +210,10 @@ class ToolRegistry:
                     return (f"error: tool {name!r} refused: the live "
                             f"permission source failed")
             return self.dispatch(name, raw_args, cwd,
-                                 runtime_permissions=perms)
+                                 runtime_permissions=perms, lane=lane)
+        # ``LaneBoundExecutor`` / ``SharedReadCache`` pass ``lane=`` only
+        # to an executor that says it takes one.
+        _executor.accepts_lane = True
         return _executor
 
     def close(self) -> None:

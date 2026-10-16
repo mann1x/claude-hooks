@@ -186,11 +186,17 @@ class PolicyGate:
     read_only_tools: frozenset = field(default_factory=frozenset)
     #: Set once the session has consumed untrusted external text.
     tainted: bool = False
+    #: Per-call classifiers: tool name -> ``fn(raw_args)`` returning
+    #: ``(level, reason)`` or ``None``. Consulted after the operator's
+    #: settings and before the provider's static default, for a tool
+    #: whose cost depends on its arguments (``run_command``).
+    call_levels: dict = field(default_factory=dict)
 
     # ---------------------------------------------------------------- #
     def resolve(self, tool: str, *, runtime_permissions: Optional[dict] = None,
                 raw_args: str = "") -> GateDecision:
-        base, source = self._base_level(tool, runtime_permissions)
+        base, source = self._base_level(tool, runtime_permissions,
+                                         raw_args)
 
         if not is_valid_level(base):
             # A malformed level must fail closed. Silently treating it
@@ -228,8 +234,8 @@ class PolicyGate:
         )
 
     # ---------------------------------------------------------------- #
-    def _base_level(self, tool: str,
-                    runtime_permissions: Optional[dict]) -> tuple[object, str]:
+    def _base_level(self, tool: str, runtime_permissions: Optional[dict],
+                    raw_args: str = "") -> tuple[object, str]:
         if runtime_permissions:
             got = runtime_permissions.get(tool)
             if got is not None:
@@ -238,6 +244,15 @@ class PolicyGate:
                 return normalize_level(got), "runtime control"
         if tool in self.overrides:
             return self.overrides[tool], "[tools.permissions] config"
+        classify = self.call_levels.get(tool)
+        if classify is not None:
+            try:
+                got = classify(raw_args)
+            except Exception:
+                log.exception("call classifier for %r raised", tool)
+                got = (ASK_ASSISTANT, "its classifier failed")
+            if got is not None:
+                return got[0], f"classification ({got[1]})"
         if tool in self.provider_defaults:
             return self.provider_defaults[tool], "provider default"
         return self.default_level, "default"

@@ -248,9 +248,31 @@ def _tools_for(deps: "GraphDeps", role: str) -> dict:
         return {}
     if not deps.tool_specs or deps.tool_executor is None:
         return {}
-    return {"tool_specs": deps.tool_specs,
-            "tool_executor": deps.tool_executor,
+    specs = [s for s in deps.tool_specs
+             if (s.get("function") or {}).get("name") not in LANE_ONLY_TOOLS]
+    if len(specs) == len(deps.tool_specs):
+        return {"tool_specs": deps.tool_specs,
+                "tool_executor": deps.tool_executor,
+                "cwd": deps.cwd}
+    return {"tool_specs": specs,
+            "tool_executor": _without_lane_tools(deps.tool_executor, role),
             "cwd": deps.cwd}
+
+
+#: Tools only the researcher and tool_executor lanes get (plan E5): the
+#: shell's state lives in a lane's view, and these roles have no lane.
+LANE_ONLY_TOOLS = frozenset({"run_command"})
+
+
+def _without_lane_tools(executor: Callable[..., str], role: str):
+    """``executor``, refusing :data:`LANE_ONLY_TOOLS` — a role that was
+    not offered the shell does not get it by naming it anyway."""
+    def run(name: str, raw_args: str, cwd: str, **kw: Any) -> str:
+        if name in LANE_ONLY_TOOLS:
+            return (f"error: {name} is not offered to the {role}; only the "
+                    "research lanes have the shell")
+        return executor(name, raw_args, cwd, **kw)
+    return run
 
 
 @dataclass

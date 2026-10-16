@@ -38,7 +38,8 @@ def _shared(executor, read_only=frozenset(), runtime_permissions=None):
 
 def build_tool_surface(cfg: Any, *, extra_roots: tuple[str, ...] = (),
                        approval_fn: Optional[Callable] = None,
-                       runtime_permissions: Optional[Callable[[], dict]] = None):
+                       runtime_permissions: Optional[Callable[[], dict]] = None,
+                       shell: Optional[dict] = None, sid: str = ""):
     """Build ``(tool_specs, tool_executor, registry)`` for one session.
 
     ``runtime_permissions`` is read on every tool call (normally
@@ -51,6 +52,12 @@ def build_tool_surface(cfg: Any, *, extra_roots: tuple[str, ...] = (),
     running it — which costs nothing today, since every tool in the
     default surface is ``auto``, and is the right failure direction the
     moment an effectful provider lands.
+
+    ``shell`` (plan E5: ``{"mode", "net", ...}`` or None) adds the
+    sandboxed ``run_command``, its lanes stored under session ``sid``.
+    The engine refuses a shell request before a run starts when the
+    host cannot sandbox it (``shell_enable.preflight_error``), so a
+    shell asked for here is one the host can give.
 
     Falls back to the pre-M-A fixed surface when ``[tools] enabled =
     false``, or when anything here raises: a council with the builtin
@@ -74,6 +81,13 @@ def build_tool_surface(cfg: Any, *, extra_roots: tuple[str, ...] = (),
         providers = [BuiltinToolProvider(extra_roots)]
         if tools_cfg is not None and getattr(tools_cfg, "git", False):
             providers.append(GitToolProvider(extra_roots))
+        if shell:
+            from claude_hooks.tool_registry.shell_provider import (
+                ShellToolProvider)
+            from consultants.server.shell_enable import settings_for
+            providers.append(ShellToolProvider(
+                sid=sid, settings=settings_for(cfg, shell),
+                extra_roots=tuple(extra_roots)))
 
         gate = PolicyGate(
             default_level=getattr(tools_cfg, "default_level", "auto")

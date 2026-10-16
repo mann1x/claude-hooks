@@ -655,6 +655,106 @@ class StoreConfig:
 
 
 @dataclass
+class ShellConfig:
+    """``[tools.shell]``: the sandboxed ``run_command`` (plan E5).
+
+    Off unless asked for (``--shell`` on ask / follow-up) or
+    ``default = "always"``. Only ``mode = "read"`` and ``net = "none"``
+    exist so far: writable lane views are plan E3, egress plan E6.
+    """
+    #: ``off`` | ``always`` — the user's "enable always" knob.
+    default: str = "off"
+    mode: str = "read"
+    net: str = "none"
+    #: ``auto`` | ``bwrap``.
+    backend: str = "auto"
+    #: Toolchain dirs shown read-only (their ``bin`` goes first on PATH).
+    ro_binds: list = field(default_factory=list)
+    timeout_s: int = 120
+    max_timeout_s: int = 600
+    memory_mib: int = 4096
+    pids: int = 256
+    cpu_pct: int = 400
+    lane_disk_gib: float = 2.0
+    free_floor_gib: float = 20.0
+    free_floor_pct: float = 10.0
+
+
+def _shell_choice(*choices):
+    def check(v):
+        if v not in choices:
+            raise ValueError(f"must be one of {', '.join(choices)}")
+        if v in ("write",):
+            raise ValueError("mode 'write' needs writable lane views (plan "
+                             "E3), not built yet")
+        return v
+    return check
+
+
+def _shell_net(v):
+    if v != "none":
+        raise ValueError("only 'none' exists so far (egress is plan E6)")
+    return v
+
+
+def _shell_paths(v):
+    if not isinstance(v, list) or not all(
+            isinstance(x, str) and (x.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", x))
+            for x in v):
+        raise ValueError("must be a list of absolute paths")
+    return list(v)
+
+
+def _shell_num(lo, hi, kind=int):
+    def check(v):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError("must be a number")
+        if kind is int and int(v) != v:
+            raise ValueError("must be an integer")
+        if not lo <= v <= hi:
+            raise ValueError(f"must be in [{lo}, {hi}]")
+        return kind(v)
+    return check
+
+
+#: ``[tools.shell]`` keys and how each is checked.
+SHELL_KEYS = {
+    "default": _shell_choice("off", "always"),
+    "mode": _shell_choice("read", "write"),
+    "net": _shell_net,
+    "backend": _shell_choice("auto", "bwrap"),
+    "ro_binds": _shell_paths,
+    "timeout_s": _shell_num(1, 3600),
+    "max_timeout_s": _shell_num(1, 3600),
+    "memory_mib": _shell_num(64, 1 << 20),
+    "pids": _shell_num(8, 1 << 16),
+    "cpu_pct": _shell_num(10, 100 * 1024),
+    "lane_disk_gib": _shell_num(0.01, 1 << 14, float),
+    "free_floor_gib": _shell_num(0, 1 << 14, float),
+    "free_floor_pct": _shell_num(0, 99, float),
+}
+
+
+def apply_shell(sc: ShellConfig, values: dict, *, strict: bool) -> None:
+    """Set ``[tools.shell]`` keys on ``sc``. ``strict`` raises on a bad
+    key or value (the setter); otherwise it is logged and skipped (a
+    hand-edited file must not take the council down)."""
+    for k, v in values.items():
+        try:
+            if k not in SHELL_KEYS:
+                raise ValueError(f"unknown key (valid: {', '.join(SHELL_KEYS)})")
+            setattr(sc, k, SHELL_KEYS[k](v))
+        except ValueError as e:
+            if strict:
+                raise ValueError(f"[tools.shell] {k}: {e}") from None
+            log.warning("[tools.shell] %s = %r ignored: %s", k, v, e)
+    if sc.timeout_s > sc.max_timeout_s:
+        if strict:
+            raise ValueError("[tools.shell] timeout_s must be <= max_timeout_s")
+        sc.timeout_s = sc.max_timeout_s
+
+
+@dataclass
 class ToolsConfig:
     """M-A: the council's tool surface and its permission ladder.
 
@@ -713,6 +813,8 @@ class ToolsConfig:
     #: the ladder), so this is the spend-approval deadline. Timeout
     #: denies on purpose: absence of an approver never authorizes spend.
     approval_timeout_s: float = 600.0
+    #: ``[tools.shell]`` — the sandboxed shell, off by default (plan E5).
+    shell: ShellConfig = field(default_factory=ShellConfig)
 
 
 #: Floor for :attr:`ToolsConfig.approval_timeout_s`. A value below this
@@ -1390,6 +1492,9 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
             base.tools.permissions = {
                 str(k): v for k, v in perms.items()
             }
+        sh = tl.get("shell")
+        if isinstance(sh, dict):
+            apply_shell(base.tools.shell, sh, strict=False)
 
     st = raw.get("store") or {}
     if isinstance(st, dict):
@@ -1846,6 +1951,7 @@ def _render(cfg: ConsultantsConfig, *,
         L.append("# [tools.permissions]")
         L.append('# "git_diff" = "auto"')
         L.append('# "some_tool" = "ask_assistant"')
+    L.extend(_render_shell(cfg.tools.shell))
     L.append("")
     L.append("[store]")
     L.append("# Long-term memory BaseStore for cross-lane / cross-session recall.")
@@ -2888,6 +2994,41 @@ VALID_STORE_BACKENDS: tuple[str, ...] = ("memory", "pgvector", "sqlite_vec")
 VALID_PERMISSION_LEVELS: tuple[str, ...] = (
     "auto", "ask_assistant", "ask_human", "deny",
 )
+
+
+def _render_shell(sc: ShellConfig) -> list[str]:
+    """``[tools.shell]``, only the keys that differ from the default
+    (all commented out when none do), so an untouched config renders the
+    shell as a documented example."""
+    default = ShellConfig()
+    changed = [k for k in SHELL_KEYS if getattr(sc, k) != getattr(default, k)]
+    L = ["", "# The sandboxed shell (run_command), off by default. Turn it on",
+         "# per run with --shell, or always with default = \"always\".",
+         "# mode: read (project read-only + private /scratch); net: none."]
+    if not changed:
+        L += ["# [tools.shell]", '# default = "off"', '# ro_binds = []']
+        return L
+    L.append("[tools.shell]")
+    for k in changed:
+        v = getattr(sc, k)
+        if isinstance(v, str):
+            L.append(f"{k} = {_toml_str(v)}")
+        elif isinstance(v, list):
+            L.append(f"{k} = [" + ", ".join(_toml_str(x) for x in v) + "]")
+        else:
+            L.append(f"{k} = {v:g}" if isinstance(v, float) else f"{k} = {v}")
+    return L
+
+
+def set_shell(*, values: dict, reset: bool = False, scope: str = "user",
+              cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set ``[tools.shell]`` keys (``reset`` first restores the
+    defaults) and persist. Values are validated; a bad one raises."""
+    cfg = _load_for_edit(scope, cwd)
+    if reset:
+        cfg.tools.shell = ShellConfig()
+    apply_shell(cfg.tools.shell, values, strict=True)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 
 def set_tools(

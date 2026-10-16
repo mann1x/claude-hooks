@@ -128,6 +128,11 @@ class SessionState:
     # as ``extra_roots``. Empty list when display info wasn't
     # captured at session-creation time (legacy sessions on disk).
     extra_roots_display: list[str] = field(default_factory=list)
+    # Plan E5: this run's sandboxed shell ``{"mode", "net", "since"}``,
+    # or None (off). ``shell_banked`` (root only) is what later
+    # follow-ups inherit until one turns it off.
+    shell: Optional[dict] = None
+    shell_banked: Optional[dict] = None
     # Display form of the primary cwd (pre-realpath) — used only for
     # log rendering, never for filesystem access. ``cwd`` itself
     # remains the original path the runner received (so subsequent
@@ -732,6 +737,15 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             discovered_display[1:]
         )
 
+        from consultants.server import shell_enable
+        try:
+            shell = shell_enable.resolve_ask(cfg, body.get("shell"))
+        except shell_enable.ShellRequestError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from None
+        shell_err = shell_enable.preflight_error(cfg, shell)
+        if shell_err:
+            raise HTTPException(status_code=409, detail=shell_err)
+
         sid = _new_sid()
         state = SessionState(
             sid=sid,
@@ -750,6 +764,10 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         state.root_sid = sid
         state.max_followups = cfg.max_followups
         state.consultancy_status = CONSULTANCY_IN_PROGRESS
+        if shell:
+            state.shell = shell
+            if shell.get("since") == "the ask":
+                state.shell_banked = shell
         with app.state.sessions_lock:
             app.state.sessions[sid] = state
         _persist_consultancy(state)
@@ -795,6 +813,8 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             # tool sandbox still confines every read to the roots.
             "skip_preflight": bool(body.get("skip_preflight")),
         }
+        if shell:
+            runner_input["shell"] = shell
 
         inflight.register({
             "sid": sid, "kind": "consult",
@@ -806,6 +826,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             "skip_preflight": bool(body.get("skip_preflight")),
             "root_sid": sid, "parent_sid": None,
             "started_at": state.started_at,
+            **({"shell": shell} if shell else {}),
         })
         # Hand off to the executor. The runner mutates ``state`` and
         # writes the on-disk artifacts; we just track completion.
@@ -976,6 +997,17 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                 detail="trace must be a bool",
             )
 
+        from consultants.server import shell_enable
+        try:
+            shell, shell_banked = shell_enable.resolve_follow_up(
+                cfg, body.get("shell"), croot.shell_banked,
+                croot.followup_count + (0 if retry_lanes else 1))
+        except shell_enable.ShellRequestError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from None
+        shell_err = shell_enable.preflight_error(cfg, shell)
+        if shell_err:
+            raise HTTPException(status_code=409, detail=shell_err)
+
         child_sid = _new_sid()
         # Child session inherits cwd + topology from parent. Progress
         # only tracks roles wired into the SHORTENED follow-up graph
@@ -1043,6 +1075,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             # the child surfaces the full set.
             extra_roots=merged_extra,
             extra_roots_display=merged_display,
+            shell=shell,
         )
         with app.state.sessions_lock:
             app.state.sessions[child_sid] = child
@@ -1057,6 +1090,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         if not retry_lanes:
             croot.followup_count += 1
         croot.consultancy_children.append(child_sid)
+        croot.shell_banked = shell_banked
         croot.consultancy_status = CONSULTANCY_IN_PROGRESS
         croot.bump_activity()
         _persist_consultancy(croot)
@@ -1098,6 +1132,8 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         }
         if retry_lanes:
             runner_input["retry_lanes"] = list(retry_lanes)
+        if shell:
+            runner_input["shell"] = shell
         inflight.register({
             "sid": child_sid, "kind": "follow-up",
             "cwd": parent.cwd,
@@ -1110,6 +1146,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             "root_sid": croot.sid, "parent_sid": sid,
             "started_at": child.started_at,
             **({"retry_lanes": list(retry_lanes)} if retry_lanes else {}),
+            **({"shell": shell} if shell else {}),
         })
         _submit_run(app, app.state.run_follow_up, child, runner_input)
 
@@ -1544,6 +1581,7 @@ def _session_from_record(rec: dict, cfg) -> "SessionState":
         root_sid=rec.get("root_sid") or rec["sid"],
         extra_roots=list(rec.get("extra_roots") or []),
         extra_roots_display=list(rec.get("extra_roots_display") or []),
+        shell=rec.get("shell") or None,
     )
     if state.root_sid == state.sid:
         state.max_followups = cfg.max_followups
@@ -1628,6 +1666,8 @@ def _resume_one(app, rec: dict) -> bool:
         "skip_preflight": bool(rec.get("skip_preflight")),
         "resume": True,
     }
+    if rec.get("shell"):
+        runner_input["shell"] = rec["shell"]
     if kind == "follow-up":
         parent = _ensure_loaded(app, rec.get("parent_sid"), cwd)
         runner_input["parent_state"] = parent
@@ -1972,6 +2012,7 @@ def _consultancy_dict(root: "SessionState") -> dict:
         "effective_cap": root.max_followups + root.extra_granted,
         "child_sids": list(root.consultancy_children),
         "updated_at": time.time(),
+        **({"shell": root.shell_banked} if root.shell_banked else {}),
     }
 
 
@@ -2003,6 +2044,8 @@ def _hydrate_consultancy(root: "SessionState") -> None:
     children = disk.get("child_sids")
     if isinstance(children, list):
         root.consultancy_children = [str(c) for c in children]
+    if isinstance(disk.get("shell"), dict):
+        root.shell_banked = disk["shell"]
 
 
 def _resolve_consultancy_root(

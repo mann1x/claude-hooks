@@ -513,6 +513,35 @@ def check_ollama_upstream(r: Results) -> None:
         r.add(WARN, f"ollama {url}", f"{source}, not answering ({type(e).__name__})")
 
 
+def check_shell(r: Results) -> None:
+    """Whether this host can give a council the sandboxed shell (plan E).
+
+    Runs the backend's preflight, which runs one trivial command through
+    every layer. FAIL only when ``[tools.shell] default = "always"`` —
+    then every council asks for a shell the host cannot give and is
+    refused before it starts. Otherwise a missing layer is a WARN: the
+    shell is off until someone asks for it, and the ask is refused with
+    the same reason."""
+    print("council shell")
+    try:
+        from claude_hooks.sandbox import backend_for
+        from consultants import config as cc
+        sc = cc.load_config(cwd=REPO).tools.shell
+    except Exception as e:
+        r.add(WARN, "council shell", f"unavailable: {type(e).__name__}: {e}")
+        return
+    pre = backend_for(sc.backend).preflight(refresh=True)
+    if pre.ok:
+        optional = [k for k, v in pre.layers.items() if v.endswith("(optional)")]
+        r.add(PASS, f"shell sandbox ({pre.backend})",
+              f"default={sc.default}" + (f"; optional absent: {', '.join(optional)}"
+                                         if optional else ""))
+    else:
+        r.add(FAIL if sc.default == "always" else WARN,
+              f"shell sandbox ({pre.backend})",
+              f"default={sc.default}; {pre.reason()}")
+
+
 # --------------------------------------------------------------------- #
 # Skills
 # --------------------------------------------------------------------- #
@@ -697,6 +726,7 @@ def main() -> int:
     else:
         check_version(r)
         check_ollama_upstream(r)
+        check_shell(r)
         check_providers(r)
         check_embedder(r)
         check_lsp_daemons(r)

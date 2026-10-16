@@ -442,6 +442,7 @@ read `~/.claude.json` and `~/.ssh`, and saw every interface and every host PID.
   9. an environment allowlist.
 - **A missing required layer means no shell**, never a weaker shell silently. `preflight` says which layer is missing.
 - **P1 interim backend:** bwrap (0.4.1 is present here and verified to run as nobody with only `lo`), wrapped in `systemd-run --scope` for limits, until the launcher lands.
+- **Status (2026-10-16): the P1 interim backend is built** — `claude_hooks/sandbox/` (`linux_bwrap.py`, `seccomp.py`, `classify.py`), `run_command` in `claude_hooks/tool_registry/shell_provider.py`, enablement in `consultants/server/shell_enable.py`. Layers 1, 2, 3, 4, 5, 6, 7 and 9 are in; 8 (Landlock) is absent and optional. Two measurements changed the chain: root running `bwrap --uid 65534` writes as host uid 0, so the engine drops to nobody (`setpriv`) before bwrap; and bwrap's root and `/dev` are writable tmpfs mounts, so both are remounted read-only. The escape suite (`tests/test_council_shell_escape.py`, 12 tests) is green on solidpc, and a mutant without seccomp or with a shared network fails it. The static launcher, `step_sandbox` and the release asset are still to do.
 
 ### E3. Lane views: worktrees, snapshots, scratch
 

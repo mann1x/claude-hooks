@@ -35,6 +35,7 @@ def make_runner(*, ollama_base_url: str):
     )
     from claude_hooks.get_advice.chat_client import make_agent_chat_client
     from claude_hooks.caliber_proxy.prompt import build_grounding_messages
+    from consultants.server.shell_enable import with_provenance
     from consultants.server.tool_surface import build_tool_surface
     from consultants.engine.graph import (
         TOOLABLE_ROLES, GraphDeps, build_council_graph,
@@ -302,6 +303,7 @@ def make_runner(*, ollama_base_url: str):
             approval_fn=_make_tool_approval_fn(
                 state, recorder, cfg, cwd, log_label="council"),
             runtime_permissions=_live_tool_permissions(state),
+            shell=runner_input.get("shell"), sid=state.sid,
         )
         # M-B: which roles get those tools. Empty unless [tools]
         # all_roles is on, which keeps the default graph pre-M-B.
@@ -511,7 +513,8 @@ def make_runner(*, ollama_base_url: str):
             models=models,
             topology=cfg.topology,
             effort=cfg.effort,
-            final_answer=final_state.get("final_answer", ""),
+            final_answer=with_provenance(
+                final_state.get("final_answer", ""), runner_input.get("shell")),
             turns=list(final_state.get("turns") or []),
             duration_seconds=time.time() - state.started_at,
             status=terminal_status,
@@ -549,7 +552,8 @@ def make_runner(*, ollama_base_url: str):
         state.plan_items = list(final_state.get("plan_items") or [])
         state.research = list(final_state.get("research") or [])
         state.critique = final_state.get("critique")
-        state.final_answer = final_state.get("final_answer") or ""
+        state.final_answer = with_provenance(
+            final_state.get("final_answer") or "", runner_input.get("shell"))
         state.models = dict(models)
         state._chat_clients = {
             r: getattr(c, "_client", c) for r, c in chat_clients.items()
@@ -603,6 +607,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
     )
     from claude_hooks.get_advice.chat_client import make_agent_chat_client
     from claude_hooks.caliber_proxy.prompt import build_grounding_messages
+    from consultants.server.shell_enable import with_provenance
     from consultants.server.tool_surface import build_tool_surface
     from consultants.engine.graph import (
         TOOLABLE_ROLES, GraphDeps, build_follow_up_graph,
@@ -846,6 +851,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
             approval_fn=_make_tool_approval_fn(
                 state, recorder, cfg, cwd, log_label="council follow-up"),
             runtime_permissions=_live_tool_permissions(state),
+            shell=runner_input.get("shell"), sid=state.sid,
         )
         # M-B: which roles get those tools. Empty unless [tools]
         # all_roles is on, which keeps the default graph pre-M-B.
@@ -1064,7 +1070,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
             models=models,
             topology=cfg.topology,
             effort=cfg.effort,
-            final_answer=final_state.get("final_answer", ""),
+            final_answer=with_provenance(
+                final_state.get("final_answer", ""), runner_input.get("shell")),
             turns=list(final_state.get("turns") or []),
             duration_seconds=time.time() - state.started_at,
             status=terminal_status,
@@ -1095,7 +1102,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
         state.plan_items = list(final_state.get("plan_items") or [])
         state.research = list(final_state.get("research") or [])
         state.critique = final_state.get("critique")
-        state.final_answer = final_state.get("final_answer") or ""
+        state.final_answer = with_provenance(
+            final_state.get("final_answer") or "", runner_input.get("shell"))
         state.models = dict(models)
         state._chat_clients = {
             r: getattr(c, "_client", c) for r, c in chat_clients.items()
