@@ -540,6 +540,24 @@ def check_shell(r: Results) -> None:
         r.add(FAIL if sc.default == "always" else WARN,
               f"shell sandbox ({pre.backend})",
               f"default={sc.default}; {pre.reason()}")
+    try:
+        from claude_hooks.sandbox import views
+        from consultants.server import inflight
+        live = {x.get("sid") for x in inflight.load()}
+        rows = views.registered()
+    except Exception as e:
+        r.add(WARN, "sandbox views", f"unreadable: {type(e).__name__}: {e}")
+        return
+    orphans = [x["sid"] for x in rows if x.get("sid") not in live and any(
+        st in ("creating", "active") for st in (x.get("lanes") or {}).values())]
+    held = sum(1 for x in rows for st in (x.get("lanes") or {}).values()
+               if st == "held")
+    if orphans:
+        r.add(WARN, "sandbox views", f"{len(orphans)} orphaned (council not "
+              f"running): {', '.join(orphans[:5])} — the engine's next sweep "
+              "freezes them; or run `claude-consultants sandbox gc`")
+    else:
+        r.add(PASS, "sandbox views", f"{held} held patch(es), no orphans")
 
 
 # --------------------------------------------------------------------- #

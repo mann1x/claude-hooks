@@ -1,12 +1,15 @@
 """``run_command``: a lane's shell, run in the council sandbox.
 
-Plan Milestone E (P1 of ``docs/research/cerebriline-map/04-sandbox-shell.md``
-§6): the ``read`` mode. The council's roots are visible read-only at
-their real paths; ``/scratch`` (one directory per lane, under the
-session's store) and ``/tmp`` are writable and private; there is no
-network, no host home directory, and limits on time, memory, processes,
-open files and file size. The backend (:mod:`claude_hooks.sandbox`) owns
-all of that; this provider owns the lane, the log and the classification.
+Plan Milestone E (P1/P2 of ``docs/research/cerebriline-map/04-sandbox-shell.md``
+§6). The council's roots are visible read-only at their real paths;
+``/scratch`` (one directory per lane, under the session's store) and
+``/tmp`` are writable and private; there is no network, no host home
+directory, and limits on time, memory, processes, open files and file
+size. In ``write`` mode the project root is instead the lane's private
+git worktree (:mod:`claude_hooks.sandbox.views`), bound at the real
+path, and what the lane changed is handed back as a patch when the
+council ends. The backend (:mod:`claude_hooks.sandbox`) owns isolation;
+this provider owns the lane, the view, the log and the classification.
 
 Per lane, on disk (``<cwd>/.claude-hooks/consultants/<sid>/lanes/<lane>/``):
 
@@ -69,13 +72,25 @@ class ShellSettings:
     extra: dict = field(default_factory=dict)
 
 
+#: How the project looks to a command, per mode.
+_VIEW_TEXT = {
+    "read": ("The project and the other roots are visible READ-ONLY at their "
+             "real paths. "),
+    "write": ("The project is YOUR PRIVATE WRITABLE COPY at its real path (a "
+              "git worktree of the user's current tree, uncommitted changes "
+              "included): edit, build, run the tests, even git commit. The "
+              "user's files are never changed; what you change is handed back "
+              "as a patch for them to review. Other roots are read-only. "),
+}
+
+
 def _spec(settings: ShellSettings) -> dict:
     return {"type": "function", "function": {
         "name": TOOL,
         "description": (
             "Run a shell command in a sandbox, to answer what reading cannot: "
-            "run the tests, a script, a linter, a build check. The project and "
-            "the other roots are visible READ-ONLY at their real paths. "
+            "run the tests, a script, a linter, a build check. "
+            + _VIEW_TEXT.get(settings.mode, _VIEW_TEXT["read"]) +
             "/scratch and /tmp are writable and private to you (/scratch is "
             "kept between your commands). There is no network and no home "
             "directory from the host. Limits: "
@@ -122,6 +137,7 @@ class ShellToolProvider(ToolProvider):
         self._lock = threading.Lock()
         self._lane_locks: dict[str, threading.Lock] = {}
         self._checked: set[str] = set()
+        self._views: dict[str, Any] = {}
 
     # ------------------------------------------------------------------ #
     @property
@@ -187,10 +203,41 @@ class ShellToolProvider(ToolProvider):
             cwd, ".claude-hooks", "consultants", self.sid)
         return os.path.join(base, "lanes", lane_dirname(lane))
 
+    def views(self, cwd: str):
+        """The session's write views for the repo at ``cwd`` (write mode
+        only), or None."""
+        if self.settings.mode != "write":
+            return None
+        key = os.path.realpath(cwd)
+        with self._lock:
+            if key not in self._views:
+                from claude_hooks.sandbox.views import session_views
+                self._views[key] = session_views(
+                    sid=self.sid, cwd=cwd, uid=self._sandbox_uid())
+            return self._views[key]
+
+    def _sandbox_uid(self) -> Optional[int]:
+        from claude_hooks.sandbox.linux_bwrap import NOBODY, is_root
+        if is_root() and getattr(self.backend, "name", "") == "bwrap":
+            return NOBODY
+        return None
+
+    def view_root(self, cwd: str, lane: Optional[str]):
+        """``(repo, host view dir)`` when ``lane`` has an active write view,
+        so the file tools read what its commands see; else None."""
+        v = self.views(cwd)
+        if v is None:
+            return None
+        rec = v.lanes().get(lane_dirname(lane)) or {}
+        if rec.get("state") != "active":
+            return None
+        return v.repo, rec["wt"]
+
     def _roots(self, cwd: str) -> tuple[str, ...]:
         return tuple(os.path.realpath(r) for r in (cwd, *self.extra_roots))
 
-    def _resolve_cwd(self, want: Optional[str], root: str, roots, scratch) -> str:
+    def _resolve_cwd(self, want: Optional[str], root: str, roots, scratch,
+                     on_host=lambda p: p) -> str:
         from claude_hooks.sandbox import SCRATCH
         if not want:
             return root
@@ -200,7 +247,7 @@ class ShellToolProvider(ToolProvider):
                                 else os.path.join(root, want))
         for r in roots:
             if path == r or path.startswith(r.rstrip("/") + "/"):
-                if not os.path.isdir(path):
+                if not os.path.isdir(on_host(path)):
                     raise ValueError(f"cwd {want!r} is not a directory")
                 return path
         raise ValueError(f"cwd {want!r} is outside the visible roots "
@@ -232,13 +279,26 @@ class ShellToolProvider(ToolProvider):
         roots = self._roots(cwd)
         ldir = self.lane_dir(cwd, lane)
         scratch = os.path.join(ldir, "scratch")
-        try:
-            run_cwd = self._resolve_cwd(args.get("cwd"), root, roots, scratch)
-        except ValueError as e:
-            return f"error: {e}"
         refusal = self._space_refusal(ldir)
         if refusal:
             return refusal
+        views, mounts = self.views(cwd), None
+        if self.settings.mode == "write":
+            if views is None:
+                return ("error: shell mode 'write' needs a git work tree; "
+                        f"{root} is not in one")
+            from claude_hooks.sandbox.views import ViewError
+            try:
+                mounts = views.ensure(lane_dirname(lane))
+            except (ViewError, OSError) as e:
+                return f"error: your writable view could not be made: {e}"
+        on_host = ((lambda p: views.host_path(lane_dirname(lane), p))
+                   if mounts else (lambda p: p))
+        try:
+            run_cwd = self._resolve_cwd(args.get("cwd"), root, roots, scratch,
+                                        on_host)
+        except ValueError as e:
+            return f"error: {e}"
         os.makedirs(scratch, exist_ok=True)
         self._own(ldir, scratch)
         notes = self._interrupted_note(ldir, lane)
@@ -255,7 +315,9 @@ class ShellToolProvider(ToolProvider):
                                      default_wall_s=s.timeout_s,
                                      max_wall_s=s.max_timeout_s),
                        ro_binds=tuple(s.ro_binds), net=s.net,
-                       name=f"{self.sid}-{lane_dirname(lane)}")
+                       name=f"{self.sid}-{lane_dirname(lane)}",
+                       binds=tuple(mounts.binds) if mounts else (),
+                       env=dict(mounts.env) if mounts else {})
         try:
             r = self.backend.run(spec)
         except Exception as e:   # pragma: no cover - backends return errors
@@ -266,8 +328,15 @@ class ShellToolProvider(ToolProvider):
                          "killed_by": r.killed_by, "wall_s": r.wall_s})
         if r.killed_by == "setup":
             return f"error: the sandbox could not run the command — {r.setup_error}"
-        return "\n".join(notes + [self._render(r, timeout, before,
-                                               self._listing(scratch))])
+        out = self._render(r, timeout, before, self._listing(scratch))
+        if mounts:
+            st = views.status(lane_dirname(lane))
+            out += "\n--- your view vs the user's tree ---\n" + (
+                "\n".join(st[:SCRATCH_LIST_MAX]
+                          + ([f"... and {len(st) - SCRATCH_LIST_MAX} more"]
+                             if len(st) > SCRATCH_LIST_MAX else []))
+                if st else "(no changes)")
+        return "\n".join(notes + [out])
 
     # ------------------------------------------------------------------ #
     def _own(self, ldir: str, scratch: str) -> None:

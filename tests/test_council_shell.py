@@ -338,7 +338,8 @@ class TestEnablement:
         assert se.parse(None) is None and se.parse(False) is False
         assert se.parse(True) == {"mode": "read", "net": "none"}
         assert se.parse("read") == {"mode": "read", "net": "none"}
-        for bad, needle in [("write", "plan E3"), ({"net": "host"}, "plan E6"),
+        assert se.parse("write") == {"mode": "write", "net": "none"}
+        for bad, needle in [("rw", "mode must be"), ({"net": "host"}, "plan E6"),
                             (3, "must be")]:
             with pytest.raises(se.ShellRequestError, match=needle):
                 se.parse(bad)
@@ -405,7 +406,7 @@ class TestConfigAndCli:
     def test_setter_validates(self, tmp_path):
         from consultants import config as cc
         for values, needle in [({"default": "sometimes"}, "default"),
-                               ({"mode": "write"}, "plan E3"),
+                               ({"mode": "rw"}, "mode"),
                                ({"net": "host"}, "plan E6"),
                                ({"pids": 0}, "pids"),
                                ({"nope": 1}, "unknown key")]:
@@ -525,8 +526,8 @@ class TestApp:
                                         "shell": "read"})
         assert r.status_code == 409 and "no namespaces" in r.json()["detail"]
         r = c.post("/v1/consult", json={"message": "q", "cwd": str(tmp_path),
-                                        "shell": "write"})
-        assert r.status_code == 400 and "plan E3" in r.json()["detail"]
+                                        "shell": {"mode": "read", "net": "host"}})
+        assert r.status_code == 400 and "plan E6" in r.json()["detail"]
         assert _done.runs == []
 
     def test_a_follow_up_adds_the_shell_and_later_ones_keep_it(

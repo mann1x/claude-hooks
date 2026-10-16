@@ -58,6 +58,8 @@ ETC_FILES = ("passwd", "group", "hosts", "resolv.conf", "nsswitch.conf",
              "mime.types", "magic", "python3", "pythonstartup")
 #: The usr-merge links (or real dirs on an unmerged host).
 TOP_DIRS = ("bin", "sbin", "lib", "lib32", "lib64", "libx32")
+#: The council's session store under a root, masked in every command.
+STORE = (".claude-hooks", "consultants")
 #: Bytes of each stream kept from either end while the command runs.
 CAPTURE_EDGE_BYTES = 256 * 1024
 _PREFLIGHT_TTL_S = 600.0
@@ -96,6 +98,7 @@ def sandbox_env(spec: RunSpec) -> dict[str, str]:
     for k, v in os.environ.items():
         if k.startswith("LC_"):
             env[k] = v
+    env.update(spec.env or {})
     return env
 
 
@@ -123,6 +126,15 @@ def bwrap_args(spec: RunSpec, seccomp_fd: Optional[int]) -> list[str]:
             continue
         seen.add(p)
         a += ["--ro-bind", p, p]
+    for kind, src, dst in spec.binds:
+        a += ["--bind" if kind == "rw" else "--ro-bind", src, dst]
+    # The session store under each root (other lanes' scratch and views,
+    # transcripts, checkpoints) is masked: a lane sees its own /scratch
+    # and nothing of its siblings'.
+    for p in seen:
+        store = os.path.join(p, *STORE)
+        if os.path.isdir(store):
+            a += ["--tmpfs", store]
     a += ["--bind", spec.scratch, SCRATCH, "--chdir", spec.cwd]
     # Last: the root tmpfs itself (bwrap's, owned by the sandbox user)
     # goes read-only, so nothing but /scratch, /tmp, $HOME and /dev/shm

@@ -1300,7 +1300,8 @@ def cmd_config_set_guards(args, base: str) -> int:
 def _add_shell_args(p) -> None:
     g = p.add_mutually_exclusive_group()
     g.add_argument(
-        "--shell", nargs="?", const="read", choices=("read",), default=None,
+        "--shell", nargs="?", const="read", choices=("read", "write"),
+        default=None,
         help="Give the researcher and tool_executor lanes a sandboxed "
              "run_command (plan E): the project read-only at its real "
              "path, a private /scratch, no network, limits on time, memory "
@@ -1317,7 +1318,8 @@ def cmd_config_set_shell(args, base: str) -> int:
     values: dict = {}
     for k in ("default", "mode", "net", "backend", "timeout_s",
               "max_timeout_s", "memory_mib", "pids", "cpu_pct",
-              "lane_disk_gib", "free_floor_gib", "free_floor_pct"):
+              "lane_disk_gib", "free_floor_gib", "free_floor_pct",
+              "held_ttl_days"):
         v = getattr(args, k, None)
         if v is not None:
             values[k] = v
@@ -1332,6 +1334,95 @@ def cmd_config_set_shell(args, base: str) -> int:
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
     return _emit_config(cfg, args)
+
+
+def _session_views(args):
+    from claude_hooks.sandbox.views import session_views
+    cwd = Path(args.cwd or os.getcwd()).resolve()
+    v = session_views(sid=args.sid, cwd=str(cwd))
+    if v is None or not v.state_path.exists():
+        raise CLIError(f"no sandbox views for {args.sid} under {cwd} (write "
+                       f"mode keeps them in .claude-hooks/consultants/"
+                       f"{args.sid}/sandbox.json)", exit_code=1)
+    return v
+
+
+def cmd_changes(args, base: str) -> int:
+    """``changes <sid>``: what each write-mode lane changed."""
+    v = _session_views(args)
+    lanes = {k: r for k, r in v.lanes().items()
+             if not args.lane or k == args.lane}
+    if args.json:
+        print(json.dumps({"sid": args.sid, "repo": v.repo, "lanes": lanes},
+                         indent=2))
+        return 0
+    if not lanes:
+        print(f"{args.sid}: no lane {args.lane!r}" if args.lane
+              else f"{args.sid}: no lanes")
+        return 1 if args.lane else 0
+    for lane, rec in sorted(lanes.items()):
+        files = rec.get("files") or []
+        print(f"lane {lane}: {rec.get('state')}, {len(files)} file(s)"
+              + (f", patch {rec['patch']}" if rec.get("patch") else ""))
+        for f in files:
+            print(f"  {f['status']} {f['path']} (+{f['added']}/-{f['removed']})")
+        if args.diff and rec.get("patch") and os.path.exists(rec["patch"]):
+            print(Path(rec["patch"]).read_text(encoding="utf-8"))
+    return 0
+
+
+def cmd_apply(args, base: str) -> int:
+    """``apply <sid> --lane L``: apply a held patch to the user's tree."""
+    from claude_hooks.sandbox.views import ViewError
+    v = _session_views(args)
+    try:
+        print(f"lane {args.lane}: " + v.apply(args.lane, dry_run=args.dry_run,
+                                             three_way=args.three_way))
+    except ViewError as e:
+        raise CLIError(str(e), exit_code=1) from None
+    return 0
+
+
+def cmd_discard(args, base: str) -> int:
+    """``discard <sid> --lane L | --all``: drop held changes."""
+    from claude_hooks.sandbox.views import ViewError
+    v = _session_views(args)
+    names = list(v.lanes()) if args.all else [args.lane]
+    if not args.all and not args.lane:
+        raise CLIError("name --lane L or --all", exit_code=2)
+    try:
+        for n in names:
+            print(f"lane {n}: {v.discard(n).get('state')}")
+    except ViewError as e:
+        raise CLIError(str(e), exit_code=1) from None
+    return 0
+
+
+def cmd_sandbox(args, base: str) -> int:
+    """``sandbox ls | gc``: every write view on this host."""
+    from claude_hooks.sandbox import views
+    if args.action == "ls":
+        rows = views.registered()
+        if args.json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        if not rows:
+            print("no live or held sandbox views")
+        for r in rows:
+            lanes = ", ".join(f"{k}={v}" for k, v in sorted(
+                (r.get("lanes") or {}).items()))
+            age = (time.time() - float(r.get("updated_at") or time.time())) / 3600
+            print(f"{r.get('sid')}  {r.get('repo')}  {lanes}  ({age:.1f} h ago)")
+        return 0
+    from consultants.server import inflight
+    ttl = cc.load_config(cwd=Path(os.getcwd())).tools.shell.held_ttl_days
+    did = views.sweep(live_sids={r.get("sid") for r in inflight.load()},
+                      held_ttl_days=ttl, dry_run=args.dry_run)
+    for d in did:
+        print(("would " if args.dry_run else "") + d)
+    if not did:
+        print("nothing to do")
+    return 0
 
 
 def cmd_shell_preflight(args, base: str) -> int:
@@ -2392,6 +2483,44 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Report what would be removed; remove nothing.")
     gc_.set_defaults(fn=cmd_gc)
 
+    # write-mode views (plan E4)
+    ch_ = sub.add_parser(
+        "changes", help="What each write-mode lane of a council changed "
+                        "(held as patches; your files are unchanged). Local.")
+    ch_.add_argument("sid")
+    ch_.add_argument("--cwd", help="Project root (default: cwd).")
+    ch_.add_argument("--lane")
+    ch_.add_argument("--diff", action="store_true", help="print the patches")
+    ch_.add_argument("--json", action="store_true")
+    ch_.set_defaults(fn=cmd_changes)
+    ap_ = sub.add_parser(
+        "apply", help="Apply a lane's held patch to your tree. Checks first; "
+                      "refuses when it does not apply as your tree is now.")
+    ap_.add_argument("sid")
+    ap_.add_argument("--cwd", help="Project root (default: cwd).")
+    ap_.add_argument("--lane", required=True)
+    ap_.add_argument("--dry-run", action="store_true",
+                     help="only check that it applies")
+    ap_.add_argument("--3way", dest="three_way", action="store_true",
+                     help="fall back to a 3-way merge (stages the result; "
+                          "may leave conflict markers)")
+    ap_.set_defaults(fn=cmd_apply)
+    di_ = sub.add_parser("discard", help="Drop a lane's held changes.")
+    di_.add_argument("sid")
+    di_.add_argument("--cwd", help="Project root (default: cwd).")
+    g_ = di_.add_mutually_exclusive_group()
+    g_.add_argument("--lane")
+    g_.add_argument("--all", action="store_true")
+    di_.set_defaults(fn=cmd_discard)
+    sb_ = sub.add_parser(
+        "sandbox", help="ls: every live or held write view on this host; "
+                        "gc: freeze views of councils that are not running "
+                        "and expire held patches past held_ttl_days.")
+    sb_.add_argument("action", choices=("ls", "gc"))
+    sb_.add_argument("--dry-run", action="store_true")
+    sb_.add_argument("--json", action="store_true")
+    sb_.set_defaults(fn=cmd_sandbox)
+
     # shell-preflight
     sp_ = sub.add_parser(
         "shell-preflight",
@@ -2975,9 +3104,10 @@ def build_parser() -> argparse.ArgumentParser:
              "always gives it to every run; off (the default) means only "
              "runs started with --shell. Limits apply per command.")
     csh.add_argument("--default", choices=("off", "always"))
-    csh.add_argument("--mode", choices=("read",),
-                     help="read: project read-only, private /scratch "
-                          "(write views are plan E3)")
+    csh.add_argument("--mode", choices=("read", "write"),
+                     help="read: project read-only, private /scratch; "
+                          "write: each lane a private git worktree, changes "
+                          "handed back as a patch (git roots only)")
     csh.add_argument("--net", choices=("none",))
     csh.add_argument("--backend", choices=("auto", "bwrap"))
     csh.add_argument("--ro-bind", action="append", default=[],
@@ -2992,6 +3122,9 @@ def build_parser() -> argparse.ArgumentParser:
     csh.add_argument("--lane-disk-gib", type=float)
     csh.add_argument("--free-floor-gib", type=float)
     csh.add_argument("--free-floor-pct", type=float)
+    csh.add_argument("--held-ttl-days", type=float,
+                     help="days a held write-mode patch waits before it "
+                          "moves to expired/ (default 7)")
     csh.add_argument("--reset", action="store_true",
                      help="restore every [tools.shell] default first")
     _add_scope_args(csh)

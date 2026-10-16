@@ -660,7 +660,8 @@ class ShellConfig:
 
     Off unless asked for (``--shell`` on ask / follow-up) or
     ``default = "always"``. Only ``mode = "read"`` and ``net = "none"``
-    exist so far: writable lane views are plan E3, egress plan E6.
+    exist so far: ``write`` gives each lane a private git worktree (git
+    roots only), egress is plan E6.
     """
     #: ``off`` | ``always`` — the user's "enable always" knob.
     default: str = "off"
@@ -678,15 +679,15 @@ class ShellConfig:
     lane_disk_gib: float = 2.0
     free_floor_gib: float = 20.0
     free_floor_pct: float = 10.0
+    #: Days a held patch (write mode) waits for apply / discard before it
+    #: moves to the session's ``expired/`` (kept, never deleted silently).
+    held_ttl_days: float = 7.0
 
 
 def _shell_choice(*choices):
     def check(v):
         if v not in choices:
             raise ValueError(f"must be one of {', '.join(choices)}")
-        if v in ("write",):
-            raise ValueError("mode 'write' needs writable lane views (plan "
-                             "E3), not built yet")
         return v
     return check
 
@@ -732,6 +733,7 @@ SHELL_KEYS = {
     "lane_disk_gib": _shell_num(0.01, 1 << 14, float),
     "free_floor_gib": _shell_num(0, 1 << 14, float),
     "free_floor_pct": _shell_num(0, 99, float),
+    "held_ttl_days": _shell_num(0.01, 3650, float),
 }
 
 

@@ -12,7 +12,9 @@ approval, denial and audit without knowing the gate exists.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from typing import Callable, Optional
 
 from claude_hooks.tool_registry.base import ToolProvider
@@ -155,11 +157,31 @@ class ToolRegistry:
         try:
             if getattr(owner, "accepts_lane", False):
                 return owner.execute(tool, raw_args, cwd, lane=lane)
+            view = self._lane_view(owner, cwd, lane)
+            if view is not None:
+                return _in_view(owner, tool, raw_args, cwd, *view)
             return owner.execute(tool, raw_args, cwd)
         except Exception as e:  # pragma: no cover - providers shouldn't raise
             log.exception("provider %s raised executing %s",
                           getattr(owner, "name", "?"), tool)
             return f"error: tool raised: {e}"
+
+    def _lane_view(self, owner, cwd: str, lane: Optional[str]):
+        """``(repo, view dir)`` when ``lane`` has a private writable view
+        (plan E): the file tools must read what its commands see."""
+        if lane is None:
+            return None
+        for p in self.providers:
+            if p is owner or not hasattr(p, "view_root"):
+                continue
+            try:
+                got = p.view_root(cwd, lane)
+            except Exception:
+                log.exception("view_root of %s raised", getattr(p, "name", "?"))
+                continue
+            if got:
+                return got
+        return None
 
     # ------------------------------------------------------------------ #
     def _seek_approval(self, decision: GateDecision) -> bool:
@@ -223,6 +245,29 @@ class ToolRegistry:
             except Exception:  # pragma: no cover - defensive
                 log.exception("provider %s close() raised",
                               getattr(p, "name", "?"))
+
+
+def _in_view(owner, tool: str, raw_args: str, cwd: str, repo: str,
+             view: str) -> str:
+    """Run ``tool`` with the repo's paths moved into ``view``, and the
+    view's paths moved back in the answer, so the model keeps citing the
+    real path it will later find the change at."""
+    def move(v, a, b):
+        if isinstance(v, str):
+            return b + v[len(a):] if v == a or v.startswith(a + "/") else v
+        if isinstance(v, list):
+            return [move(x, a, b) for x in v]
+        if isinstance(v, dict):
+            return {k: move(x, a, b) for k, x in v.items()}
+        return v
+    try:
+        args = json.loads(raw_args or "{}")
+        raw_args = json.dumps(move(args, repo, view))
+    except (ValueError, TypeError):
+        pass
+    real = os.path.realpath(cwd)
+    out = owner.execute(tool, raw_args, move(real, repo, view))
+    return out.replace(view, repo) if isinstance(out, str) else out
 
 
 __all__ = ["ToolRegistry", "ApprovalFn"]

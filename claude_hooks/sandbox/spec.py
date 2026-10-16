@@ -42,6 +42,12 @@ class RunSpec:
     net: str = "none"
     #: A unit / job name the backend may use to find the command again.
     name: str = ""
+    #: Binds applied after ``ro_roots``, in order: ``(kind, src, dst)``
+    #: with kind ``ro`` / ``rw`` — a write view over its root, then what
+    #: it mounts inside (``claude_hooks.sandbox.views.Mounts``).
+    binds: tuple[tuple[str, str, str], ...] = ()
+    #: Extra environment for the command (a view's ``GIT_DIR`` & co).
+    env: dict = field(default_factory=dict)
 
 
 #: Where the lane's scratch dir appears inside the sandbox.

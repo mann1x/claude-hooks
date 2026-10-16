@@ -742,7 +742,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             shell = shell_enable.resolve_ask(cfg, body.get("shell"))
         except shell_enable.ShellRequestError as e:
             raise HTTPException(status_code=400, detail=str(e)) from None
-        shell_err = shell_enable.preflight_error(cfg, shell)
+        shell_err = shell_enable.preflight_error(cfg, shell, cwd=str(cwd_path))
         if shell_err:
             raise HTTPException(status_code=409, detail=shell_err)
 
@@ -1004,7 +1004,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                 croot.followup_count + (0 if retry_lanes else 1))
         except shell_enable.ShellRequestError as e:
             raise HTTPException(status_code=400, detail=str(e)) from None
-        shell_err = shell_enable.preflight_error(cfg, shell)
+        shell_err = shell_enable.preflight_error(cfg, shell, cwd=str(cwd_path))
         if shell_err:
             raise HTTPException(status_code=409, detail=shell_err)
 
@@ -1429,11 +1429,43 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         return _config_snapshot(cfg)
 
     if resume_inflight:
+        # Plan E4: write views of councils the last engine died under are
+        # frozen to patches before anything resumes (resuming ones keep
+        # theirs).
+        sweep_sandbox_views(app, force=True)
         try:
             resume_inflight_councils(app)
         except Exception:  # pragma: no cover — defensive
             log.exception("resuming in-flight councils failed")
     return app
+
+
+_SANDBOX_SWEEP_EVERY_S = 3600.0
+
+
+def sweep_sandbox_views(app, *, force: bool = False) -> list[str]:
+    """Freeze the write views of councils that are not running and
+    expire held patches past ``[tools.shell] held_ttl_days``. Hourly from
+    the reaper, and at startup. Never raises."""
+    now = time.time()
+    last = getattr(app.state, "_sandbox_swept_at", 0.0)
+    if not force and now - last < _SANDBOX_SWEEP_EVERY_S:
+        return []
+    app.state._sandbox_swept_at = now
+    try:
+        from claude_hooks.sandbox import views
+        live = {r.get("sid") for r in inflight.load()}
+        with app.state.sessions_lock:
+            live |= {sid for sid, s in app.state.sessions.items()
+                     if s.status == "running"}
+        ttl = cc.load_config().tools.shell.held_ttl_days
+        did = views.sweep(live_sids=live, held_ttl_days=ttl, now=now)
+        for d in did:
+            log.info("sandbox views: %s", d)
+        return did
+    except Exception:  # pragma: no cover — defensive
+        log.exception("sandbox view sweep crashed")
+        return []
 
 
 # ----------------------- durable runs ---------------------------- #
@@ -2309,6 +2341,7 @@ def _reaper_tick(app) -> None:
                     skip_sids=[sid for sid, _s in entries], now=now)
     except Exception:  # pragma: no cover — defensive
         log.exception("session gc sweep crashed")
+    sweep_sandbox_views(app)
 
 
 def _load_session_from_disk(sid: str) -> Optional[dict]:

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-MODES = ("read",)
+MODES = ("read", "write")
 NETS = ("none",)
 
 
@@ -46,11 +46,6 @@ def parse(raw: Any) -> Optional[dict] | bool:
             "shell must be true, false, a mode string or an object")
     mode = raw.get("mode") or "read"
     net = raw.get("net") or "none"
-    if mode == "write":
-        raise ShellRequestError(
-            "shell mode 'write' needs writable lane views (plan E3), which "
-            "are not built yet; use 'read' (the project read-only, a "
-            "private /scratch)")
     if mode not in MODES:
         raise ShellRequestError(f"shell mode must be one of {MODES}")
     if net != "none":
@@ -96,7 +91,8 @@ def resolve_follow_up(cfg: Any, raw: Any, banked: Optional[dict],
     return cfgd, banked
 
 
-def preflight_error(cfg: Any, shell: Optional[dict]) -> Optional[str]:
+def preflight_error(cfg: Any, shell: Optional[dict],
+                    cwd: Optional[str] = None) -> Optional[str]:
     """Why this host cannot give ``shell``, or ``None``.
 
     A requested shell on a host that cannot sandbox it stops the run
@@ -109,6 +105,13 @@ def preflight_error(cfg: Any, shell: Optional[dict]) -> Optional[str]:
                 "false: the fixed builtin surface has no shell. Turn the "
                 "registry back on (config set-tools --enabled true) or run "
                 "without --shell.")
+    if shell.get("mode") == "write" and cwd is not None:
+        from claude_hooks.sandbox.views import toplevel
+        if toplevel(cwd) is None:
+            return (f"shell mode 'write' gives each lane a private git "
+                    f"worktree, and {cwd} is not in a git work tree (views "
+                    f"of other trees are plan E3's reflink / overlay, not "
+                    f"built yet). Use --shell read, or run from a git root.")
     from claude_hooks.sandbox import backend_for
     sc = _shell_cfg(cfg)
     pre = backend_for(getattr(sc, "backend", "auto") or "auto").preflight()
@@ -132,6 +135,33 @@ def with_provenance(answer: str, shell: Optional[dict]) -> str:
     if not line or not answer:
         return answer
     return f"{answer.rstrip()}\n\n---\n_{line}_\n"
+
+
+def answer_with_shell(answer: str, shell: Optional[dict], *, cwd: str,
+                      sid: str) -> str:
+    """The run's answer as the user gets it: in write mode the lanes'
+    views are frozen (changes captured as patches, worktrees removed) and
+    a "Sandbox changes" section lists what is held; then the provenance
+    footer. Idempotent. Off returns ``answer`` unchanged."""
+    if not shell:
+        return answer
+    section = ""
+    if shell.get("mode") == "write":
+        try:
+            from claude_hooks.sandbox.views import session_views, summary
+            views = session_views(sid=sid, cwd=cwd)
+            if views is not None:
+                views.freeze_all()
+                section = summary(views)
+        except Exception as e:     # never lose the answer over this
+            section = (f"## Sandbox changes\n\nThe lanes' views could not "
+                       f"be collected ({e}); `claude-consultants sandbox gc` "
+                       f"retries.")
+    if section and answer:
+        answer = f"{answer.rstrip()}\n\n{section}\n"
+    elif section:
+        answer = section + "\n"
+    return with_provenance(answer, shell)
 
 
 def settings_for(cfg: Any, shell: dict):

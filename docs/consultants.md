@@ -1607,7 +1607,7 @@ claude-consultants shell-preflight          # can this host do it, layer by laye
 claude-consultants config set-shell --default always   # every run gets it
 ```
 
-**What a command sees** (P1, the `read` mode): the project and the
+**What a command sees** (the default `read` mode): the project and the
 other roots read-only at their real paths, a private writable
 `/scratch` (one per lane, kept between its commands, under
 `<cwd>/.claude-hooks/consultants/<sid>/lanes/<lane>/`) and `/tmp`, no
@@ -1675,9 +1675,63 @@ partial writes stay in `/scratch`.
 below max(20 GiB, 10%) free, or its `/scratch` is over 2 GiB
 (`--lane-disk-gib`). Scratch dirs go with the session's other files.
 
-Writable views of the project (git worktrees, reflinks, overlays), the
-`changes` / `apply` / `discard` verbs and the static `council-sandbox`
-launcher are the rest of Milestone E (`docs/PLAN-council-cerebriline.md`
+**The session store is masked.** `<root>/.claude-hooks/consultants/` is
+an empty tmpfs inside every command, so a lane never sees another lane's
+scratch or view, nor the session's transcripts and checkpoints.
+
+#### Write mode (`--shell write`): a private worktree per lane
+
+On a git root, `--shell write` gives each research lane its own **git
+worktree**, bound at the repo's real path, so it can edit, build, run
+the tests and commit — try a fix, not just describe it. The user's tree
+is never written. (`claude_hooks/sandbox/views.py`.)
+
+- **Base.** One snapshot of the user's tree per session — HEAD plus
+  uncommitted and untracked, non-ignored files — written as a commit
+  under `refs/claude-hooks/council/<sid>/base` (never `refs/stash`). A
+  repo with more than 256 MiB of untracked files is refused (the base
+  would hash them all into the object store).
+- **View.** Created on the lane's first command (about 0.7 s on a small
+  repo). Ignored entries (`.env`, `node_modules`, ...) are mounted
+  read-only from the original, except caches a command recreates
+  (`__pycache__`, `.pytest_cache`, ...) and anything holding the session
+  store. Inside, git works against the view: the common git dir is
+  mounted read-only at `/council/git`, the worktree's admin dir writable
+  inside it, and new objects go to a lane-private directory — so `git
+  commit` inside cannot touch the user's refs or object store. The
+  lane's file tools (`read_file`, `grep`, ...) read its view too, with
+  paths mapped back to the real ones in their answers.
+- **When the council ends** every view is frozen: its changes against
+  the base are captured to `lanes/<lane>/changes.patch` and the worktree
+  is removed. Nothing big outlives a council, and nothing is ever
+  mounted in the host namespace (the view is bound only inside each
+  command's own mount namespace). The answer gains a **"Sandbox
+  changes"** section listing each lane's files and patch.
+- **Then:**
+
+  ```bash
+  claude-consultants changes <sid> [--lane L] [--diff]
+  claude-consultants apply <sid> --lane L [--dry-run] [--3way]
+  claude-consultants discard <sid> --lane L | --all
+  claude-consultants sandbox ls                 # every live or held view on this host
+  claude-consultants sandbox gc [--dry-run]
+  ```
+
+  `apply` checks first (`git apply --check`) and refuses a patch that no
+  longer fits the tree as it is now; it never touches the index unless
+  `--3way` is given. A held patch not applied or discarded within
+  `[tools.shell] held_ttl_days` (7) moves to `<sid>/expired/` — kept,
+  never silently deleted.
+- **Crashes.** A host registry (`~/.claude/consultants-sandbox-views.json`)
+  lists every live or held view. At engine start, before councils resume,
+  and hourly from the idle reaper, views of councils that are not running
+  are frozen to patches (a view cut short while being created is
+  removed); resuming councils keep theirs. A `kill -9` of the engine in
+  the middle of a command leaves no process, unit, mount or worktree
+  behind (`tests/test_council_shell_escape.py`).
+
+Not yet: views of non-git trees (reflink / overlay), the static
+`council-sandbox` launcher, Windows and macOS (`docs/PLAN-council-cerebriline.md`
 §5).
 
 ### CLI

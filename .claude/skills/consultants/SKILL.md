@@ -220,6 +220,14 @@ without it (`--no-shell`) or fix the host (`claude-consultants
 shell-preflight`). Never drop `--shell` silently and present the answer
 as if the council had run anything.
 
+`--shell write` goes further: each research lane gets a **private git
+worktree** of the user's tree (uncommitted and untracked files included)
+at the repo's real path, so it can edit, build, run the tests and even
+commit — to try a fix rather than only describe one. The user's files
+are still never changed. Use it when the question is "fix it and show me
+it passes" or "would this change break the tests"; it needs a git root
+(the engine refuses the run otherwise). Say in one line that you used it.
+
 Returns:
 
 ```json
@@ -693,6 +701,27 @@ Sets the consultancy (resolved to its root) to the terminal `accepted`
 state. Normally the Review loop calls this for you; a user can also
 invoke it directly to close out a consultancy. Idempotent.
 
+### Held sandbox changes (after a `--shell write` run)
+
+An answer from a write-mode run may end with **"## Sandbox changes"**:
+each lane's changes, held as a patch. The user's files are UNCHANGED.
+After you accept (or whenever the user wants to act on them):
+
+1. Show them: `claude-consultants changes <sid> --cwd "$(pwd)"` (add
+   `--diff` for the patches, `--lane <lane>` for one).
+2. Ask the user, per lane: **apply**, **discard**, or **keep for now**.
+   Never apply without an explicit yes — applying edits their tree.
+3. Apply: `claude-consultants apply <sid> --lane <lane> --cwd "$(pwd)"`.
+   It checks first and refuses when the patch no longer fits their tree
+   (it was made against the tree as the council found it); then offer
+   `--3way` (stages the result, may leave conflict markers) or a manual
+   review — never retry silently. `--dry-run` only checks.
+4. Discard: `claude-consultants discard <sid> --lane <lane>` (or `--all`).
+5. Keeping is fine, but tell the user when it expires: held patches move
+   to the session's `expired/` after `[tools.shell] held_ttl_days`
+   (default 7) — kept, not deleted. `claude-consultants sandbox ls` lists
+   every held one on this host.
+
 ---
 
 ## grant — raise a consultancy's follow-up cap now
@@ -886,8 +915,9 @@ and **More…** opens the next batch (ending with **Done**):
     toolchain the jail should see (its `bin/` goes first on PATH). Show
     `tools.shell` from `config show` first, and run `claude-consultants
     shell-preflight` so the user sees whether this host can sandbox it
-    at all (each layer, and what is missing). Only `mode=read` and
-    `net=none` exist so far.
+    at all (each layer, and what is missing). `--mode write` (git
+    roots: a private worktree per lane, changes held as patches) and
+    `--held-ttl-days` are here too; only `net=none` exists so far.
 
 Loop back to step 1 after each successful change; exit on **Done**.
 

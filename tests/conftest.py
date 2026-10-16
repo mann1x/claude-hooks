@@ -480,6 +480,11 @@ def _isolated_inflight_index(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("CONSULTANTS_INFLIGHT_PATH",
                        str(tmp_path / "consultants-inflight.json"))
+    # The sandbox view registry (plan E4) is read by the same startup
+    # sweep that freezes a dead council's views; a test must never reach
+    # the host's.
+    monkeypatch.setenv("CONSULTANTS_SANDBOX_REGISTRY",
+                       str(tmp_path / "consultants-sandbox-views.json"))
 
 
 @pytest.fixture(autouse=True)
