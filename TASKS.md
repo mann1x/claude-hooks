@@ -2,12 +2,11 @@
 
 # Tasks — claude-hooks
 
-2 active · 3 ready · prefix `ch`
+1 active · 3 ready · prefix `ch`
 
-## Active (2)
+## Active (1)
 
-- [ch-8](.claude-hooks/tasks/ch-8.md) `consultants.guards` Council D — lane robustness: always-on loop guards, strict nudge profile, named terminal actions — 1m
-- [ch-12](.claude-hooks/tasks/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 3h
+- [ch-12](.claude-hooks/tasks/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 9h
 
 ## Ready (3)
 
@@ -17,12 +16,13 @@
 
 ## By plan
 
-- `docs/PLAN-council-cerebriline.md`: [ch-8](.claude-hooks/tasks/ch-8.md), [ch-9](.claude-hooks/tasks/ch-9.md), [ch-10](.claude-hooks/tasks/ch-10.md), [ch-11](.claude-hooks/tasks/ch-11.md), [ch-12](.claude-hooks/tasks/ch-12.md)
+- `docs/PLAN-council-cerebriline.md`: [ch-9](.claude-hooks/tasks/ch-9.md), [ch-10](.claude-hooks/tasks/ch-10.md), [ch-11](.claude-hooks/tasks/ch-11.md), [ch-12](.claude-hooks/tasks/ch-12.md)
 
-## Recently closed (7 of 7)
+## Recently closed (8 of 8)
 
-- [ch-5](.claude-hooks/tasks/archive/ch-5.md) **H** `consultants.providers` Council A — providers, capability probe, Ollama account, calibration, timings — 48m
-- [ch-7](.claude-hooks/tasks/archive/ch-7.md) **H** `consultants.compaction` Council C — compaction: reduced replay default, full 5-step per role, condensation, overflow — 18h
+- [ch-8](.claude-hooks/tasks/archive/ch-8.md) `consultants.guards` Council D — lane robustness: always-on loop guards, strict nudge profile, named terminal actions — 1m
+- [ch-5](.claude-hooks/tasks/archive/ch-5.md) **H** `consultants.providers` Council A — providers, capability probe, Ollama account, calibration, timings — 6h
+- [ch-7](.claude-hooks/tasks/archive/ch-7.md) **H** `consultants.compaction` Council C — compaction: reduced replay default, full 5-step per role, condensation, overflow — 23h
 - [ch-6](.claude-hooks/tasks/archive/ch-6.md) **H** `consultants.budgets` Council B — output cap, context-window knob, thinking per backend, sampling diversity — 1d
 - [ch-4](.claude-hooks/tasks/archive/ch-4.md) **H** `mailbox.identity` Mailbox alias follows the session name (/rename); a second live session in a folder gets <alias>-N — 12d
 - [ch-2](.claude-hooks/tasks/archive/ch-2.md) `release` Cut the release that ships task tracking and the cloud mailbox relay — 13d

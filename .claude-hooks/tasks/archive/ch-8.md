@@ -1,13 +1,13 @@
 ---
 id: ch-8
 title: "Council D — lane robustness: always-on loop guards, strict nudge profile, named terminal actions"
-status: active
+status: done
 priority: M
 area: consultants.guards
 tags: [council, cerebriline]
 plan: docs/PLAN-council-cerebriline.md
 created: 2026-10-14T13:22:11Z
-updated: 2026-10-15T23:06:36Z
+updated: 2026-10-16T04:36:00Z
 sessions: [0a7a5bf4]
 ---
 
@@ -20,6 +20,7 @@ Milestone D (D1-D15) scoped for unattended runs per report 08: loop guards alway
 - [x] strict profile configurable from menu and CLI, per project and per run
 
 ## Log
+- 2026-10-16 04:36Z active → done: Milestone D complete 2026-10-16. Acceptance: thresholds fitted by replay (fde4cc5), no guard waits (test_guard_paths_never_wait), strict profile menu+CLI+per run (8bf43ed). Last items: xauto lane retry 9c158c3, wrap-up across a restart f759a40, per-lane model escalation 9a5f172 ([escalation] expert_model, empty = off; needs the owner's choice of model to run). Suite 7591 passed.
 - 2026-10-15 23:06Z 2026-10-16: 9c158c3 xauto lane retry (lane_retry node before the critic: first-round infra-failed lanes rerun once, round counter unchanged, [runtime] xauto_retry_infra_lanes default on, set-xauto-retry, menu 15). f759a40 wrap-up across an engine restart (in-flight record holds wrap_up, _resume_one re-asks it). D9 complete. Suite 7586 passed. Left on ch-8: per-lane model escalation (plan 'later' item).
 - 2026-10-15 22:41Z 2026-10-16: acceptance met. Threshold replay fde4cc5 (benchmarks/consultants/guard_replay.py, 911 recorded lanes): D1 block-cycle added (6 ~50k-token verbatim loops escaped), D3/D4 MiniMax <invoke> markup read (57 lanes had ended on it), promise-of-work no longer fires on reports, D2 length nudge gated on staleness (443 -> 3), D14 mistake limit 6 -> 10 (6 cut more new calls than it saved), D10 kept. test_guard_paths_never_wait pins 'no guard pauses or asks'. Left: xauto auto-retry before synthesis, wrap-up across an engine restart, per-lane model escalation.
 - 2026-10-15 09:11Z [0a7a5bf4] D9 built on the owner's go: f52898c wrap-up (graceful stop: loops end on one report, the gate skips unstarted work, the synthesizer is told the research is partial, result.partial) plus a fix for a pre-existing bug: a cancel during a critic asking for more research looped to the recursion limit and ended "graph crashed" (bug-1022). a237f96 retry-lanes: first-round lanes failed on infra/model_missing/context_overflow rerun as a child session; not counted against the follow-up cap. Not built: the xauto auto-retry before synthesis, and carrying a wrap-up across an engine restart. Suite 7543. Milestone D complete except those two.
