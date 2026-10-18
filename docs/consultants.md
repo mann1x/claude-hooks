@@ -1051,6 +1051,12 @@ enough, so on a run with the shell:
 
   A claim taken from a checkpoint brief must be marked `(from the
   checkpoint brief, not re-verified)` unless a report checks it.
+- A lane that is about to report with a test file it wrote that never
+  ran green is asked once to run it (`claude_hooks/test_reruns.py`,
+  `unrun_tests()` over its own `write_file` / `run_command` calls; a
+  `guard` event `unrun_tests`). The lane is told to fix the test, not
+  the code under test, when the test does not load. Only loops that have
+  `run_command` are asked.
 - In write mode, **Sandbox changes** flags a held test file that was
   never run after its last write, or whose last run failed
   (`held_test_notes()`), so a held patch of broken tests is not mistaken
@@ -2331,7 +2337,29 @@ sid. Selecting a council shows:
 - the commands that ran;
 - the answer;
 - the timeline of runtime events (node boundaries, injects, rewinds,
-  guard trips). A running council's timeline follows its SSE stream.
+  guard trips). A running council's timeline follows its SSE stream;
+- **Messages**: what the roles handed each other, in order. The
+  planner's plan goes to the researchers, each lane's report to the
+  critic and synthesizer, the critic's verdict to the next round or to
+  synthesis, and the answer to the user. Each card names its sender and
+  recipients, the verdict and confidence, how the lane ended, the
+  tokens, and any typed record (`[protocol] typed`) as labelled fields.
+  The control signals between the cards (injects, rewinds, the
+  adversary checkpoint, decision scores, guard trips) are one line of
+  plain words each. "What it was given" shows the start of the role's
+  opening request. Any of its LLM calls opens in full: system prompt,
+  every message, tool calls with their arguments, tool results, harness
+  notes, thinking, and the answer. A call can be linked as
+  `#<sid>/messages/call=<id>`.
+
+Questions, answers and messages are rendered as markdown. JSON in a
+message, such as typed records, tool arguments or event payloads, is
+shown as labelled fields, with the raw JSON one click away. A decision
+seam in `[decision] shadow` is never shown: its scores are recorded to
+be compared later with what the reviewer did without seeing them. `/`
+redirects to `/dashboard`. The proxy dashboard (:38081) links here from
+its header when `hooks.consultants.engine_url` is set, on the host the
+browser used.
 
 `/v1/sessions` covers one project at a time, so the list comes from a
 host-wide index at `~/.claude/consultants-councils.db`
@@ -2351,7 +2379,8 @@ itself. A row whose session directory is gone shows as `missing`. A row
 indexed as running that no engine runs and no in-flight record will
 resume shows as `lost`. JSON: `GET /v1/dashboard/councils?limit=&status=&q=`,
 `GET /v1/dashboard/councils/{sid}?since=&full=1` (`full` keeps the
-per-call events).
+per-call events), `GET /v1/dashboard/councils/{sid}/messages`,
+`GET /v1/dashboard/councils/{sid}/calls/{event_id}`.
 
 ---
 

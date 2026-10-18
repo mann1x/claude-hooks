@@ -261,3 +261,174 @@ class TestLanDashboard:
         assert cc.set_dashboard_host("off").service.dashboard_host == ""
         with _pt.raises(ValueError):
             cc.set_dashboard_host("lan.example")
+
+
+def _flow_store(root, sid="csl-flow"):
+    """A council whose roles hand each other messages: planner -> two
+    researcher lanes -> critic (needs more) -> one more lane -> critic
+    (ready) -> synthesizer, with an inject, a rewind and shadow and live
+    decision scores."""
+    sdir = _store(root, sid, summary=False)
+    con = sqlite3.connect(sdir / "transcript.db")
+    con.execute("DELETE FROM events")
+    con.execute("DELETE FROM runtime_events")
+
+    def resp(content="", calls=()):
+        msg = {"role": "assistant", "content": content}
+        if calls:
+            msg["tool_calls"] = [{"id": f"c{i}", "type": "function", "function": {
+                "name": n, "arguments": json.dumps(a)}} for i, (n, a) in enumerate(calls)]
+        return json.dumps({"choices": [{"message": msg}]})
+
+    def req(given, extra=()):
+        return json.dumps({"model": "m", "think": "medium", "tools": [
+            {"type": "function", "function": {"name": "read_file"}}],
+            "messages": [{"role": "system", "content": "SYS"},
+                         {"role": "user", "content": given}, *extra]})
+
+    ev = []
+    t = [2000.0]
+
+    def add(kind, role, lane=None, **kw):
+        t[0] += 1
+        ev.append((t[0], kind, role, 1, lane, kw.get("model"), kw.get("req"),
+                   kw.get("resp"), kw.get("pt"), kw.get("ct"), kw.get("tool")))
+
+    add("node_enter", "planner")
+    add("llm_call", "planner", model="p", req=req("QUESTION"),
+        resp=resp("1. look at a\n2. look at b"), pt=10, ct=5)
+    add("node_exit", "planner")
+    for lane in (0, 1):
+        add("node_enter", "researcher", lane)
+        add("llm_call", "researcher", lane, model="r", req=req(f"plan item {lane}"),
+            resp=resp("", [("read_file", {"path": "a.py"})]), pt=20, ct=2)
+        add("tool_call", "researcher", lane, tool="read_file")
+        add("llm_call", "researcher:compaction", lane, model="r", req=req("fold"),
+            resp=resp("digest"), pt=5, ct=1)
+        add("llm_call", "researcher", lane, model="r", req=req(f"plan item {lane}", [
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "c0", "function": {
+                "name": "read_file", "arguments": '{"path": "a.py"}'}}]},
+            {"role": "tool", "tool_call_id": "c0", "content": "body"},
+            {"role": "user", "content": "[SYSTEM MESSAGE] wrap up", "_harness": True}]),
+            resp=resp(f"## Report {lane}\nfound **x**"), pt=30, ct=9)
+        add("node_exit", "researcher", lane)
+    add("node_enter", "critic")
+    add("llm_call", "critic", model="c", req=req("reports"),
+        resp=resp("DECISION: needs_more_research\nlane 1 is thin\nCONFIDENCE: 0.4"))
+    add("node_exit", "critic")
+    add("node_enter", "researcher", 100)
+    add("llm_call", "researcher", 100, model="r", req=req("brief"),
+        resp=resp("", [("council_report", {"findings": [{"claim": "x", "cite": "a.py:3"}],
+                                            "status": "done"})]))
+    add("node_exit", "researcher", 100)
+    add("node_enter", "critic")
+    add("llm_call", "critic", model="c", req=req("reports"),
+        resp=resp("DECISION: ready\nfine"))
+    add("node_exit", "critic")
+    add("node_enter", "synthesizer")
+    add("llm_call", "synthesizer", model="s", req=req("all"), resp=resp("# Answer\n- a"))
+    add("node_exit", "synthesizer")
+    con.executemany(
+        "INSERT INTO events (ts, kind, role, round, lane_idx, model, request_json, "
+        "response_json, prompt_tokens, completion_tokens, tool) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)", ev)
+    rt = [(2009.0, "node_exit", "researcher", 1, 0,
+           json.dumps({"stop_reason": "iteration_cap", "failure_class": "iteration_cap"})),
+          (2016.5, "inject", "researcher", None, None,
+           json.dumps({"source": "adversary", "target_role": "researcher",
+                       "status": "applied", "routed": "rewound_extra_round"})),
+          (2016.6, "rewind", "researcher", None, None,
+           json.dumps({"as_node": "rewind", "reason": "brief"})),
+          (2017.0, "decision", "critic", None, None,
+           json.dumps({"seam": "confidence", "model": "jev", "shadow": ["confidence"],
+                       "answers": {"enough": {"type": "noul", "noul": 0.1}}})),
+          (2017.1, "decision", "synthesizer", None, None,
+           json.dumps({"seam": "review", "model": "jev", "shadow": ["confidence"],
+                       "answers": {"sound": {"type": "noul", "noul": 0.8}}}))]
+    con.executemany("INSERT INTO runtime_events (ts, kind, role, round, lane_idx, "
+                    "payload) VALUES (?,?,?,?,?,?)", rt)
+    con.commit()
+    con.close()
+    return sdir
+
+
+class TestRoleMessages:
+
+    def _flow(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(council_index, "known_project_roots", lambda: [])
+        _flow_store(tmp_path)
+        council_index.backfill([str(tmp_path)])
+        return dashboard.council_messages(_app(), "csl-flow")
+
+    def test_each_role_turn_is_one_message_to_its_recipients(self, tmp_path, monkeypatch):
+        d = self._flow(tmp_path, monkeypatch)
+        msgs = [i for i in d["items"] if i["type"] == "message"]
+        assert [(m["from"], m["lane"]) for m in msgs] == [
+            ("planner", None), ("researcher", 0), ("researcher", 1), ("critic", None),
+            ("researcher", 100), ("critic", None), ("synthesizer", None)]
+        planner, r0, r1, crit1, r100, crit2, syn = msgs
+        assert planner["to"] == ["researcher"] and planner["text"].startswith("1. look")
+        assert r0["to"] == ["critic", "synthesizer"]
+        # The handoff is the last plain answer, never the compaction digest.
+        assert r0["text"] == "## Report 0\nfound **x**"
+        assert r0["calls"][1]["phase"] == "compaction" and len(r0["calls"]) == 3
+        assert r0["tools"] == 1 and r0["stop_reason"] == "iteration_cap"
+        assert r0["given"]["preview"] == "plan item 0" and r0["given"]["system_chars"] == 3
+        assert (crit1["decision"], crit1["to"], crit1["confidence"]) == (
+            "needs_more_research", ["researcher"], 0.4)
+        assert (crit2["decision"], crit2["to"]) == ("ready", ["synthesizer"])
+        assert r100["typed"]["record"] == "council_report"
+        assert r100["typed"]["fields"]["findings"][0]["cite"] == "a.py:3"
+        assert syn["to"] == ["user"]
+
+    def test_signals_in_words_and_shadow_scores_hidden(self, tmp_path, monkeypatch):
+        d = self._flow(tmp_path, monkeypatch)
+        sig = {i["kind"]: i["text"] for i in d["items"] if i["type"] == "signal"}
+        assert sig["inject"] == ("adversary brief → researcher: applied, routed "
+                                 "rewound_extra_round")
+        assert "research on the existing plan" in sig["rewind"]
+        # The critic's shadow confidence is not shown; the synthesizer's
+        # review seam is not in the shadow list and is.
+        decisions = [i for i in d["items"] if i.get("kind") == "decision"]
+        assert [x["role"] for x in decisions] == ["synthesizer"]
+        assert "sound = 0.8" in decisions[0]["text"]
+        tl = dashboard.council_detail(_app(), "csl-flow")["timeline"]
+        assert [e["role"] for e in tl if e["kind"] == "decision"] == ["synthesizer"]
+
+    def test_one_call_in_full(self, tmp_path, monkeypatch):
+        d = self._flow(tmp_path, monkeypatch)
+        r0 = [i for i in d["items"] if i.get("from") == "researcher"][0]
+        c = dashboard.call_detail(_app(), "csl-flow", r0["calls"][-1]["id"])
+        assert [m["role"] for m in c["messages"]] == [
+            "system", "user", "assistant", "tool", "user"]
+        assert c["messages"][2]["tool_calls"] == [
+            {"id": "c0", "name": "read_file", "args": {"path": "a.py"}}]
+        assert c["messages"][4]["harness"] is True
+        assert c["response"]["content"].startswith("## Report 0")
+        assert c["tools_offered"] == ["read_file"] and c["options"] == {"think": "medium"}
+        assert dashboard.call_detail(_app(), "csl-flow", 999999) is None
+
+    def test_routes_and_the_lan(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        from consultants.server.app import create_app
+        monkeypatch.setattr(council_index, "known_project_roots", lambda: [])
+        _flow_store(tmp_path)
+        council_index.backfill([str(tmp_path)])
+        app = create_app()
+        app.state.lan_guard = True
+        with TestClient(app, client=("192.168.1.9", 5000)) as c:
+            r = c.get("/", follow_redirects=False)
+            assert r.status_code == 307 and r.headers["location"] == "/dashboard"
+            items = c.get("/v1/dashboard/councils/csl-flow/messages").json()["items"]
+            call = next(i for i in items if i["type"] == "message")["calls"][0]["id"]
+            assert c.get(f"/v1/dashboard/councils/csl-flow/calls/{call}").status_code == 200
+            assert c.get("/v1/dashboard/councils/csl-flow/calls/99999").status_code == 404
+            assert c.get("/v1/dashboard/councils/csl-zz/messages").status_code == 404
+            assert c.get("/v1/dashboard/councils/csl-flow/other").status_code == 403
+
+
+def test_the_page_renders_markdown_and_json_fields():
+    from consultants.server.dashboard_page import PAGE
+    assert "function md(" in PAGE and "function kv(" in PAGE
+    assert "jsonBlock" in PAGE and '"messages"' in PAGE and "openCall" in PAGE

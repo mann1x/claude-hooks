@@ -350,3 +350,24 @@ class TestBurnMath:
             },
         })
         assert burn["five_hour"]["will_exhaust_before_reset"] is True
+
+
+class TestCouncilLink:
+    """The header links the consultants council dashboard when the hooks
+    name an engine, on the host the browser used."""
+
+    def test_port_from_the_engine_url(self):
+        from claude_hooks.proxy import dashboard as d
+        assert d.consultants_port({"hooks": {"consultants": {
+            "engine_url": "http://127.0.0.1:38095"}}}) == 38095
+        assert d.consultants_port({"hooks": {"consultants": {}}}) is None
+        assert d.consultants_port({}) is None
+
+    def test_link_only_when_enabled(self):
+        from claude_hooks.proxy import dashboard as d
+        on = d._render_html(38095)
+        assert 'id="council-link"' in on and 'var p="38095"' in on
+        assert "location.hostname" in on and '"/dashboard"' in on
+        off = d._render_html(None)
+        assert 'var p="";if(!p)return' in off
+        assert "__COUNCIL_PORT__" not in on + off

@@ -28,8 +28,10 @@ log = logging.getLogger("consultants.server.dashboard_routes")
 #: a council's event stream, health. Never the control API (consult,
 #: follow-up, inject, cancel, apply, backfill): a council can run a
 #: shell, and the LAN does not get to start one.
-LAN_ROUTES = (re.compile(r"^/dashboard/?$"),
-              re.compile(r"^/v1/dashboard/councils(?:/[^/]+)?$"),
+LAN_ROUTES = (re.compile(r"^/$"),
+              re.compile(r"^/dashboard/?$"),
+              re.compile(r"^/v1/dashboard/councils(?:/[^/]+(?:/messages|"
+                         r"/calls/\d+)?)?$"),
               re.compile(r"^/v1/consult/[^/]+/events$"),
               re.compile(r"^/v1/health$"))
 
@@ -69,12 +71,16 @@ def install_lan_guard(app) -> None:
 
 def register_dashboard_routes(app) -> None:
     from fastapi import Body, HTTPException
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, RedirectResponse
 
     from consultants.server import council_index, dashboard
     from consultants.server.dashboard_page import PAGE
 
     install_lan_guard(app)
+
+    @app.get("/", include_in_schema=False)
+    def root() -> RedirectResponse:
+        return RedirectResponse(url="/dashboard", status_code=307)
 
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard_page() -> str:
@@ -91,6 +97,21 @@ def register_dashboard_routes(app) -> None:
         d = dashboard.council_detail(app, sid, since=since, full=bool(full))
         if d is None:
             raise HTTPException(status_code=404, detail=f"no council {sid}")
+        return d
+
+    @app.get("/v1/dashboard/councils/{sid}/messages")
+    def dashboard_messages(sid: str) -> dict:
+        d = dashboard.council_messages(app, sid)
+        if d is None:
+            raise HTTPException(status_code=404, detail=f"no council {sid}")
+        return d
+
+    @app.get("/v1/dashboard/councils/{sid}/calls/{event_id}")
+    def dashboard_call(sid: str, event_id: int) -> dict:
+        d = dashboard.call_detail(app, sid, event_id)
+        if d is None:
+            raise HTTPException(status_code=404,
+                                detail=f"no call {event_id} in {sid}")
         return d
 
     @app.post("/v1/dashboard/index/backfill")
