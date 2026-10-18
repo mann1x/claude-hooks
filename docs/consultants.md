@@ -2283,6 +2283,42 @@ Dumps each `llm_call` / `node_enter` / `node_exit` / `tool_call`
 event as one JSON object per line. Schema:
 [`docs/consultants-transcript-db-schema.md`](consultants-transcript-db-schema.md).
 
+### The dashboard
+
+The engine serves a read-only dashboard at
+`http://127.0.0.1:38095/dashboard` (loopback, like the engine). It lists
+every council on the host, running and past, with status, project,
+effort and duration, and filters by status or by text in the question or
+sid. Selecting a council shows:
+
+- per-role progress (live councils);
+- the lanes table: model, LLM calls, tool calls, commands, tokens, time,
+  and how the lane ended (D7);
+- the commands that ran;
+- the answer;
+- the timeline of runtime events (node boundaries, injects, rewinds,
+  guard trips). A running council's timeline follows its SSE stream.
+
+`/v1/sessions` covers one project at a time, so the list comes from a
+host-wide index at `~/.claude/consultants-councils.db`
+(`CONSULTANTS_COUNCIL_INDEX` overrides it). Every in-flight registration
+writes a row and every settled run updates it. On engine start, a
+background backfill indexes older councils from the projects the host
+already knows: `~/.claude.json` projects, in-flight cwds and sandbox
+registry repos. A council that ran with `--cwd` somewhere else is found by:
+
+```
+curl -X POST 127.0.0.1:38095/v1/dashboard/index/backfill \
+     -d '{"scan": ["/srv", "/shared"], "max_depth": 5}'
+```
+
+The index only points at the project's own files and is never the record
+itself. A row whose session directory is gone shows as `missing`. A row
+indexed as running that no engine runs and no in-flight record will
+resume shows as `lost`. JSON: `GET /v1/dashboard/councils?limit=&status=&q=`,
+`GET /v1/dashboard/councils/{sid}?since=&full=1` (`full` keeps the
+per-call events).
+
 ---
 
 ## Picking models

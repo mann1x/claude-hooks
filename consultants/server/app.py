@@ -649,6 +649,15 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         log.exception(
             "register_control_routes failed; M9 endpoints unavailable",
         )
+    # The council dashboard (GET /dashboard + /v1/dashboard/*), read-only
+    # over the councils' own records and the host-wide council index.
+    try:
+        from consultants.server.dashboard_routes import (
+            register_dashboard_routes,
+        )
+        register_dashboard_routes(app)
+    except Exception:  # pragma: no cover — defensive
+        log.exception("register_dashboard_routes failed; no dashboard")
 
     # ----------------------- health ------------------------------ #
     @app.get("/v1/health")
@@ -1514,6 +1523,11 @@ def _settle_inflight(state: "SessionState") -> None:
     for human review (``review_before_synthesis``): its graph is waiting
     for ``/resume`` and the checkpoint is what that resumes from.
     """
+    try:
+        from consultants.server import council_index
+        council_index.finish(state.sid, state.status or "unknown")
+    except Exception:  # pragma: no cover — defensive
+        log.exception("council index: could not settle %s", state.sid)
     if state.status == "suspended":
         inflight.update(state.sid, state="suspended",
                         suspended_at=time.time())

@@ -485,6 +485,10 @@ def _isolated_inflight_index(tmp_path, monkeypatch):
     # the host's.
     monkeypatch.setenv("CONSULTANTS_SANDBOX_REGISTRY",
                        str(tmp_path / "consultants-sandbox-views.json"))
+    # The host-wide council index (the dashboard's list) is written on
+    # every in-flight registration.
+    monkeypatch.setenv("CONSULTANTS_COUNCIL_INDEX",
+                       str(tmp_path / "consultants-councils.db"))
 
 
 @pytest.fixture(autouse=True)
