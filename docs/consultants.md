@@ -1012,6 +1012,25 @@ lane ever saw an injected brief. (Council csl-2026-10-18-1120-95ce
 reported `rewound_extra_round`, then re-planned from scratch, and the
 brief was in 0 of 226 prompts.)
 
+**The findings ledger** (`claude_hooks/findings/`, plan
+[`PLAN-council-memory.md`](PLAN-council-memory.md), M1). Councils
+started cold and lost what they found; the ledger is the project's
+memory of claims about the code and what was decided about them. One
+Markdown file per finding under `<project>/.claude-hooks/findings/`
+(ids `<task prefix>f-<n>`, e.g. `chf-3`), with `Claim`, `Reproduce`,
+`Evidence` (newest first), `Decision` and `Log`. A new claim that
+restates an existing finding (same file within 40 lines and shared
+words, or mostly the same words where neither names a place) adds
+evidence to it instead of a new file. Statuses: `candidate` (a council
+said so), then `confirmed` / `refuted` / `by_design` / `fixed`, set
+**only** by `--by user` or `--by assistant`, always with a reason, and
+`fixed` with the commit; `reopen` returns one to `candidate` the same
+way. Nothing the council runs can settle. Tools: `finding-list`,
+`-show`, `-record`, `-settle`, `-reopen`, `-note` on both memory
+servers (off with `hooks.findings.enabled: false`), and
+`claude-consultants findings list|show|settle|reopen|note`. The
+council reads and writes it from M2 on.
+
 **The evidence bar** (`consultants/engine/evidence.py`). Prompts were not
 enough, so on a run with the shell:
 

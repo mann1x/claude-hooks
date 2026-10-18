@@ -2,21 +2,23 @@
 
 # Tasks — claude-hooks
 
-2 active · 2 ready · prefix `ch`
+3 active · 2 ready · prefix `ch`
 
-## Active (2)
+## Active (3)
 
-- [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 1m
+- [ch-13](.claude-hooks/tasks/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 1m
+- [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 24m
 - [ch-12](.claude-hooks/tasks/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 2d
 
 ## Ready (2)
 
-- [ch-10](.claude-hooks/tasks/ch-10.md) `consultants.polykv` Council F — PolyKV, complete (opencoti + xOllama), last — 3d
+- [ch-10](.claude-hooks/tasks/ch-10.md) `consultants.polykv` Council F — PolyKV, complete (opencoti + xOllama), last — 4d
 - [ch-11](.claude-hooks/tasks/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 3d
 
 ## By plan
 
 - `docs/PLAN-council-cerebriline.md`: [ch-9](.claude-hooks/tasks/ch-9.md), [ch-10](.claude-hooks/tasks/ch-10.md), [ch-11](.claude-hooks/tasks/ch-11.md), [ch-12](.claude-hooks/tasks/ch-12.md)
+- `docs/PLAN-council-memory.md`: [ch-13](.claude-hooks/tasks/ch-13.md)
 
 ## Recently closed (8 of 8)
 

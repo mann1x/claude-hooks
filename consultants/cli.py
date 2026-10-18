@@ -450,6 +450,44 @@ def cmd_gc(args, base: str) -> int:
     return 0
 
 
+def cmd_findings(args, base: str) -> int:
+    """The project's findings ledger (docs/PLAN-council-memory.md) —
+    local, does not hit the engine. ``settle`` / ``reopen`` take
+    ``--by user|assistant``; a council only records candidates."""
+    from claude_hooks.findings.ledger import FindingNotFound, Ledger
+    from claude_hooks.findings.tools import row, show
+    lg = Ledger.for_cwd(args.cwd)
+    try:
+        if args.action == "list":
+            fs = lg.list(args.status)
+            print("\n".join(row(f) for f in fs) if fs else "No findings.")
+        elif args.action == "show":
+            print(show(lg.read(_need(args.id, "id")), lg))
+        elif args.action == "settle":
+            f = lg.settle(_need(args.id, "id"), _need(args.status, "--status"),
+                          _need(args.reason, "--reason"), by=args.by,
+                          commit=args.commit or "", task=args.task or "")
+            print(f"settled {row(f)}")
+        elif args.action == "reopen":
+            f = lg.reopen(_need(args.id, "id"), _need(args.reason, "--reason"),
+                          by=args.by)
+            print(f"reopened {row(f)}")
+        elif args.action == "note":
+            f = lg.note(_need(args.id, "id"), _need(args.reason, "--reason"))
+            print(f"noted on {f.id}")
+    except FindingNotFound as e:
+        raise CLIError(str(e))
+    except ValueError as e:
+        raise CLIError(f"not done: {e}")
+    return 0
+
+
+def _need(value, name: str) -> str:
+    if not value:
+        raise CLIError(f"{name} is required here")
+    return value
+
+
 def cmd_show(args, base: str) -> int:
     """Local read of a session's summary.md — does not hit the
     engine. Useful when the service is down.
@@ -2514,6 +2552,24 @@ def build_parser() -> argparse.ArgumentParser:
     gc_.add_argument("--dry-run", action="store_true",
                      help="Report what would be removed; remove nothing.")
     gc_.set_defaults(fn=cmd_gc)
+
+    # findings ledger (docs/PLAN-council-memory.md)
+    fd_ = sub.add_parser(
+        "findings", help="The project's council findings ledger: list, "
+                         "show, settle, reopen, note (local).")
+    fd_.add_argument("action", choices=("list", "show", "settle", "reopen",
+                                        "note"))
+    fd_.add_argument("id", nargs="?")
+    fd_.add_argument("--cwd", help="Project root (default: cwd).")
+    fd_.add_argument("--status", help="list: filter (a status or 'settled'); "
+                                      "settle: confirmed | refuted | "
+                                      "by_design | fixed")
+    fd_.add_argument("--reason", help="settle / reopen: why; note: the text")
+    fd_.add_argument("--by", choices=("user", "assistant"), default="user",
+                     help="who decides (default user)")
+    fd_.add_argument("--commit", help="settle fixed: the commit")
+    fd_.add_argument("--task", help="settle: the task tracking the fix")
+    fd_.set_defaults(fn=cmd_findings)
 
     # write-mode views (plan E4)
     ch_ = sub.add_parser(
