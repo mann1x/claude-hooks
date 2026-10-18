@@ -1633,7 +1633,7 @@ hand-editable if you prefer.
 | `store.ttl.jitter_pct` | store | #215 cohort spread — at write time `expires_at += ttl * uniform(-jitter, +jitter)`. Stops N sessions from expiring on the same reaper tick. Default 0.1 (±10 %). |
 | `store.distillation.enabled` | store | Master switch for Caliber-style summarization at expiry. M14 default = `true`. |
 | `store.distillation.model` | store | Primary distiller LLM. Default `gemma4:31b-cloud` (M11c-2 tool_executor winner). |
-| `store.distillation.fallback_models` | store | Tried in order on primary failure. Default `["glm-5.2:cloud"]`. |
+| `store.distillation.fallback_models` | store | Tried in order on primary failure. Default `["glm-5.3-flash:cloud"]` (glm-5.2 until 2026-10-18). |
 | `store.distillation.sweep_interval_seconds` | store | Reaper cadence. Minimum 30 s; default 3600 (1 h). |
 | `store.distillation.min_entries_per_distillation` | store | Cost gate — research groups below this delete without an LLM call. Default 3. |
 | `store.distillation.max_session_entries` | store | Per-prompt truncation cap. Default 50 (~30 k tokens at `gemma4:31b-cloud`'s 32 k ctx). |
@@ -1843,11 +1843,12 @@ is never written. (`claude_hooks/sandbox/views.py`.)
   code is unverified. Without `--shell write` it writes to `coder-out/`
   as before.
 - **Room.** Researcher loop caps (iterations / tools stripped after) are
-  low 6/4, medium 8/6, high and xhigh 30/24, max 60/54. A lane with
-  `run_command` gets `max(10, iters // 2)` more of both (xhigh: 45 / 39)
+  low 6/4, medium 8/6, high and xhigh 40/32, max 80/72. A lane with
+  `run_command` gets `max(10, iters // 2)` more of both (xhigh: 60 / 52)
   — writing, running and fixing takes turns of its own. Runs 3 and 4
   (xhigh, 16 turns with the shell) had most lanes cut by the cap while
-  still reading. The coder's own loop is 12 turns, 40 with its write-mode
+  still reading; run 5 (45 with the shell) still capped a
+  deepseek-v4.1-flash lane that was writing and running probes. The coder's own loop is 12 turns, 60 with its write-mode
   workspace.
 
 #### Write scopes (`--write-scope PATH`): a reflink clone per lane
@@ -1966,7 +1967,7 @@ claude-consultants config set-store-ttl --refresh-on-read false --jitter-pct 0.0
 
 # Distillation knobs (M14 sweep + #215 pacing)
 claude-consultants config set-store-distillation --enabled true \
-    --model gemma4:31b-cloud --add-fallback-model glm-5.2:cloud
+    --model gemma4:31b-cloud --add-fallback-model glm-5.3-flash:cloud
 claude-consultants config set-store-distillation --sweep-interval-seconds 1800 \
     --min-entries-per-distillation 5
 claude-consultants config set-store-distillation --max-groups-per-sweep 3 \

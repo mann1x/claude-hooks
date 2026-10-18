@@ -260,15 +260,19 @@ EFFORT_CAPS: dict[str, EffortCaps] = {
     # cap at 16, and round 1 of run 4 ran no test at all — reading the
     # code, writing a test, running it and fixing it does not fit. The
     # caps were raised about 3x; the forced report comes 6 turns before.
+    # Run 5 (csl-...-1458-cb89, xhigh + shell, cap 45): the busy lanes
+    # ended at 41-46 calls, a deepseek-v4.1-flash lane on the cap while
+    # still writing and running probes (22 runs, 8.1M prompt tokens).
+    # high 30 -> 40, max 60 -> 80; with the shell 60 / 120.
     #
     # low: planner -> ≤6 researcher iters -> synthesizer (no critic)
     "low":    EffortCaps(1, 0,  6,  4),
     # medium: 3 fan-out lanes × 8 iters each, 1 round, ≤1 reroute
     "medium": EffortCaps(1, 1,  8,  6),
-    # high: full council, ≤3 rounds, ≤2 reroutes, ≤30 iters
-    "high":   EffortCaps(3, 2, 30, 24),
+    # high: full council, ≤3 rounds, ≤2 reroutes, ≤40 iters
+    "high":   EffortCaps(3, 2, 40, 32),
     # max: large but bounded — token spend caps in practice
-    "max":    EffortCaps(8, 5, 60, 54),
+    "max":    EffortCaps(8, 5, 80, 72),
 }
 
 

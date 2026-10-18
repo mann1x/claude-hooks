@@ -25,10 +25,10 @@ def test_the_synthesizer_ranks_only_what_was_checked():
 
 def test_a_lane_with_the_shell_gets_more_room():
     caps = council.caps_for("xhigh")
-    assert council.researcher_iters(caps, [READ]) == (30, 24)
-    assert council.researcher_iters(caps, [READ, RUN]) == (45, 39)
+    assert council.researcher_iters(caps, [READ]) == (40, 32)
+    assert council.researcher_iters(caps, [READ, RUN]) == (60, 52)
     assert council.researcher_iters(council.caps_for("medium"), [RUN]) == (18, 16)
-    assert council.researcher_iters(council.caps_for("max"), [RUN]) == (90, 84)
+    assert council.researcher_iters(council.caps_for("max"), [RUN]) == (120, 112)
 
 
 def test_the_researcher_loop_gets_those_caps(monkeypatch):
@@ -47,7 +47,7 @@ def test_the_researcher_loop_gets_those_caps(monkeypatch):
     council.researcher_node(s, chat_client=SimpleNamespace(chat=lambda p: {}),
                             tool_executor=lambda *a, **k: "", tool_specs=[READ, RUN],
                             grounding_msgs=[], model="m", cwd="/p", loop_runner=loop)
-    assert (seen["iters"], seen["force"]) == (45, 39)
+    assert (seen["iters"], seen["force"]) == (60, 52)
     # council run 4: a shell lane's report is checked against its runs
     from consultants.engine.evidence import no_run_report_check
     assert seen["check"] is no_run_report_check
