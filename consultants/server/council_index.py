@@ -67,8 +67,8 @@ def session_dir(cwd: str, sid: str) -> Path:
     return Path(cwd) / ".claude-hooks" / "consultants" / sid
 
 
-def _connect() -> sqlite3.Connection:
-    p = index_path()
+def _connect(path: Optional[Path] = None) -> sqlite3.Connection:
+    p = path or index_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(p), timeout=10)
     con.row_factory = sqlite3.Row
@@ -263,10 +263,88 @@ def _read_meta(sdir: Path) -> dict:
     return meta
 
 
+#: Statuses of a council some engine is (or will be) running.
+LIVE_STATUSES = ("running", "paused", "awaiting_tool", "awaiting_adversary",
+                 "suspended", "queued")
+
+
+def _insert_settled(row: dict, status: str, at: float,
+                    path: Optional[Path]) -> None:
+    """Add a council already settled, in one statement; an existing row
+    is never touched (2026-10-18: a backfill's ``record()`` upsert set 60
+    finished councils back to ``running``)."""
+    try:
+        with _LOCK, _connect(path) as con:
+            con.execute(
+                "INSERT OR IGNORE INTO councils (sid, kind, cwd, question, "
+                "effort, root_sid, parent_sid, shell, status, started_at, "
+                "finished_at, updated_at) VALUES (:sid, :kind, :cwd, "
+                ":question, :effort, :root_sid, :parent_sid, NULL, :status, "
+                ":started_at, :finished_at, :now)",
+                {**row, "question": (row.get("question") or "")[:QUESTION_MAX_CHARS],
+                 "root_sid": row.get("root_sid") or row["sid"],
+                 "status": status, "now": time.time(),
+                 "finished_at": None if status in LIVE_STATUSES else at})
+    except sqlite3.Error:
+        log.exception("council index: backfill of %s failed", row.get("sid"))
+
+
+def disk_status(cwd: str, sid: str) -> tuple[str, Optional[float]]:
+    """``(status, finished_at)`` from the council's own record on disk;
+    ``("unknown", None)`` when it has none."""
+    sdir = session_dir(cwd, sid)
+    if not sdir.is_dir():
+        return "unknown", None
+    meta = _read_meta(sdir)
+    st = _status_from_disk(sdir, meta)
+    at = meta.get("finished_at") or meta.get("_last_ts")
+    return st, (float(at) if at else None)
+
+
+def settle_stale(live: Iterable[str]) -> int:
+    """Rows marked running whose council no engine runs or will resume
+    (``live``: the in-flight sids) take their status from disk when it is
+    settled there. Run at engine start, after the resumes. Returns how
+    many changed."""
+    live = set(live)
+    path = index_path()
+    try:
+        with _LOCK, _connect(path) as con:
+            rows = [dict(r) for r in con.execute(
+                "SELECT sid, cwd FROM councils WHERE status IN (%s)"
+                % ",".join("?" * len(LIVE_STATUSES)), LIVE_STATUSES)]
+    except sqlite3.Error:
+        log.exception("council index: stale scan failed")
+        return 0
+    n = 0
+    for r in rows:
+        if r["sid"] in live:
+            continue
+        st, at = disk_status(r["cwd"], r["sid"])
+        if st in LIVE_STATUSES or st == "unknown":
+            continue
+        try:
+            with _LOCK, _connect(path) as con:
+                con.execute("UPDATE councils SET status = ?, finished_at = ?, "
+                            "updated_at = ? WHERE sid = ?",
+                            (st, at or time.time(), time.time(), r["sid"]))
+            n += 1
+        except sqlite3.Error:
+            log.exception("council index: settling %s failed", r["sid"])
+    return n
+
+
 def backfill(roots: Iterable[str] = (), *, dry_run: bool = False) -> int:
     """Index the councils found in each root's session store that the
-    index does not have yet. Returns how many were added."""
-    seen = {r["sid"] for r in list_councils(limit=10**7)}
+    index does not have yet. Returns how many were added. The index is
+    resolved once, and a row already there is never written."""
+    path = index_path()
+    try:
+        with _LOCK, _connect(path) as con:
+            seen = {r[0] for r in con.execute("SELECT sid FROM councils")}
+    except sqlite3.Error:
+        log.exception("council index: backfill could not read the index")
+        return 0
     added = 0
     for root in dict.fromkeys([*known_project_roots(), *roots]):
         store = Path(root) / ".claude-hooks" / "consultants"
@@ -298,12 +376,13 @@ def backfill(roots: Iterable[str] = (), *, dry_run: bool = False) -> int:
             added += 1
             if dry_run:
                 continue
-            record(row)
-            finish(sid, _status_from_disk(sdir, meta),
-                   at=float(meta.get("finished_at") or meta.get("_last_ts")
-                            or started))
+            _insert_settled(
+                row, _status_from_disk(sdir, meta),
+                float(meta.get("finished_at") or meta.get("_last_ts") or started),
+                path)
     return added
 
 
 __all__ = ["record", "finish", "list_councils", "get", "backfill",
+           "settle_stale", "disk_status", "LIVE_STATUSES",
            "index_path", "session_dir", "known_project_roots", "find_stores"]

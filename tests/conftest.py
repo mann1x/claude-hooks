@@ -489,6 +489,10 @@ def _isolated_inflight_index(tmp_path, monkeypatch):
     # every in-flight registration.
     monkeypatch.setenv("CONSULTANTS_COUNCIL_INDEX",
                        str(tmp_path / "consultants-councils.db"))
+    # An app's startup backfill runs in a thread that outlives the test,
+    # past this fixture's teardown: on 2026-10-18 one wrote 60 finished
+    # councils back to "running" in the real index.
+    monkeypatch.setenv("CONSULTANTS_INDEX_STARTUP", "0")
 
 
 @pytest.fixture(autouse=True)

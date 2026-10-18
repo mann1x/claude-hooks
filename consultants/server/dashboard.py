@@ -68,6 +68,22 @@ def _live_view(s) -> dict:
     return out
 
 
+def _settle_view(r: dict, inflight: set) -> None:
+    """A row indexed as running that no engine runs or will resume: its
+    own record on disk decides (completed, failed …); ``lost`` only when
+    the disk does not say it ended. Both the list and the detail use
+    this, so they never disagree."""
+    if r.get("status") not in LIVE or r.get("sid") in inflight:
+        return
+    st, at = council_index.disk_status(r.get("cwd") or "", r.get("sid") or "")
+    if st not in LIVE and st != "unknown":
+        r["status"] = st
+        r["finished_at"] = r.get("finished_at") or at
+    else:
+        # The engine went away under it.
+        r["status"] = "lost"
+
+
 def _inflight_sids() -> set[str]:
     try:
         from consultants.server import inflight
@@ -103,10 +119,8 @@ def council_list(app, *, limit: int = 200, status: Optional[str] = None,
         if s is not None:
             r["live"] = _live_view(s)
             r["status"] = r["live"]["status"] or r.get("status")
-        elif r.get("status") in LIVE and sid not in inflight:
-            # Indexed as running, but no engine is running it and nothing
-            # will resume it: the engine went away under it.
-            r["status"] = "lost"
+        else:
+            _settle_view(r, inflight)
         end = r.get("finished_at") or (now if r.get("status") in LIVE else None)
         if r.get("started_at") and end:
             r["duration_s"] = round(end - r["started_at"], 1)
@@ -233,6 +247,8 @@ def council_detail(app, sid: str, *, since: int = 0,
     sdir = council_index.session_dir(row["cwd"], sid)
     out: dict[str, Any] = {"council": row, "missing": not sdir.is_dir(),
                            "session_dir": str(sdir)}
+    if s is None:
+        _settle_view(row, _inflight_sids())
     if s is not None:
         out["live"] = _live_view(s)
         # The index keeps a 2,000-char copy for the list; the detail shows

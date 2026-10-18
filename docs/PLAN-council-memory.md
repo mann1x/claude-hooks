@@ -1,6 +1,6 @@
 # Council memory and a critic that can check
 
-Status: M1 and M2 done (2026-10-18); M3 next. Owner decisions are marked **(decided)**.
+Status: M1, M2 and M3 done (2026-10-18); M4 next. Owner decisions are marked **(decided)**.
 
 ## Why
 
@@ -157,6 +157,17 @@ with the comment block around it (the contiguous comment lines above
 and at the line, and a docstring when the line is a definition),
 taken in code, no model call. The read ledger's "unwired on purpose"
 comment is what four critics missed.
+
+Built as `consultants/engine/cited_comments.py`: the contiguous comment
+lines above the cited line (decorators skipped), the line itself when
+it is or carries a comment (to the comment's end), and a Python
+docstring for a cited definition. Cites resolve like the CitationLinter
+(`_resolve_path`, short paths by suffix, never a bare name), blocks are
+de-duplicated, the most cited come first, and they fill
+`COMMENTS_WINDOW_SHARE` (0.15) of the critic's window, whole, the rest
+named. A cite with no comment adds nothing. On the frozen baseline the
+read-ledger cite (`executors/index.ts:163`) brings "The read ledger is
+NOT wired by default, deliberately".
 
 ## M4 — the critic runs commands
 

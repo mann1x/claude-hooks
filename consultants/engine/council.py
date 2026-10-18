@@ -3463,6 +3463,30 @@ def _commands_budget_chars(chat_client, model, state, role) -> int:
     return max(24_000, int(w * COMMANDS_WINDOW_SHARE * budget.CHARS_PER_TOKEN))
 
 
+#: Share of a critic's window the CODE COMMENTS AT CITED LINES block may
+#: fill (plan council-memory M3).
+COMMENTS_WINDOW_SHARE = 0.15
+
+
+def _with_cited_comments(msgs: list[dict], state: dict, reports, *, cwd: str,
+                         chat_client=None, model: str = "",
+                         role: str = "critic") -> list[dict]:
+    """Plan council-memory M3: the comment block at every line the
+    reports cite (four critics missed "unwired on purpose")."""
+    from consultants.engine.cited_comments import with_cited_comments
+    roots = [r for r in [cwd or state.get("cwd") or ""]
+             + list(state.get("extra_roots") or ()) if isinstance(r, str) and r]
+    try:
+        w = budget.resolve_window(chat_client, model,
+                                  _budget_knobs(state, role, model)).tokens
+    except Exception:  # noqa: BLE001 — sizing never fails the role
+        w = None
+    w = w or budget.DEFAULT_WINDOW_TOKENS
+    return with_cited_comments(
+        msgs, [str(r) for r in reports or []], roots,
+        max(16_000, int(w * COMMENTS_WINDOW_SHARE * budget.CHARS_PER_TOKEN)))
+
+
 def _with_command_ledger(msgs: list[dict], recorder, *, chat_client=None,
                          model: str = "", state=None,
                          role: str = "critic") -> list[dict]:
@@ -3524,6 +3548,9 @@ def critic_node(state: dict, *, chat_client, model: str,
     )
     msgs = _with_claims_framing(msgs, state)
     msgs = _with_known(msgs, state, "critic")
+    msgs = _with_cited_comments(msgs, state, _reports, cwd=cwd,
+                                chat_client=chat_client, model=model,
+                                role="critic")
     if shell:
         msgs = _with_command_ledger(msgs, recorder, chat_client=chat_client,
                                     model=model, state=state, role="critic")
@@ -3689,6 +3716,9 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
     )
     msgs = _with_claims_framing(msgs, state)
     msgs = _with_known(msgs, state, "meta_critic")
+    msgs = _with_cited_comments(msgs, state, state.get("research") or [],
+                                cwd=cwd, chat_client=chat_client, model=model,
+                                role="meta_critic")
     if shell:
         msgs = _with_command_ledger(msgs, recorder, chat_client=chat_client,
                                     model=model, state=state,

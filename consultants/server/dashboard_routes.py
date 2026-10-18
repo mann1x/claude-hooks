@@ -17,6 +17,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import re
+import os
 import threading
 from typing import Optional
 
@@ -128,6 +129,11 @@ def register_dashboard_routes(app) -> None:
     # known: cheap (seconds), in the background, once per engine start.
     def _startup_backfill() -> None:
         try:
+            from consultants.server import inflight
+            fixed = council_index.settle_stale(
+                r.get("sid") for r in inflight.load())
+            if fixed:
+                log.info("council index: settled %d stale row(s)", fixed)
             n = council_index.backfill()
             if n:
                 log.info("council index: backfilled %d council(s)", n)
@@ -136,6 +142,10 @@ def register_dashboard_routes(app) -> None:
 
     @app.on_event("startup")
     def _start_backfill() -> None:
+        # Tests start apps by the hundred: a thread outliving its test
+        # wrote the real index (2026-10-18). conftest turns it off.
+        if os.environ.get("CONSULTANTS_INDEX_STARTUP") == "0":
+            return
         threading.Thread(target=_startup_backfill, name="council-index",
                          daemon=True).start()
 
