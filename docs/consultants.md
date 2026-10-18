@@ -1084,13 +1084,21 @@ enough, so on a run with the shell:
     omission`;
   - an answer with no section gets the stub.
 
-  Then **the claim audit** (`_claim_audit()`, one call recorded as
+  Then **the claim audit** (`_claim_audit()`, calls recorded as
   `synthesizer:audit`, thinking off). Citing a run is not the run
   showing it: run 4's #2 cited a run that reached the code and passed
   the audit above, but its output did not show the defect. The auditor
-  gets a fresh conversation with only `CLAIM_AUDIT_SYSTEM`, each ranked
-  item (up to 12) and what its cited runs printed, side by side, and
-  answers `A<k>: SHOWN | NOT SHOWN | CONTRADICTED — <line>`. Code moves
+  gets a fresh conversation with only `CLAIM_AUDIT_SYSTEM`: RUN OUTPUTS,
+  each cited run once with its **whole** output (`commands_ran()` keeps
+  it as `output`; the shell already bounds it at 20,000 characters),
+  then each ranked item (up to 12) and matrix cell (up to 40) naming
+  the runs it cites (up to 6). Run 6 rendered a run under every claim
+  citing it and cut each copy at 1,500 characters. When the outputs do
+  not fit one call — `AUDIT_WINDOW_SHARE` (0.6) of the window
+  `resolve_window()` gives — `claim_audit_batches()` splits the items
+  over several calls, each holding the runs its items cite; a run is
+  never cut. It answers `A<k>: SHOWN | NOT SHOWN | CONTRADICTED |
+  PARTLY — <line>`. Code moves
   every `NOT SHOWN` / `CONTRADICTED` item to `Unverified` with the
   auditor's reason (`apply_claim_audit()`). An item with no verdict, an
   unreadable reply or a failed call leaves the answer as it is.
@@ -1141,7 +1149,8 @@ enough, so on a run with the shell:
   adjudicated, a fix with no green run). Then one more auditor call
   (`synthesizer:patch-audit`, thinking off) puts every comment a patch
   adds (8 words or more, every patched file reached before any gets a
-  second, up to 24) beside the code its hunk adds; a comment claiming
+  second, up to 24) beside all the code its hunk adds and removes, never
+  cut, batched like the claim audit (`comment_audit_batches()`); a comment claiming
   code the diff does not contain is noted under `## Held patches`.
 
   A coder lane's report reaches the synthesizer whole: run 6 cut it at

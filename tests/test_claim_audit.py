@@ -24,13 +24,17 @@ ANSWER = (
     "## Unverified\n\n(none)\n")
 
 
-def test_the_prompt_puts_each_claim_beside_its_runs():
+def test_the_prompt_gives_each_run_once_and_each_claim_its_ids():
     items = E.claim_audit_items(ANSWER, ROWS)
     assert [it["runs"][0]["id"] for it in items] == ["C1", "C2", "C1"]
     p = E.claim_audit_prompt(items)
-    a2 = p.split("A2. CLAIM:")[1].split("---")[0]
-    assert "Race in flush" in a2 and "Tests 4 passed" in a2
-    assert "AssertionError" not in a2
+    runs, claims = p.split("=== CLAIMS ===")
+    assert runs.count("[C1]") == 1 and runs.count("[C2]") == 1
+    assert "AssertionError: expected 3 to be 2" in runs
+    assert "Tests 4 passed" in runs
+    a2 = claims.split("A2. CLAIM:")[1].split("A3.")[0]
+    assert "Race in flush" in a2 and "CITED RUNS: C2" in a2
+    assert "[C" not in claims                     # no output under a claim
 
 
 def test_parse_reads_every_shape_and_ignores_strays():

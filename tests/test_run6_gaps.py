@@ -155,3 +155,77 @@ class TestThinDropped:
         text = ("## Unverified\n\n(none)\n\n## Dropped\n- C1: stock\n"
                 "- C2: General test run\n")
         assert evidence.audit_answer(text, []).ok
+
+
+class TestTheAuditorSeesEveryRunWhole:
+    """Run 6: C387 was cited by many cells and rendered under each, so
+    every copy was cut at 1,500 characters."""
+
+    BIG = "\n".join(f"line {i}: column {i % 400} of the CRLF scan" for i in range(600))
+
+    def _rows(self):
+        return [{**r, "output": (self.BIG if r["id"] == "C387" else
+                                 r["printed"])} for r in ROWS]
+
+    def test_a_run_cited_by_many_cells_is_shown_once_and_whole(self):
+        items = evidence.claim_audit_items(_answer(CRLF), self._rows())
+        assert len(items) >= 5
+        p = evidence.claim_audit_prompt(items)
+        assert len(self.BIG) > 18_000
+        assert p.count("[C387]") == 1 and self.BIG in p
+        assert "(cut)" not in p
+
+    def test_commands_ran_keeps_the_whole_output(self, tmp_path):
+        from tests.test_evidence_audit import _cmd, _db, _out
+        body = "\n".join(f"probe {i} printed {i * 7}" for i in range(1200))
+        db = _db(tmp_path, [_cmd("researcher", 0, "node probe.js", _out(body))])
+        r = evidence.commands_ran(db)[0]
+        assert r["output"] == body and len(r["_body"]) == 4000
+
+    def test_batches_split_without_cutting(self):
+        rows = self._rows()
+        items = evidence.claim_audit_items(_answer(CRLF, BOM.replace(
+            "report 1", "(C372)")), rows)
+        one = evidence.claim_audit_batches(items, 10**7)
+        assert one == [list(range(len(items)))]
+        small = evidence.claim_audit_batches(items, 5_000)
+        assert sorted(i for g in small for i in g) == list(range(len(items)))
+        assert len(small) > 1
+        for g in small:
+            p = evidence.claim_audit_prompt([items[i] for i in g])
+            for r in {r["id"]: r for i in g for r in items[i]["runs"]}.values():
+                assert p.count(f"[{r['id']}]") == 1
+                assert evidence._shown_output(r) in p    # never cut
+
+
+def test_the_node_maps_each_batchs_verdicts_back(tmp_path, monkeypatch):
+    from consultants.engine import council
+    rows = [{**r, "output": r["printed"] * 40} for r in ROWS]
+    text = _answer(CRLF)
+    items = evidence.claim_audit_items(text, rows)
+    monkeypatch.setattr(council, "_audit_budget_chars", lambda *a, **k: 4_000)
+    groups = evidence.claim_audit_batches(items, 4_000)
+    assert len(groups) > 1
+    bash = next(i for i, it in enumerate(items) if it.get("header") == "Bash")
+    g = next(g for g in groups if bash in g)
+    replies = []
+    for grp in groups:
+        replies.append("\n".join(
+            f"A{k}: NOT SHOWN — no bash in C387" if grp is g and i == bash
+            else f"A{k}: SHOWN — ok" for k, i in enumerate(grp, 1)))
+
+    class C:
+        calls = []
+
+        def chat(self, payload, **_kw):
+            self.calls.append(payload)
+            return {"message": {"role": "assistant",
+                                "content": replies[len(self.calls) - 1]},
+                    "done_reason": "stop"}
+    c = C()
+    out, _, _ = council._claim_audit(c, "m", text, rows, state={}, recorder=None)
+    assert len(c.calls) == len(groups)
+    row = next(ln for ln in out.split("\n") if "**CRLF**" in ln)
+    cells = [x.strip() for x in row.strip().strip("|").split("|")]
+    assert cells[5].startswith("not tested (audit: not shown by C387")
+    assert cells[1:5] == ["✓", "✓", "✗", "✓"]

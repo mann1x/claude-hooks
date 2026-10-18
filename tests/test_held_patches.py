@@ -262,3 +262,18 @@ def test_the_synthesizer_is_shown_the_patches_and_owes_the_section(
     held = ans[ans.index("## Held patches"):]
     assert hp.NOT_ASSESSED in held and "conflict, not adjudicated" in held
     assert "⚠ `researcher-100`" in held
+
+
+def test_a_comment_audit_sees_every_hunk_whole_and_batches_by_budget():
+    code = [f"const v{i} = scan(line{i});" for i in range(3000)]
+    big = _lane("coder-0", _diff(SRC, 1, 1, [
+        "// The scan now splits every line the way the editor splits it, CRLF too.",
+        *code]))
+    items = hp.comment_items([big, R100])
+    p = hp.comment_audit_prompt(items)
+    assert all(f"+ {x}" in p for x in code)              # nothing cut
+    assert "had neither: two concurrent" in p           # the whole comment
+    groups = hp.comment_audit_batches(items, 5_000)
+    assert sorted(i for g in groups for i in g) == list(range(len(items)))
+    assert [0] in groups                                 # the big hunk alone
+    assert hp.comment_audit_batches(items, 10**7) == [list(range(len(items)))]

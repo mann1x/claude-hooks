@@ -263,7 +263,10 @@ def commands_ran(db_path) -> Optional[list[dict]]:
                     "command": cmd, "exit": _exit_of(o), "tail": _tail(o),
                     "printed": _printed(o) if is_probe(cmd) else "",
                     "ran": _reached_the_code(cmd, o),
-                    "_body": _body(o)[:4000]})
+                    "_body": _body(o)[:4000],
+                    # The whole output, as the lane saw it (the shell
+                    # bounds it at OUTPUT_MAX_CHARS): the auditor reads it.
+                    "output": _body(o)})
     return out
 
 
@@ -771,9 +774,10 @@ def enforce(text: str, a: Audit) -> str:
 # the code moves what it finds not shown.
 
 CLAIM_AUDIT_SYSTEM = (
-    "You check claims against command output, and nothing else. Each "
-    "claim below cites runs; under it is what those runs printed. Decide, "
-    "for each claim, whether that output shows it:\n"
+    "You check claims against command output, and nothing else. RUN "
+    "OUTPUTS gives each run's whole output once, under its id; each claim "
+    "after it names the runs it cites. Decide, for each claim, whether "
+    "the output of the runs it cites shows it:\n"
     "- SHOWN: a printed line states the defect or demonstrates it (a "
     "failing assertion, a wrong value printed, an error the claim "
     "predicts).\n"
@@ -791,8 +795,7 @@ CLAIM_AUDIT_SYSTEM = (
     "`A<k>: SHOWN|NOT SHOWN|CONTRADICTED|PARTLY — <the printed line you "
     "relied on, or what is missing>`")
 CLAIM_AUDIT_MAX_ITEMS = 12
-CLAIM_AUDIT_RUNS_PER_ITEM = 3
-CLAIM_AUDIT_OUTPUT_CHARS = 1500
+CLAIM_AUDIT_RUNS_PER_ITEM = 6
 _VERDICT_LINE = re.compile(
     r"^\W*A(\d{1,3})\W*[:.)\]-]\s*\**\s*(NOT\s+SHOWN|CONTRADICTED|PARTLY|"
     r"SHOWN)\b\**\s*(?:[—–:-]+\s*)?(.*)$", re.I | re.M)
@@ -806,13 +809,16 @@ PARTLY_UNVERIFIED = "{label} — the part its runs {ids} do not show: {why}."
 
 
 def _shown_output(r: dict) -> str:
+    """A run's whole output for the auditor; what it printed and its
+    tail when the full output is not on the row."""
+    full = (r.get("output") or "").strip()
+    if full:
+        return full
     out = (r.get("printed") or "").strip()
     tail = (r.get("tail") or "").strip()
     if tail and tail not in out:
         out = (out + "\n" + tail).strip()
-    out = out or "(printed nothing)"
-    return out if len(out) <= CLAIM_AUDIT_OUTPUT_CHARS else (
-        out[:CLAIM_AUDIT_OUTPUT_CHARS] + "\n… (cut)")
+    return out or "(printed nothing)"
 
 
 #: A case mark in a table cell (run 5's edge-case matrix).
@@ -945,21 +951,62 @@ def claim_audit_items(text: str, rows: Optional[list[dict]]) -> list[dict]:
     return ranked[:CLAIM_AUDIT_MAX_ITEMS] + cells[:MATRIX_MAX_ITEMS]
 
 
+def _run_block(r: dict) -> str:
+    return (f"[{r['id']}] `{_norm(r['command'])}` → {r['exit']}\n"
+            f"{_shown_output(r)}")
+
+
+def _claim_text(it: dict) -> str:
+    claim = re.sub(r"\s+", " ", it["text"]).strip()
+    if it.get("kind") == "cell":
+        case = _cells(it["text"])[0].strip() or "this row"
+        claim = (f"in the row for {case!r}, the column {it['header']!r} "
+                 f"says {it['cell']!r} (the whole row: {claim})")
+    return claim
+
+
 def claim_audit_prompt(items: list[dict]) -> str:
-    parts = []
-    for k, it in enumerate(items, start=1):
-        claim = re.sub(r"\s+", " ", it["text"]).strip()
-        claim = claim if len(claim) <= 600 else claim[:600] + "…"
-        if it.get("kind") == "cell":
-            case = _cells(it["text"])[0].strip() or "this row"
-            claim = (f"in the row for {case!r}, the column "
-                     f"{it['header']!r} says {it['cell']!r} (the whole "
-                     f"row: {claim})")
-        runs = "\n".join(
-            f"[{r['id']}] `{_norm(r['command'])[:200]}` → {r['exit']}\n"
-            f"{_shown_output(r)}" for r in it["runs"])
-        parts.append(f"A{k}. CLAIM: {claim}\nOUTPUT OF THE CITED RUNS:\n{runs}")
-    return "\n\n---\n\n".join(parts)
+    """RUN OUTPUTS, each cited run once and whole, then the claims
+    ``A1``… naming the runs they cite (run 6: a run cited by twelve
+    cells was rendered twelve times, so each copy was cut at 1,500
+    characters)."""
+    runs: dict[str, dict] = {}
+    for it in items:
+        for r in it["runs"]:
+            runs.setdefault(r["id"], r)
+    order = sorted(runs.values(), key=lambda r: r.get("n", 0))
+    head = "RUN OUTPUTS (each run once, its whole output):\n\n" + \
+        "\n\n".join(_run_block(r) for r in order)
+    claims = "\n\n".join(
+        f"A{k}. CLAIM: {_claim_text(it)}\nCITED RUNS: "
+        + ", ".join(r["id"] for r in it["runs"])
+        for k, it in enumerate(items, start=1))
+    return head + "\n\n=== CLAIMS ===\n\n" + claims
+
+
+def claim_audit_batches(items: list[dict], budget_chars: int) -> list[list[int]]:
+    """Item indexes in groups whose prompt fits ``budget_chars``: an item
+    joins a group while its claim and the runs the group does not yet
+    hold fit; otherwise it starts the next. A run is never cut: an item
+    whose own runs exceed the budget is a group of its own."""
+    groups: list[list[int]] = []
+    held: set[str] = set()
+    used = 0
+    for i, it in enumerate(items):
+        new = [r for r in it["runs"] if r["id"] not in held]
+        cost = len(_claim_text(it)) + 40 + sum(len(_run_block(r)) + 2
+                                                for r in new)
+        if groups and used + cost <= budget_chars:
+            groups[-1].append(i)
+        else:
+            groups.append([i])
+            held, used = set(), 0
+            new = it["runs"]
+            cost = len(_claim_text(it)) + 40 + sum(len(_run_block(r)) + 2
+                                                    for r in new)
+        held.update(r["id"] for r in new)
+        used += cost
+    return groups
 
 
 def parse_claim_audit(reply: str, n: int) -> dict[int, tuple[str, str]]:
@@ -1087,6 +1134,7 @@ def held_test_notes(db_path, lane: str, paths: list[str]) -> dict[str, str]:
 
 
 __all__ = ["hold_to_evidence_bar", "claim_audit_items", "claim_audit_prompt",
+           "claim_audit_batches",
            "parse_claim_audit", "apply_claim_audit", "CLAIM_AUDIT_SYSTEM",
            "matrix_rows", "mark_untested_cells", "thin_dropped", "no_run_report_check", "lane_runs", "commands_block", "commands_ran",
            "needs_unverified_revision", "with_unverified_stub",

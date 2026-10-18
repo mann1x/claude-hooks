@@ -449,16 +449,35 @@ def comment_items(patches: list[LanePatch]) -> list[dict]:
     return fair
 
 
+def _comment_part(k: int, it: dict) -> str:
+    add = "\n".join("+ " + x for x in it["added"]) or "(no code added)"
+    rem = "\n".join("- " + x for x in it["removed"])
+    return (f"A{k}. COMMENT ({it['lane']}, {it['path']}:{it['line']}): "
+            f"{it['comment']}\nTHE HUNK ADDS:\n{add}"
+            + (f"\nTHE HUNK REMOVES:\n{rem}" if rem else ""))
+
+
 def comment_audit_prompt(items: list[dict]) -> str:
-    parts = []
-    for k, it in enumerate(items, start=1):
-        add = "\n".join("+ " + x for x in it["added"][:80]) or "(no code added)"
-        rem = "\n".join("- " + x for x in it["removed"][:40])
-        parts.append(f"A{k}. COMMENT ({it['lane']}, {it['path']}:"
-                     f"{it['line']}): {it['comment'][:800]}\n"
-                     f"THE HUNK ADDS:\n{add}"
-                     + (f"\nTHE HUNK REMOVES:\n{rem}" if rem else ""))
-    return "\n\n---\n\n".join(parts)
+    """Every item whole: the comment, all the code its hunk adds and
+    removes."""
+    return "\n\n---\n\n".join(_comment_part(k, it)
+                                for k, it in enumerate(items, start=1))
+
+
+def comment_audit_batches(items: list[dict], budget_chars: int) -> list[list[int]]:
+    """Item indexes in groups whose prompt fits ``budget_chars``; a hunk
+    is never cut, so one larger than the budget is a group of its own."""
+    groups: list[list[int]] = []
+    used = 0
+    for i, it in enumerate(items):
+        cost = len(_comment_part(i + 1, it)) + 9
+        if groups and used + cost <= budget_chars:
+            groups[-1].append(i)
+            used += cost
+        else:
+            groups.append([i])
+            used = cost
+    return groups
 
 
 def apply_comment_audit(text: str, items: list[dict],
@@ -484,5 +503,5 @@ def apply_comment_audit(text: str, items: list[dict],
 
 __all__ = ["held_changes", "overlaps", "held_block", "audit", "enforce",
            "revision_note", "comment_items", "comment_audit_prompt",
-           "apply_comment_audit", "COMMENT_AUDIT_SYSTEM", "HeldAudit",
+           "apply_comment_audit", "comment_audit_batches", "COMMENT_AUDIT_SYSTEM", "HeldAudit",
            "LanePatch", "Hunk", "parse_diff", "HELD_RULES"]

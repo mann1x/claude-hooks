@@ -3832,53 +3832,97 @@ def _patch_comment_audit(chat_client, model, text, patches, *, state,
     items = held_patches.comment_items(patches)
     if not items:
         return text, 0, 0
-    try:
-        reply, pt, ct = _single_shot(
-            chat_client, model, [
-                {"role": "system", "content": held_patches.COMMENT_AUDIT_SYSTEM},
-                {"role": "user",
-                 "content": held_patches.comment_audit_prompt(items)}],
-            think=False, recorder=recorder, role="synthesizer:patch-audit",
-            round=1, knobs=_budget_knobs(state, "synthesizer", model),
-            sampling=_instance_sampling(state, "synthesizer", model, chat_client))
-    except Exception:
-        log.exception("synthesizer patch-comment audit failed; answer kept")
-        return text, 0, 0
-    text, n = held_patches.apply_comment_audit(
-        text, items, evidence.parse_claim_audit(reply, len(items)))
+    knobs = _budget_knobs(state, "synthesizer", model)
+    groups = held_patches.comment_audit_batches(items, _audit_budget_chars(
+        chat_client, model, knobs, held_patches.COMMENT_AUDIT_SYSTEM))
+    verdicts: dict[int, tuple[str, str]] = {}
+    pt = ct = 0
+    for g in groups:
+        part = [items[i] for i in g]
+        try:
+            reply, p, c = _single_shot(
+                chat_client, model, [
+                    {"role": "system",
+                     "content": held_patches.COMMENT_AUDIT_SYSTEM},
+                    {"role": "user",
+                     "content": held_patches.comment_audit_prompt(part)}],
+                think=False, recorder=recorder,
+                role="synthesizer:patch-audit", round=1, knobs=knobs,
+                sampling=_instance_sampling(state, "synthesizer", model,
+                                            chat_client))
+        except Exception:
+            log.exception("synthesizer patch-comment audit failed; %d "
+                          "comment(s) kept", len(part))
+            continue
+        pt, ct = pt + p, ct + c
+        for k, v in evidence.parse_claim_audit(reply, len(part)).items():
+            verdicts[g[k - 1] + 1] = v
+    text, n = held_patches.apply_comment_audit(text, items, verdicts)
     if n:
         log.info("patch audit flagged %d of %d added comment(s)", n, len(items))
     return text, pt, ct
 
 
+#: Share of the auditor's window its prompt may fill; the reply is one
+#: line per claim.
+AUDIT_WINDOW_SHARE = 0.6
+
+
+def _audit_budget_chars(chat_client, model, knobs, system: str) -> int:
+    """Characters one auditor prompt may hold: a share of the resolved
+    window, less the system prompt."""
+    try:
+        w = budget.resolve_window(chat_client, model, knobs).tokens
+    except Exception:  # noqa: BLE001 — sizing never fails the audit
+        w = None
+    w = w or budget.DEFAULT_WINDOW_TOKENS
+    return max(8_000, int(w * AUDIT_WINDOW_SHARE * budget.CHARS_PER_TOKEN)
+               - len(system))
+
+
 def _claim_audit(chat_client, model, text, rows, *, state, recorder
                  ) -> tuple[str, int, int]:
-    """One auditor call (council run 4, mail #1636): each ranked defect,
-    and each matrix row (run 5, #1641), beside what its cited runs
-    printed. A ranked item found not shown or contradicted moves to
-    ``Unverified``; such a row, or one citing no run, is ``not tested``. A failed or unreadable audit
-    leaves the answer as it is. Recorded as ``synthesizer:audit``."""
+    """The auditor (council run 4, mail #1636): each ranked defect, and
+    each matrix cell (runs 5 and 6, #1641 / #1647), beside the whole
+    output of the runs it cites, each run rendered once. Items that do
+    not fit one call are split over several, never cut. A ranked item
+    found not shown or contradicted moves to ``Unverified``; such a cell,
+    or one in a row citing no run, is ``not tested``. A failed or
+    unreadable call leaves its items as they are. Recorded as
+    ``synthesizer:audit``."""
     from consultants.engine import evidence
     text, _untested = evidence.mark_untested_cells(text, rows)
     items = evidence.claim_audit_items(text, rows)
     if not items:
         return text, 0, 0
-    try:
-        reply, pt, ct = _single_shot(
-            chat_client, model, [
-                {"role": "system", "content": evidence.CLAIM_AUDIT_SYSTEM},
-                {"role": "user", "content": evidence.claim_audit_prompt(items)}],
-            think=False, recorder=recorder, role="synthesizer:audit", round=1,
-            knobs=_budget_knobs(state, "synthesizer", model),
-            sampling=_instance_sampling(state, "synthesizer", model, chat_client))
-    except Exception:
-        log.exception("synthesizer claim audit failed; answer kept")
-        return text, 0, 0
-    verdicts = evidence.parse_claim_audit(reply, len(items))
+    knobs = _budget_knobs(state, "synthesizer", model)
+    groups = evidence.claim_audit_batches(items, _audit_budget_chars(
+        chat_client, model, knobs, evidence.CLAIM_AUDIT_SYSTEM))
+    verdicts: dict[int, tuple[str, str]] = {}
+    pt = ct = 0
+    for g in groups:
+        part = [items[i] for i in g]
+        try:
+            reply, p, c = _single_shot(
+                chat_client, model, [
+                    {"role": "system", "content": evidence.CLAIM_AUDIT_SYSTEM},
+                    {"role": "user",
+                     "content": evidence.claim_audit_prompt(part)}],
+                think=False, recorder=recorder, role="synthesizer:audit",
+                round=1, knobs=knobs,
+                sampling=_instance_sampling(state, "synthesizer", model,
+                                            chat_client))
+        except Exception:
+            log.exception("synthesizer claim audit failed; %d item(s) kept",
+                          len(part))
+            continue
+        pt, ct = pt + p, ct + c
+        for k, v in evidence.parse_claim_audit(reply, len(part)).items():
+            verdicts[g[k - 1] + 1] = v
     text, moved = evidence.apply_claim_audit(text, items, verdicts)
     if moved:
-        log.info("claim audit moved %d of %d ranked item(s) to Unverified",
-                 moved, len(items))
+        log.info("claim audit changed %d of %d item(s) in %d call(s)",
+                 moved, len(items), len(groups))
     return text, pt, ct
 
 
