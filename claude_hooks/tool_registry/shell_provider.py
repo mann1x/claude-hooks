@@ -110,7 +110,39 @@ JS_RECIPE = (
     "too), and loading a config writes a temp file, which fails EROFS. "
     "Always pass --configLoader runner (e.g. bun x vitest run "
     "--configLoader runner <file>), or copy the config into /scratch and "
-    "pass --config /scratch/<it> --root <the package dir>. ")
+    "pass --config /scratch/<it> --root <the package dir>. "
+    "A probe script's relative imports resolve from the script's own "
+    "directory, not from your cwd: a probe in /scratch imports the repo "
+    "by its absolute path (import { x } from \"/abs/path/to/src/x\"). ")
+
+
+#: Council run 8: four lanes wrote probes in /scratch importing
+#: "./sdk/…"; lane 101 failed that way six times and reported from
+#: reading. The error is answered with the import it needed.
+_RELATIVE_MISS = re.compile(
+    r"Cannot find (?:module|package) ['\"](\.{1,2}/[^'\"]+)['\"] (?:from|imported "
+    r"from) ['\"]?(/(?:scratch|tmp)/[^'\"\s]+)")
+_IMPORT_EXTS = ("", ".ts", ".tsx", ".js", ".mjs", ".cjs", "/index.ts",
+                "/index.js")
+
+
+def import_hint(output: str, cwd: str, exists=os.path.exists) -> str:
+    """A note for a probe in /scratch whose relative import missed: the
+    import resolves from the file's directory, and here is the absolute
+    path under ``cwd`` that does exist (when one does); "" otherwise."""
+    m = _RELATIVE_MISS.search(output or "")
+    if not m:
+        return ""
+    rel, src = m.group(1), m.group(2)
+    where = os.path.dirname(src)
+    found = next((os.path.normpath(os.path.join(cwd, rel)) for ext in _IMPORT_EXTS
+                  if cwd and exists(os.path.normpath(os.path.join(cwd, rel)) + ext)),
+                 "")
+    fix = (f"import it as \"{found}\"" if found else
+           "import the repo by its absolute path")
+    return (f"\n[harness] `{rel}` was resolved from {where}, the importing "
+            f"file's own directory, not from your cwd ({cwd}). In {src} "
+            f"{fix}, or write the probe inside the package and run it there.")
 
 
 def _toolchain_text(found: Optional[dict]) -> str:
@@ -401,6 +433,7 @@ class ShellToolProvider(ToolProvider):
         if r.killed_by == "setup":
             return f"error: the sandbox could not run the command — {r.setup_error}"
         out = self._render(r, timeout, before, self._listing(scratch))
+        out += import_hint(f"{r.stdout or ''}\n{r.stderr or ''}", run_cwd)
         if mounts:
             st = views.status(lane_dirname(lane))
             out += "\n--- your view vs the user's tree ---\n" + (

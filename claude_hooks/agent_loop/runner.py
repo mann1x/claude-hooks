@@ -166,6 +166,13 @@ class LoopConfig:
     # that spent its 60 turns on reconnaissance and wrote no test).
     # Exceptions are ignored.
     turn_check: Optional[Callable[[int, list], Optional[str]]] = None
+    # True: ``turn_check`` is asked every turn and owns its cadence (council
+    # run 8: one nudge at turn 12 was ignored for 42 more turns).
+    turn_check_repeat: bool = False
+    # Tools that survive ``force_answer_after`` (council run 8: the coder
+    # lost ``write_file`` at turn 54 having written nothing, and its
+    # calls were refused "tools are off"). The cap still ends the loop.
+    keep_after_strip: tuple[str, ...] = ()
 
 
 #: Plan D13: every message the harness writes into a conversation opens
@@ -503,6 +510,10 @@ TOOLS_OFF_ANSWER = (
     "Not run: your tools are off now. Write your answer from what you "
     "already have — what you found, with its evidence, and what is still "
     "open.")
+TOOLS_NARROWED_ANSWER = (
+    "Not run: only {tools} is left now. Write what you still have to "
+    "write, then your answer — what you did, with its evidence, and what "
+    "is still open.")
 TOOLS_OFF_FINAL = (
     "[SYSTEM MESSAGE] Your tools are off and calls are not run. Do not "
     "call any tool. In this one reply, report what you found, with its "
@@ -1064,7 +1075,9 @@ def run_loop(
             )
             kept = [t for t in (payload.get("tools") or [])
                     if ((t.get("function") or {}).get("name")
-                        in config.result_tools)]
+                        in config.result_tools
+                        or (t.get("function") or {}).get("name")
+                        in config.keep_after_strip)]
             if kept:
                 payload["tools"] = kept
                 payload["tool_choice"] = "auto"
@@ -1096,7 +1109,7 @@ def run_loop(
                 log.exception("turn_check raised; ignored")
                 note = None
             if note:
-                turn_checked = True
+                turn_checked = not config.turn_check_repeat
                 last = (payload.get("messages") or [None])[-1]
                 if isinstance(last, dict) and last.get("role") == "tool":
                     last["content"] = f"{last.get('content') or ''}\n\n{note}"
@@ -1370,7 +1383,19 @@ def run_loop(
                 clean_msg, getattr(config, "reasoning_replay", "none"))
         payload["messages"] = list(payload["messages"]) + [clean_msg]
         runnable = [tc for tc in tool_calls if tc not in results_called]
-        if tools_stripped and runnable:
+        kept_calls = [tc for tc in runnable
+                      if tools_stripped and ((tc.get("function") or {})
+                                             .get("name") in config.keep_after_strip)]
+        if kept_calls:
+            # The kept tools run; the rest are answered as off.
+            payload["messages"].extend(
+                {"role": "tool", "tool_call_id": tc.get("id") or "",
+                 "name": (tc.get("function") or {}).get("name") or "",
+                 "content": TOOLS_NARROWED_ANSWER.format(
+                     tools=", ".join(config.keep_after_strip))}
+                for tc in runnable if tc not in kept_calls)
+            runnable = kept_calls
+        elif tools_stripped and runnable:
             tools_off_turns += 1
             _emit_guard(config, {"guard": "tools_off", "iteration": i,
                                  "action": ("stop" if tools_off_turns >= 2

@@ -1976,7 +1976,16 @@ is never written. (`claude_hooks/sandbox/views.py`.)
   (xhigh, 16 turns with the shell) had most lanes cut by the cap while
   still reading; run 5 (45 with the shell) still capped a
   deepseek-v4.1-flash lane that was writing and running probes. The coder's own loop is 12 turns, 60 with its write-mode
-  workspace.
+  workspace. Near the end (turn 54, or 6) it loses every tool **but
+  `write_file`**, and while it has written nothing it is reminded every
+  12 (or 4) turns, more firmly each time. In run 8 a coder lost
+  `write_file` at turn 54 with nothing written, after a single ignored
+  reminder at turn 12. A planner task that names more than two ledger
+  findings is split into lanes of two, at most four lanes in all,
+  because run 8's one task covered six findings.
+  A probe in `/scratch` whose relative import (`./sdk/…`) missed gets a
+  hint naming the absolute path to import. Imports resolve from the
+  script's own directory, not from the cwd.
 
 #### Write scopes (`--write-scope PATH`): a reflink clone per lane
 

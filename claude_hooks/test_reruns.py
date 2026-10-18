@@ -231,13 +231,36 @@ def _copied_any(command: str) -> bool:
     return False
 
 
-def nothing_written_check(at: int):
+NOTHING_WRITTEN_AGAIN = (
+    "[SYSTEM MESSAGE] {turn} turns in, still nothing written ({times} "
+    "reminders). Stop reading and probing: call write_file now with the "
+    "test you can already write, even if it is incomplete, then run it. "
+    "{left}")
+NOTHING_WRITTEN_LEFT = ("From turn {strip} only write_file is left, and the "
+                        "loop ends at turn {cap}.")
+
+
+def nothing_written_check(at: int, *, every: int = 0, strip: int = 0,
+                          cap: int = 0):
     """A ``LoopConfig.turn_check`` for a role whose job is writing (the
-    coder): from turn ``at`` on, a note when it has written nothing."""
+    coder): at turn ``at``, a note when it has written nothing; with
+    ``every`` (and ``LoopConfig.turn_check_repeat``) again every
+    ``every`` turns while it still has not, sharper each time."""
     def check(iteration: int, messages: list) -> "str | None":
-        if iteration + 1 < at or wrote_anything(messages):
+        turn = iteration + 1
+        if turn < at or wrote_anything(messages):
             return None
-        return NOTHING_WRITTEN.format(turn=iteration)
+        if not every:
+            return NOTHING_WRITTEN.format(turn=iteration)
+        if (turn - at) % every:
+            return None
+        n = (turn - at) // every
+        if n == 0:
+            return NOTHING_WRITTEN.format(turn=iteration)
+        left = (NOTHING_WRITTEN_LEFT.format(strip=strip, cap=cap)
+                if strip and cap else "")
+        return NOTHING_WRITTEN_AGAIN.format(turn=iteration, times=n,
+                                            left=left).rstrip()
     return check
 
 
@@ -248,4 +271,5 @@ def nudge(found: dict[str, str]) -> str:
 
 __all__ = ["TEST_FILE", "TEST_LIKE", "TEST_FAILED", "classify", "unrun_tests",
            "nudge", "exit_of", "run_result", "written_by", "NUDGE",
-           "wrote_anything", "nothing_written_check", "NOTHING_WRITTEN"]
+           "wrote_anything", "nothing_written_check", "NOTHING_WRITTEN",
+           "NOTHING_WRITTEN_AGAIN"]

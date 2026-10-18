@@ -729,10 +729,18 @@ def coder_node(state: dict,
             # The tools go 6 turns before the cap, as for a researcher;
             # at 14 the run-6 coder lost them before writing anything.
             force_answer_after=54 if ws is not None else 6,
-            # Writing is the coder's job: a nudge once, a fifth of the way
-            # in, when it has written nothing (run 6: 60 turns, no test).
-            turn_check=(nothing_written_check(12) if ws is not None
-                        else nothing_written_check(4)),
+            # Writing is the coder's job: a nudge a fifth of the way in when
+            # it has written nothing (run 6: 60 turns, no test), repeated
+            # every 12 turns while it still has not (run 8: one nudge at 12
+            # was ignored for 42 turns).
+            turn_check=(nothing_written_check(12, every=12, strip=54, cap=60)
+                        if ws is not None
+                        else nothing_written_check(4, every=4, strip=6,
+                                                   cap=12)),
+            turn_check_repeat=True,
+            # The strip forces a report, never takes the coder's pen (run 8:
+            # write_file refused "tools are off" at turn 55).
+            keep_after_strip=("write_file",),
             tools_available=True,
             think=think,
             # Plan §0.7: strict lanes open with a tool call.
@@ -1144,8 +1152,47 @@ def parse_coder_tasks(text: str, *,
                 parent_round=int(parent_round),
             ))
         if out:
-            return out
+            return split_coder_tasks(out)
     return []
+
+
+#: A ledger finding id as the planner writes it (``csf-7``).
+_FINDING_ID = re.compile(r"(?<![\w-])[a-z]{1,6}f-\d+(?![\w-])")
+CODER_FINDINGS_PER_TASK = 2
+CODER_MAX_TASKS = 4
+
+
+def split_coder_tasks(tasks: list[CoderTaskItem], *,
+                      per_task: int = CODER_FINDINGS_PER_TASK,
+                      max_tasks: int = CODER_MAX_TASKS) -> list[CoderTaskItem]:
+    """Split a task naming more than ``per_task`` finding ids into lanes of
+    at most that many, keeping at most ``max_tasks`` lanes in all (more ids
+    per lane when they would not fit). Council run 8: the planner asked
+    one coder for tests and fixes for six findings, which spent 54 turns
+    reading and wrote one file. Tasks naming none are left as they are."""
+    ids = [list(dict.fromkeys(_FINDING_ID.findall(t.task))) for t in tasks]
+    size = per_task
+
+    def lanes(k: int) -> int:
+        return sum(max(1, -(-len(x) // k)) for x in ids)
+    while size < max(map(len, ids), default=0) and lanes(size) > max(
+            max_tasks, len(tasks)):
+        size += 1
+    out: list[CoderTaskItem] = []
+    for t, own in zip(tasks, ids):
+        if len(own) <= size:
+            out.append(t)
+            continue
+        chunks = [own[k:k + size] for k in range(0, len(own), size)]
+        for chunk in chunks:
+            rest = [x for x in own if x not in chunk]
+            out.append(CoderTaskItem(
+                task=(f"{t.task}\n\nTHIS LANE: {', '.join(chunk)} only — "
+                      f"other coder lanes take {', '.join(rest)}."),
+                path="", why=t.why, parent_round=t.parent_round))
+    return [CoderTaskItem(task=t.task, path=t.path, why=t.why, lane_idx=i,
+                          parent_round=t.parent_round)
+            for i, t in enumerate(out)]
 
 
 # Block appended to the synthesizer's user message when
@@ -1215,5 +1262,6 @@ __all__ = [
     "make_sandbox_tool_executor",
     "parse_coder_preamble",
     "parse_coder_tasks",
+    "split_coder_tasks",
     "sandbox_root_for",
 ]
