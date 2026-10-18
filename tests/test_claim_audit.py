@@ -81,3 +81,53 @@ def test_a_failed_audit_keeps_the_answer():
     text, _, _ = council._claim_audit(SimpleNamespace(chat=chat), "m", ANSWER, ROWS,
                                       state=s, recorder=None)
     assert text == ANSWER
+
+
+# Council run 5's matrix, verbatim where it matters (mail #1641).
+MATRIX = (
+    "### Ranked Correctness Defects\n\n"
+    "1. **CRLF prescription** — scan says 390, editor refuses (C1).\n\n"
+    "### Edge-Case Matrix\n\n"
+    "| Case | Status | Detail | Cite |\n|---|---|---|---|\n"
+    "| **CRLF** | ⚠ | **High Risk**. Column mismatch. | (C1) |\n"
+    "| **Multibyte** | ✓ | Consistent UTF-16 code units. | `output-limits.ts:5` |\n"
+    "| **Empty Files** | ⚠ | refuses start_column 1. | Report 1:B8 |\n"
+    "| **Lone CR** | ⚠ | Reader and Editor disagree. | (C3) |\n\n"
+    "## Unverified\n\n(none)\n")
+
+
+class TestTheMatrix:
+
+    def test_rows_without_a_run_are_not_tested(self):
+        out, n = E.mark_untested_cells(MATRIX, ROWS)
+        assert n == 3                                  # C3 did not reach the code
+        assert "| **Multibyte** | not tested (read, not run) |" in out
+        assert "| **Empty Files** | not tested (no run cited) |" in out
+        assert "| **Lone CR** | not tested (no run cited) |" in out
+        assert "| **CRLF** | ⚠ |" in out
+        assert "| Case | Status |" in out              # the header is no case
+        assert E.mark_untested_cells(MATRIX, None) == (MATRIX, 0)   # no shell
+
+    def test_a_row_citing_a_run_is_audited_and_marked(self):
+        items = E.claim_audit_items(MATRIX, ROWS)
+        assert [(it.get("kind"), it["runs"][0]["id"]) for it in items] == [
+            (None, "C1"), ("cell", "C1")]
+        out, n = E.apply_claim_audit(MATRIX, items, {
+            1: ("shown", "x"), 2: ("not shown", "about counts")})
+        assert n == 1
+        assert "| **CRLF** | not tested (audit: not shown by C1) |" in out
+        assert "1. **CRLF prescription**" in out       # the ranked item stays
+
+    def test_the_synthesizer_is_told_the_rule(self):
+        assert "not tested" in E.EVIDENCE_RULES and "✓" in E.EVIDENCE_RULES
+
+
+def test_untested_rows_are_marked_even_when_the_audit_call_fails():
+    def chat(payload):
+        raise RuntimeError("down")
+    s = council.initial_state(question="q", cwd="/p", models={"synthesizer": "m"},
+                              topology="council", effort="high")
+    text, _, _ = council._claim_audit(SimpleNamespace(chat=chat), "m", MATRIX, ROWS,
+                                      state=s, recorder=None)
+    assert "| **Multibyte** | not tested (read, not run) |" in text
+    assert "| **CRLF** | ⚠ |" in text

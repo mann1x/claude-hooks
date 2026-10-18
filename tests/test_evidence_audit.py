@@ -307,3 +307,9 @@ class TestHeldTests:
         def boom(*_):
             raise RuntimeError("x")
         assert "`a.test.ts` (+1/-0)\n" in summary(views, file_notes=boom)
+
+
+def test_the_critic_checks_case_labels_against_the_runs():
+    """Run 5 (mail #1641): a lane's BLIND label went unchallenged."""
+    assert "label a report gives a case" in E.CRITIC_LEDGER_NOTE
+    assert "BLIND" in E.CRITIC_LEDGER_NOTE

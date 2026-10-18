@@ -3787,11 +3787,13 @@ def _unverified_revision(chat_client, model, msgs, text, *, state, think,
 
 def _claim_audit(chat_client, model, text, rows, *, state, recorder
                  ) -> tuple[str, int, int]:
-    """One auditor call (council run 4, mail #1636): each ranked defect
-    beside what its cited runs printed. What it finds not shown or
-    contradicted moves to ``Unverified``. A failed or unreadable audit
+    """One auditor call (council run 4, mail #1636): each ranked defect,
+    and each matrix row (run 5, #1641), beside what its cited runs
+    printed. A ranked item found not shown or contradicted moves to
+    ``Unverified``; such a row, or one citing no run, is ``not tested``. A failed or unreadable audit
     leaves the answer as it is. Recorded as ``synthesizer:audit``."""
     from consultants.engine import evidence
+    text, _untested = evidence.mark_untested_cells(text, rows)
     items = evidence.claim_audit_items(text, rows)
     if not items:
         return text, 0, 0

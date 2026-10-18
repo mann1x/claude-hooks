@@ -1063,6 +1063,18 @@ enough, so on a run with the shell:
   auditor's reason (`apply_claim_audit()`). An item with no verdict, an
   unreadable reply or a failed call leaves the answer as it is.
 
+  **The matrix too** (run 5: "Multibyte ✓" was wrong and cited a line
+  read, not a run). A table row outside the ranked and unranked sections
+  that marks a case ✓ / ⚠ / ✗ (`matrix_rows()`) must cite a run that
+  reached the code, or its mark becomes `not tested (read, not run)` /
+  `not tested (no run cited)` (`mark_untested_cells()`, in code, before
+  and whatever the audit call does). A row that cites one goes through
+  the same audit (up to 16), and a `not shown` / `contradicted` verdict
+  becomes `not tested (audit: … by C<n>)`. The synthesizer is told the
+  rule in `EVIDENCE_RULES`. The critic is told to check the label a
+  report gives each case (BLIND, refused, ✓ …) against what the run
+  printed.
+
   A claim taken from a checkpoint brief must be marked `(from the
   checkpoint brief, not re-verified)` unless a report checks it.
 - A lane that is about to report with a test file it wrote that never

@@ -749,3 +749,35 @@ class TestAbsolutePathCitations(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class TestShortPaths:
+    """Council run 5 (mail #1641): ``executors/index.ts:163`` was marked
+    "file not found" while the file existed deeper in the tree."""
+
+    def _tree(self, tmp_path, *files):
+        from consultants.engine import citation_linter as cl
+        cl._FILES_CACHE.clear()
+        for f in files:
+            p = tmp_path / f
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("\n".join(f"l{i}" for i in range(200)))
+        return cl
+
+    def test_a_unique_suffix_resolves(self, tmp_path):
+        cl = self._tree(tmp_path, "sdk/core/src/tools/executors/index.ts")
+        assert cl.verify_citation("executors/index.ts", 163, None,
+                                  allowed_roots=[str(tmp_path)]) is None
+
+    def test_several_matches_are_ambiguous_not_missing(self, tmp_path):
+        cl = self._tree(tmp_path, "a/executors/index.ts", "b/executors/index.ts")
+        issue = cl.verify_citation("executors/index.ts", 3, None,
+                                   allowed_roots=[str(tmp_path)])
+        assert issue.reason == cl.AMBIGUOUS_REASON
+        assert "2 files end with this path" in issue.replacement
+
+    def test_a_bare_name_or_a_missing_file_stays_not_found(self, tmp_path):
+        cl = self._tree(tmp_path, "a/executors/index.ts")
+        for path in ("index.ts", "executors/nope.ts"):
+            issue = cl.verify_citation(path, 3, None, allowed_roots=[str(tmp_path)])
+            assert issue.reason == cl.UNRESOLVED_REASON

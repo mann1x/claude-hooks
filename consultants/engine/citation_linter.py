@@ -66,7 +66,10 @@ from __future__ import annotations
 
 import ast
 import logging
+import os
 import re
+import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
@@ -181,6 +184,7 @@ CITATION_RE = re.compile(_PATH_RE)
 #: it is the one failure mode that is far more often an infrastructure
 #: problem than a model one.
 UNRESOLVED_REASON = "file not found in any allowed_root"
+AMBIGUOUS_REASON = "several files under the allowed roots end with this path"
 
 #: Below this many distinct citations, a high miss ratio says nothing
 #: — one wrong cite out of one is a normal model error.
@@ -280,6 +284,17 @@ def verify_citation(
 
     resolved = _resolve_path(path, allowed_roots)
     if resolved is None:
+        n = len(_suffix_matches(path, allowed_roots))
+        if n > 1:
+            return CitationIssue(
+                original_match=full_cite,
+                replacement=(f"{full_cite} [unverified — {n} files end with "
+                             "this path; name the full one]"),
+                reason=AMBIGUOUS_REASON,
+                path=path,
+                line_start=line_start,
+                line_end=line_end,
+            )
         return CitationIssue(
             original_match=full_cite,
             replacement=f"{full_cite} [unverified — file not found]",
@@ -905,7 +920,63 @@ def _resolve_path(
         candidate = Path(root) / path
         if candidate.is_file():
             return candidate
-    return None
+    # A short path (``executors/index.ts``) names the one file whose
+    # path ends with it (council run 5, mail #1641: marked "file not
+    # found" while it existed deeper in the tree). Only a unique match.
+    found = _suffix_matches(path, allowed_roots)
+    return found[0] if len(found) == 1 else None
+
+
+#: Files listed per root, ``{root: (when, [relative paths])}``.
+_FILES_CACHE: dict = {}
+_FILES_TTL_S = 60.0
+_WALK_MAX_FILES = 200_000
+_WALK_SKIP = {".git", "node_modules", ".venv", "venv", "__pycache__",
+              "dist", "build", "target", ".claude-hooks"}
+
+
+def _files_under(root: str) -> list[str]:
+    """Every file under ``root``, relative: ``git ls-files`` (tracked and
+    untracked, not ignored) when it is a git tree, else a bounded walk."""
+    hit = _FILES_CACHE.get(root)
+    if hit and time.monotonic() - hit[0] < _FILES_TTL_S:
+        return hit[1]
+    files: list[str] = []
+    try:
+        out = subprocess.run(
+            ["git", "-C", root, "ls-files", "-z", "--cached", "--others",
+             "--exclude-standard"], capture_output=True, timeout=10)
+        if out.returncode == 0:
+            files = [f for f in out.stdout.decode("utf-8", "replace").split("\0") if f]
+    except (OSError, subprocess.SubprocessError):
+        files = []
+    if not files:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in _WALK_SKIP]
+            rel = os.path.relpath(dirpath, root)
+            files.extend(f if rel == "." else f"{rel}/{f}" for f in filenames)
+            if len(files) >= _WALK_MAX_FILES:
+                break
+        files = [f.replace(os.sep, "/") for f in files]
+    _FILES_CACHE[root] = (time.monotonic(), files)
+    return files
+
+
+def _suffix_matches(path: str, allowed_roots: Sequence[str]) -> list[Path]:
+    """Files under the roots whose path ends with ``/<path>``."""
+    tail = "/" + path.replace("\\", "/").lstrip("./")
+    if tail.count("/") < 2:          # a bare file name is too weak
+        return []
+    out: list[Path] = []
+    for root in allowed_roots:
+        if not root or not Path(root).is_dir():
+            continue
+        for rel in _files_under(root):
+            if ("/" + rel).endswith(tail):
+                cand = Path(root) / rel
+                if cand.is_file() and cand not in out:
+                    out.append(cand)
+    return out
 
 
 def _count_lines(path: Path) -> int:
