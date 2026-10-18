@@ -20,6 +20,7 @@ a run without the shell is byte-identical to one before E.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Optional
 
 MODES = ("read", "write")
@@ -159,6 +160,15 @@ def with_provenance(answer: str, shell: Optional[dict]) -> str:
     return f"{answer.rstrip()}\n\n---\n_{line}_\n"
 
 
+def _held_test_notes(views, sid: str):
+    db = Path(getattr(views, "dir", "") or "") / "transcript.db"
+
+    def notes(lane: str, paths: list[str]) -> dict:
+        from consultants.engine.evidence import held_test_notes
+        return held_test_notes(db, lane, paths)
+    return notes
+
+
 def answer_with_shell(answer: str, shell: Optional[dict], *, cwd: str,
                       sid: str) -> str:
     """The run's answer as the user gets it: in write mode the lanes'
@@ -174,7 +184,8 @@ def answer_with_shell(answer: str, shell: Optional[dict], *, cwd: str,
             views = session_views(sid=sid, cwd=cwd)
             if views is not None:
                 views.freeze_all()
-                section = summary(views)
+                section = summary(views, file_notes=_held_test_notes(
+                    views, sid))
         except Exception as e:     # never lose the answer over this
             section = (f"## Sandbox changes\n\nThe lanes' views could not "
                        f"be collected ({e}); `claude-consultants sandbox gc` "

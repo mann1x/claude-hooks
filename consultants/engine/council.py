@@ -3414,6 +3414,20 @@ def researcher_node(state: dict, *,
     }
 
 
+def _with_command_ledger(msgs: list[dict], recorder) -> list[dict]:
+    """A critic's prompt on a shell run, with the commands the lanes ran
+    (run 3: a lane's "verified live" claim contradicted its own output
+    and the critic passed it)."""
+    from consultants.engine import evidence
+    ledger = evidence.commands_block(getattr(recorder, "db_path", None),
+                                     rules=False)
+    if not ledger or not msgs or msgs[-1].get("role") != "user":
+        return msgs
+    return msgs[:-1] + [{**msgs[-1], "content": (
+        str(msgs[-1].get("content") or "") + "\n\n" + ledger + "\n\n"
+        + evidence.CRITIC_LEDGER_NOTE)}]
+
+
 def critic_node(state: dict, *, chat_client, model: str,
                 think: Any = True, recorder=None,
                 tool_specs: Optional[list[dict]] = None,
@@ -3457,6 +3471,8 @@ def critic_node(state: dict, *, chat_client, model: str,
             for t in tool_specs),
     )
     msgs = _with_claims_framing(msgs, state)
+    if shell:
+        msgs = _with_command_ledger(msgs, recorder)
     t0 = time.monotonic()
     try:
         text, pt, ct = _role_turn(
@@ -3615,6 +3631,8 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
         strictness=_mc_strict, adversarial_focus=_mc_focus,
     )
     msgs = _with_claims_framing(msgs, state)
+    if shell:
+        msgs = _with_command_ledger(msgs, recorder)
     t0 = time.monotonic()
     try:
         text, pt, ct = _role_turn(
@@ -3701,18 +3719,27 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
 
 
 def _unverified_revision(chat_client, model, msgs, text, *, state, think,
-                         recorder, tool_specs, tool_executor, cwd
+                         recorder, tool_specs, tool_executor, cwd,
+                         rows: Optional[list] = None
                          ) -> tuple[str, int, int]:
-    """One re-ask of an answer with no ``Unverified`` section; if the
-    revision still has none (or fails), the answer gets the stub.
-    Returns ``(text, prompt_tokens, completion_tokens)`` of the re-ask."""
+    """One re-ask of an answer that fails the evidence bar (council runs
+    2 and 3): no ``Unverified`` section, and on a shell run (``rows``,
+    the commands the lanes ran) a ranked defect citing no run that shows
+    it, or a run that reached the code that the answer never mentions.
+    What the revision still owes is enforced in code
+    (:func:`consultants.engine.evidence.enforce`). Returns ``(text,
+    prompt_tokens, completion_tokens)`` of the re-ask."""
     from consultants.engine import evidence
+    audit = evidence.audit_answer(text, rows)
+    if audit.ok:
+        return text, 0, 0
     rpt = rct = 0
     try:
         revised, rpt, rct = _role_turn(
             chat_client, model, list(msgs) + [
                 {"role": "assistant", "content": text},
-                harness_note(evidence.REVISION_NOTE)],
+                harness_note(evidence.REVISION_NOTE if rows is None
+                             else evidence.revision_note(audit))],
             think=_think_for(state, "synthesizer", model, think),
             recorder=recorder, role="synthesizer", round=1,
             tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
@@ -3722,9 +3749,11 @@ def _unverified_revision(chat_client, model, msgs, text, *, state, think,
         if revised and revised.strip():
             text = revised
     except Exception:
-        log.exception("synthesizer Unverified revision failed; keeping "
+        log.exception("synthesizer evidence revision failed; keeping "
                       "the first answer")
-    return evidence.with_unverified_stub(text), rpt, rct
+    if rows is None:
+        return evidence.with_unverified_stub(text), rpt, rct
+    return evidence.enforce(text, evidence.audit_answer(text, rows)), rpt, rct
 
 
 def synthesizer_node(state: dict, *, chat_client, model: str,
@@ -3822,8 +3851,11 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
     from consultants.engine import evidence
     evidence_mode = shell or bool(_additional_context_for(state,
                                                           "synthesizer"))
+    _rows = None
     if shell:
-        ledger = evidence.commands_block(getattr(recorder, "db_path", None))
+        _db = getattr(recorder, "db_path", None)
+        ledger = evidence.commands_block(_db)
+        _rows = evidence.commands_ran(_db) if ledger else None
         if ledger and msgs and msgs[-1].get("role") == "user":
             msgs = msgs[:-1] + [{**msgs[-1], "content": (
                 str(msgs[-1].get("content") or "") + "\n\n" + ledger)}]
@@ -3841,11 +3873,11 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                 cwd=cwd, knobs=_budget_knobs(state, "synthesizer", try_model),
             sampling=_instance_sampling(state, "synthesizer", try_model, chat_client),
             )
-            if evidence_mode and evidence.needs_unverified_revision(text):
+            if evidence_mode:
                 text, rpt, rct = _unverified_revision(
                     chat_client, try_model, msgs, text, state=state,
                     think=think, recorder=recorder, tool_specs=tool_specs,
-                    tool_executor=tool_executor, cwd=cwd)
+                    tool_executor=tool_executor, cwd=cwd, rows=_rows)
                 pt, ct = pt + rpt, ct + rct
             if attempt_idx > 0:
                 log.warning(

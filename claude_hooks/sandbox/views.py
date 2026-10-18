@@ -42,7 +42,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 log = logging.getLogger("claude_hooks.sandbox.views")
 
@@ -557,12 +557,24 @@ def _from_record(rec: dict):
                         session_dir=rec["session_dir"])
 
 
-def summary(views: SessionViews, *, include_empty: bool = False) -> str:
-    """The answer's "Sandbox changes" section, or "" when nothing is held."""
+def summary(views: SessionViews, *, include_empty: bool = False,
+            file_notes: Optional[Callable[[str, list[str]], dict]] = None
+            ) -> str:
+    """The answer's "Sandbox changes" section, or "" when nothing is held.
+    ``file_notes(lane, paths) -> {path: note}`` adds a note to a file
+    (the consultants engine flags a held test that never ran green)."""
     lanes = {k: v for k, v in views.lanes().items()
              if v.get("state") == HELD or (include_empty and v.get("state"))}
     if not lanes:
         return ""
+    notes: dict[str, dict] = {}
+    if file_notes is not None:
+        for lane, rec in lanes.items():
+            try:
+                notes[lane] = file_notes(
+                    lane, [f["path"] for f in rec.get("files") or []]) or {}
+            except Exception:       # never lose the section over a note
+                notes[lane] = {}
     held_as = ("as copies of the changed files" if getattr(
         views, "kind", "") == "clone" else "as patches")
     L = ["## Sandbox changes", "",
@@ -573,10 +585,17 @@ def summary(views: SessionViews, *, include_empty: bool = False) -> str:
         L.append(f"- lane `{lane}` — {len(files)} file(s), "
                  f"patch `{rec.get('patch')}`")
         for f in files[:15]:
+            note = notes.get(lane, {}).get(f["path"])
             L.append(f"  - {f['status']} `{f['path']}` "
-                     f"(+{f['added']}/-{f['removed']})")
+                     f"(+{f['added']}/-{f['removed']})"
+                     + (f" — {note}" if note else ""))
         if len(files) > 15:
             L.append(f"  - … and {len(files) - 15} more")
+    flagged = sum(len(v) for v in notes.values())
+    if flagged:
+        L += ["", f"⚠ {flagged} held test file(s) did not run green after "
+              f"they were written. They are not evidence, and applying "
+              f"them adds tests that fail or do not load."]
     L += ["", f"Review: `claude-consultants changes {views.sid} --diff`; "
           f"apply: `claude-consultants apply {views.sid} --lane <lane>`; "
           f"drop: `claude-consultants discard {views.sid} --all`."]

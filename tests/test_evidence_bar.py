@@ -81,10 +81,11 @@ class TestCommandsBlock:
         ])
         b = E.commands_block(db)
         assert "only these were executed" in b
-        assert "`bun x vitest run` → exit 1" in b
-        assert "Unexpected token '?.'" in b
-        assert "`bun test a.test.ts` → exit 0\n      10 pass" in b
-        assert "`git show abc` → exit 0" in b and "DIFF BODY" not in b
+        assert "C2 [researcher lane 1] `bun x vitest run` → exit 1: " \
+            "SyntaxError: Unexpected token '?.'" in b      # never got there
+        assert "C3 [coder lane 0] `bun test a.test.ts` → exit 0\n      10 pass" in b
+        assert "C1 [researcher lane 0] `git show abc` → exit 0" in b
+        assert "DIFF BODY" not in b
         assert "killed" not in b
         assert "read_file" not in b
 
