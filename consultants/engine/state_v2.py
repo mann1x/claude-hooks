@@ -534,6 +534,9 @@ class CouncilStateV2(TypedDict, total=False):
     research_lanes: Annotated[list, operator.add]
     cross_exam: Annotated[list, operator.add]
     cross_exam_round: int
+    # One per challenged report: the critic's ruling (stands / narrowed /
+    # falls / open), read by the synthesis audits.
+    cross_exam_rulings: Annotated[list, operator.add]
     # Send-injected: the one lane a cross_examine node answers for.
     cross_exam_item: Optional[dict]
 

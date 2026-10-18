@@ -812,8 +812,12 @@ def build_researcher_messages(question: str, plan: str,
                               *,
                               additional_context=None,
                               peer_findings: Optional[str] = None,
-                              critique: Optional[str] = None) -> list[dict]:
+                              critique: Optional[str] = None,
+                              held_patches: str = "") -> list[dict]:
     """Researcher's conversation seed.
+
+    ``held_patches``: the note naming the other lanes' patches handed to
+    this one (council run 9); empty adds nothing.
 
     ``critique``: on a critic reroute (``prior_rounds`` set), the
     verdict that sent the round back — until 2026-10-18 the researcher
@@ -856,6 +860,8 @@ def build_researcher_messages(question: str, plan: str,
         )
     if peer_findings and peer_findings.strip():
         user_parts.append("\n" + peer_findings.rstrip())
+    if held_patches and held_patches.strip():
+        user_parts.append("\n" + held_patches.rstrip())
     extra = _additional_context_block(additional_context)
     if extra:
         user_parts.append("\n" + extra)
@@ -2649,8 +2655,12 @@ def researcher_node(state: dict, *,
                     store: Any = None,
                     sid: Optional[str] = None,
                     wrap_up_check: Optional[Callable[[], bool]] = None,
+                    held_note: str = "",
                     ) -> dict:
     """Researcher uses agent_loop.runner.run_loop for a tool sub-loop.
+
+    ``held_note``: on a lane after the first round, the other lanes'
+    patches copied into its /scratch (``held_patches.hand_over``).
 
     ``loop_runner`` defaults to ``claude_hooks.agent_loop.runner.run_loop``
     but is injectable for tests. We import lazily to keep the module
@@ -2879,6 +2889,7 @@ def researcher_node(state: dict, *,
                 additional_context=extra_ctx_res,
                 peer_findings=peer_findings_block,
                 critique=state.get("critique"),
+                held_patches=held_note,
             )
     # ---------- M6: tool_executor branch ----------------------- #
     # When the tool_executor role is in the enabled set, the
@@ -2977,6 +2988,7 @@ def researcher_node(state: dict, *,
                     additional_context=extra_ctx_res_local,
                     peer_findings=None,
                     critique=state.get("critique"),
+                    held_patches=held_note,
                 )
         # Append the mode-specific appendix to the user message.
         # Both append to msgs[-1] (the v1 user message) so the
@@ -4014,7 +4026,10 @@ def _settled_audit(chat_client, model, text, *, state, cwd, recorder
         log.exception("settled audit failed; the answer is kept")
         return text, 0, 0
     hits = memory.parse_settled_audit(reply, len(items), len(findings))
-    text, n = memory.apply_settled_audit(text, findings, items, hits)
+    text, n = memory.apply_settled_audit(
+        text, findings, items, hits,
+        examined=memory.examined_against(findings,
+                                         state.get("cross_exam_rulings")))
     if n:
         log.info("settled audit noted %d item(s) restating a decision", n)
     return text, p, c
@@ -4291,6 +4306,9 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                                       cwd=cwd or state.get("cwd") or "",
                                       recorder=recorder)
     pt, ct = pt + _spt, ct + _sct
+    # Run 9: an item called "(new)" the ledger already held (csf-20).
+    from consultants.engine.memory import note_known_new
+    text, _ = note_known_new(cwd or state.get("cwd") or "", text)
     if _rows is not None:
         text = evidence.brief_owed(text, _additional_context_for(
             state, "synthesizer"), _rows)

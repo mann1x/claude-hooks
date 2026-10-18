@@ -14,9 +14,14 @@ without ever being asked about the claim the critic doubted. With
   with the challenges as a harness note, and answers with a run or a
   concession: one exchange, its own tools and view, a bounded loop;
   challenged lanes run in parallel (one ``Send`` each);
-- the critic rules on each: ``upheld`` (the claim falls), ``withdrawn``
-  (the lane's answer settled it) or ``open``; a challenge with no ruling
-  is open;
+- the critic rules on each, about the claim: ``stands`` (the answer
+  shows it), ``narrowed`` (part of it stands, restated), ``falls`` (the
+  lane conceded, or its answer does not show it) or ``open``; a
+  challenge with no ruling is open. The lane's own word caps the
+  ruling: a claim it conceded cannot stand, nor one it narrowed stand
+  whole. Council run 9 ruled with ``upheld`` / ``withdrawn``, and the
+  critic read "upheld" as "the claim is upheld" both times — the
+  opposite of what it meant;
 - any open challenge falls back to the reroute, so nothing is lost; with
   none open the critic's own DECISION line decides.
 
@@ -38,8 +43,12 @@ MAX_PER_LANE = 3
 #: The challenged lane's loop: one exchange, room for a run or two.
 LANE_ITERS = (12, 10)
 
-UPHELD, WITHDRAWN, OPEN = "upheld", "withdrawn", "open"
-RULINGS = (UPHELD, WITHDRAWN, OPEN)
+STANDS, NARROWED, FALLS, OPEN = "stands", "narrowed", "falls", "open"
+RULINGS = (STANDS, NARROWED, FALLS, OPEN)
+#: What a lane may answer, and the best ruling each allows.
+SETTLED, CONCEDED = "settled", "conceded"
+_CAP = {CONCEDED: FALLS, NARROWED: NARROWED}
+_RANK = {FALLS: 0, OPEN: 1, NARROWED: 2, STANDS: 3}
 
 #: Appended to the critic's and meta-critic's prompt when it is on.
 CRITIC_NOTE = (
@@ -58,29 +67,32 @@ CRITIC_NOTE = (
 LANE_NOTE = (
     "The critic challenges claims in your report. This is one exchange, "
     "not a new round: for each challenge either run what settles it and "
-    "cite what it printed, or concede the claim plainly. Do not redo your "
-    "research. End with one block per challenge:\n"
-    "ANSWER report=<N>: settled | conceded — <what the run showed, or "
-    "what you withdraw>")
+    "cite what it printed, narrow the claim to the part your runs show, "
+    "or concede it plainly. Do not redo your research. End with one "
+    "block per challenge, <N> being the number in its CHALLENGE line:\n"
+    "ANSWER report=<N>: settled | narrowed | conceded — <what the run "
+    "showed; the claim as narrowed; or what you withdraw>")
 
 RULING_SYSTEM = (
     "You are the council's critic, ruling on your own challenges. Each "
     "challenged lane has answered in its own conversation. Rule on every "
     "challenge, one line each, at the line's beginning:\n"
-    "RULING report=<N>: upheld | withdrawn | open — <why>\n"
-    "upheld: the claim falls (the lane conceded, or its answer does not "
-    "show what it claims). withdrawn: the lane's answer settles it and "
-    "the claim stands; only for an answer that cites a run or the code "
-    "that shows it. open: neither. Then one line\n"
+    "RULING report=<N>: stands | narrowed | falls | open — <why>\n"
+    "Each word is about the CLAIM. stands: the answer shows the claim "
+    "as written, citing a run or the code that shows it. narrowed: part "
+    "of it is shown — restate the part that stands. falls: the lane "
+    "conceded it, or its answer does not show it. open: the answer "
+    "neither shows nor gives it up. A claim the lane conceded falls; one "
+    "it narrowed is at most narrowed. Then one line\n"
     "DECISION: ready | needs_more_research\n"
     "ready only when nothing is open and nothing else you doubted still "
     "needs research.")
 
 BLOCK_HEADER = (
     "CROSS-EXAMINATION (the critic challenged claims in the reports; each "
-    "lane answered in its own conversation, then the critic ruled). An "
-    "upheld challenge means the claim falls: do not rank it. A withdrawn "
-    "one means the lane's answer settled it. An open one is unresolved.")
+    "lane answered in its own conversation, then the critic ruled on the "
+    "claim). FALLS: do not rank it. NARROWED: rank only the part the "
+    "ruling restates. STANDS: the answer showed it. OPEN: unresolved.")
 
 _LEAD = r"^[ \t]*(?:[-*][ \t]*)?\**"
 _CHALLENGE = re.compile(
@@ -88,8 +100,11 @@ _CHALLENGE = re.compile(
     re.IGNORECASE | re.MULTILINE)
 _RULING = re.compile(
     _LEAD + r"RULING\**[ \t]+report[ \t]*=?[ \t]*(\d+)\**[ \t]*[:—–-][ \t]*"
-    r"\**(upheld|withdrawn|open)\b\**[ \t]*[:—–-]?[ \t]*(.*)",
+    r"\**(stands|narrowed|falls|open)\b\**[ \t]*[:—–-]?[ \t]*(.*)",
     re.IGNORECASE | re.MULTILINE)
+_ANSWER = re.compile(
+    _LEAD + r"ANSWER\**[ \t]+report[ \t]*=?[ \t]*(\d+)\b[^:\n]*?[:—–-][ \t]*"
+    r"\**(settled|narrowed|conceded)\b", re.IGNORECASE | re.MULTILINE)
 _STOP = re.compile(_LEAD + r"(?:CHALLENGE|RULING|DECISION|CONFIDENCE)\b|^#{1,6}\s",
                    re.IGNORECASE | re.MULTILINE)
 
@@ -140,12 +155,33 @@ def plan(state: dict) -> list[dict]:
     return list(exams.values())
 
 
-def lane_note(reports: dict[int, list[str]]) -> str:
+def lane_note(reports: dict[int, list[str]],
+              tools: Optional[list[str]] = None) -> str:
+    """The challenges, and the tools this exchange really has: council
+    run 9's lane 2 had ``run_command`` offered and said it had none (its
+    own earlier report said so after a cut turn), so it could only
+    concede."""
     lines = [LANE_NOTE, ""]
     for n, items in sorted(reports.items()):
         for c in items:
             lines.append(f"CHALLENGE report={n}: {c}")
+    nums = ", ".join(f"report={n}" for n in sorted(reports))
+    lines.append(f"\nAnswer with {nums} — the numbers above, whatever "
+                 "your report calls its items.")
+    if tools:
+        line = "Your tools in this exchange: " + ", ".join(tools) + "."
+        if "run_command" in tools:
+            line += (" run_command is among them, whatever an earlier turn "
+                     "of yours said: a run is how a challenge is settled.")
+        lines.append(line)
     return "\n".join(lines)
+
+
+def lane_answers(text: str) -> dict[int, str]:
+    """``{report: settled | narrowed | conceded}`` from a lane's answer;
+    the last answer for a report wins."""
+    return {int(m.group(1)): m.group(2).lower()
+            for m in _ANSWER.finditer(text or "")}
 
 
 def rulings(text: str) -> dict[int, tuple[str, str]]:
@@ -156,13 +192,37 @@ def rulings(text: str) -> dict[int, tuple[str, str]]:
 
 def outcome(exams: list[dict], ruled: dict[int, tuple[str, str]]) -> dict[int, str]:
     """Each challenged report's ruling; open when the critic gave none or
-    the lane gave no answer."""
+    the lane gave no answer (unless the ruling is that the claim falls),
+    and never better than what the lane itself said of its claim."""
     out: dict[int, str] = {}
     for e in exams:
-        answered = bool((e.get("answer") or "").strip()) and e.get("ok", True)
+        text = (e.get("answer") or "").strip()
+        answered = bool(text) and e.get("ok", True)
+        said = lane_answers(text) if answered else {}
         for n in e.get("reports") or {}:
             r = ruled.get(int(n), (OPEN, ""))[0]
-            out[int(n)] = r if answered or r == UPHELD else OPEN
+            if not answered and r != FALLS:
+                r = OPEN
+            cap = _CAP.get(said.get(int(n), ""))
+            if cap and _RANK[r] > _RANK[cap]:
+                r = cap
+            out[int(n)] = r
+    return out
+
+
+def records(exams: list[dict], ruled: dict[int, tuple[str, str]],
+            decided: dict[int, str], rnd: int) -> list[dict]:
+    """One ``cross_exam_rulings`` entry per challenged report: what the
+    synthesis audits read (a claim narrowed against a settled finding has
+    had its run against that reason)."""
+    out = []
+    for e in exams:
+        for n, items in sorted((e.get("reports") or {}).items()):
+            out.append({"round": rnd, "report": int(n), "lane": e.get("lane"),
+                        "ruling": decided.get(int(n), OPEN),
+                        "why": ruled.get(int(n), ("", ""))[1],
+                        "challenges": list(items),
+                        "answer": (e.get("answer") or "") if e.get("ok", True) else ""})
     return out
 
 
@@ -222,7 +282,10 @@ def examine_node(state: dict, *, chat_client, recorder=None,
     model, thread = got
     model = model or str(state.get("model_override") or "")
     msgs = [m for m in thread if isinstance(m, dict)]
-    msgs.append(harness_note(lane_note(exam.get("reports") or {})))
+    names = [str((s.get("function") or {}).get("name") or "")
+             for s in tool_specs or ()] if tool_executor is not None else []
+    msgs.append(harness_note(lane_note(exam.get("reports") or {},
+                                       [n for n in names if n])))
     try:
         text, pt, ct = council._role_turn(
             chat_client, model, msgs, think=think, recorder=recorder,
@@ -278,9 +341,11 @@ def ruling_node(state: dict, *, chat_client, model: str, recorder=None,
             decision, text, _held = hold_to_evidence_bar(
                 decision, text, commands_ran(_db), round_lanes(_db))
     block = render(exams, ruled, decided)
+    recs = records(exams, ruled, decided, rounds)
     turn = RoleTurn(role="critic", round=rounds, content=text,
                     prompt_tokens=pt, completion_tokens=ct, duration_seconds=0.0)
     return {**done,
+            "cross_exam_rulings": recs,
             "critique": critique.rstrip() + "\n\n" + block,
             "critic_decision": decision,
             # The critic counted a reroute it may no longer make.
@@ -290,6 +355,7 @@ def ruling_node(state: dict, *, chat_client, model: str, recorder=None,
 
 
 __all__ = ["CRITIC_NOTE", "LANE_NOTE", "RULING_SYSTEM", "BLOCK_HEADER",
-           "challenges", "plan", "lane_note", "rulings", "outcome",
+           "challenges", "plan", "lane_note", "lane_answers", "rulings",
+           "outcome", "records", "STANDS", "NARROWED", "FALLS", "OPEN",
            "ruling_messages", "render", "examine_node", "ruling_node",
            "MAX_LANES", "MAX_PER_LANE", "LANE_ITERS"]

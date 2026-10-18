@@ -163,6 +163,12 @@ SETTLED_AUDIT_SYSTEM = (
     "all when no item restates one.")
 SETTLED_NOTE = ("harness: this restates {id}, settled {status} — {decision} "
                 "Listing it needs a run against that reason")
+#: Council run 9: lane 0 was challenged with csf-12, read it, conceded
+#: the line-span claim and narrowed it to what csf-12 never decided; the
+#: answer still said the item "needs a run against that reason". The
+#: cross-examination was that run.
+EXAMINED_NOTE = ("harness: close to {id}, settled {status}; cross-examined "
+                 "against it in round {round} and ruled {ruling} — {why}")
 _SETTLED_LINE = re.compile(r"^\W*I(\d{1,3})\W*[:.)\]-]\s*\**S(\d{1,3})\b"
                            r"\**\s*(?:[—–:-]+\s*)?(.*)$", re.M)
 
@@ -212,11 +218,31 @@ def parse_settled_audit(reply: str, n_items: int, n_findings: int
     return out
 
 
+def examined_against(findings: list, rulings) -> dict:
+    """``{finding id: ruling record}`` for each settled finding a
+    cross-examination challenge or answer names, where the critic ruled
+    the claim stands or narrowed (``cross_exam.records``); the latest
+    round wins."""
+    out: dict = {}
+    for r in sorted(rulings or [], key=lambda r: int(r.get("round") or 0)):
+        if not isinstance(r, dict) or r.get("ruling") not in ("stands", "narrowed"):
+            continue
+        said = " ".join([*map(str, r.get("challenges") or []), str(r.get("answer") or "")])
+        for f in findings:
+            if re.search(rf"(?<![\w-]){re.escape(f.id)}(?![\w-])", said):
+                out[f.id] = r
+    return out
+
+
 def apply_settled_audit(text: str, findings: list, items: list[dict],
-                        hits: dict[int, int]) -> tuple[str, int]:
+                        hits: dict[int, int], examined: Optional[dict] = None
+                        ) -> tuple[str, int]:
     """The answer with a note on every item that restates a settled
     finding (it is never removed: a run against the reason may be in
-    it); ``(text, notes)``."""
+    it); ``(text, notes)``. A finding in ``examined``
+    (:func:`examined_against`) gets the cross-examination's ruling
+    instead of the demand for a run."""
+    examined = examined or {}
     if not hits:
         return text, 0
     lines = text.split("\n")
@@ -224,12 +250,21 @@ def apply_settled_audit(text: str, findings: list, items: list[dict],
     for k, j in hits.items():
         it, f = items[k - 1], findings[j - 1]
         i = it["start"]
-        if f.id in lines[i] and "harness: this restates" in lines[i]:
+        if f.id in lines[i] and ("harness: this restates" in lines[i]
+                                 or "harness: close to" in lines[i]):
             continue
-        dec = " ".join((f.decision or "").split())
-        dec = (dec if len(dec) <= 220 else dec[:219] + "…").rstrip(".") + "."
-        note = "_(" + SETTLED_NOTE.format(id=f.id, status=f.status,
-                                          decision=dec) + ")_"
+        ex = examined.get(f.id)
+        if ex:
+            why = " ".join(str(ex.get("why") or "").split()) or "no reason given"
+            why = (why if len(why) <= 220 else why[:219] + "…").rstrip(".") + "."
+            note = "_(" + EXAMINED_NOTE.format(
+                id=f.id, status=f.status, round=ex.get("round") or "?",
+                ruling=ex.get("ruling"), why=why) + ")_"
+        else:
+            dec = " ".join((f.decision or "").split())
+            dec = (dec if len(dec) <= 220 else dec[:219] + "…").rstrip(".") + "."
+            note = "_(" + SETTLED_NOTE.format(id=f.id, status=f.status,
+                                              decision=dec) + ")_"
         row = lines[i].rstrip()
         if row.lstrip().startswith("|"):
             cut = row[:-1].rstrip() if row.endswith("|") else row
@@ -299,6 +334,52 @@ def _tag(text: str, prefix: str) -> str:
     return m.group(1) if m else ""
 
 
+#: A ranked item the answer calls new.
+_NEW_LABEL = re.compile(r"\(\s*new\s*\)", re.I)
+KNOWN_NOTE = ("harness: the ledger already has this as {id} ({status}): "
+              "{title}")
+
+
+def note_known_new(cwd: str, answer: str) -> tuple[str, int]:
+    """The answer with a note on each ranked item labelled "(new)" that
+    the ledger already holds (``Ledger.match``, no write): council run 9
+    called csf-20 new. ``(text, notes)``; the answer unchanged with no
+    ledger. Never raises."""
+    if not cwd or not answer or not _NEW_LABEL.search(answer):
+        return answer, 0
+    try:
+        from claude_hooks.findings import Ledger, findings_enabled
+        from claude_hooks.findings.ledger import findings_root
+        from consultants.engine import evidence
+        if not findings_enabled():
+            return answer, 0
+        lg = Ledger(findings_root(cwd))
+        if not lg.exists:
+            return answer, 0
+        lines = answer.split("\n")
+        n = 0
+        for it in evidence.ranked_items(answer):
+            i = it["start"]
+            if not _NEW_LABEL.search(lines[i]) or "harness: the ledger already" in lines[i]:
+                continue
+            f = lg.match(" ".join(it["text"].split()), paths_in(it["text"]))
+            if f is None or f.id in it["text"]:
+                continue
+            note = "_(" + KNOWN_NOTE.format(id=f.id, status=f.status,
+                                            title=f.title) + ")_"
+            row = lines[i].rstrip()
+            if row.lstrip().startswith("|"):
+                cut = row[:-1].rstrip() if row.endswith("|") else row
+                lines[i] = f"{cut} {note} |"
+            else:
+                lines[i] = f"{row} {note}"
+            n += 1
+        return "\n".join(lines), n
+    except Exception:  # noqa: BLE001 — memory never fails a council
+        log.exception("known-new check failed")
+        return answer, 0
+
+
 def record_answer(cwd: str, sid: str, answer: str,
                   rows: Optional[list[dict]]) -> list[tuple[str, bool]]:
     """Record a finished answer's ranked items and matrix rows that cite a
@@ -347,4 +428,5 @@ def record_answer(cwd: str, sid: str, answer: str,
 __all__ = ["with_known_findings", "record_answer", "findings_block",
            "known_findings", "paths_in", "settled_findings", "answer_items",
            "settled_audit_prompt", "parse_settled_audit",
-           "apply_settled_audit", "SETTLED_AUDIT_SYSTEM"]
+           "apply_settled_audit", "SETTLED_AUDIT_SYSTEM",
+           "examined_against", "EXAMINED_NOTE", "note_known_new"]

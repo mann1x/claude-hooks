@@ -1328,10 +1328,15 @@ line 5 read and unchanged. Settle with: a run that edits a read line.
 ```
 
 The lane that wrote report 3 resumes its own conversation, on its own
-model and in its own shell view, and answers with a run or a concession
-(one exchange, 12 turns; challenged lanes run in parallel, at most 4).
-The critic then rules on each challenge: `upheld` (the claim falls),
-`withdrawn` (the answer settled it) or `open`. An open challenge falls
+model and in its own shell view, told which tools it has, and answers
+`ANSWER report=N: settled | narrowed | conceded` (one exchange, 12
+turns; challenged lanes run in parallel, at most 4). The critic then
+rules on each claim: `stands` (the answer shows it), `narrowed` (part
+of it stands, restated), `falls` (conceded, or not shown) or `open`; a
+claim the lane conceded falls and one it narrowed is at most narrowed,
+whatever the critic wrote. Each ruling is kept for the synthesis
+audits: an item close to a settled finding that was cross-examined
+against it carries the ruling instead of a demand for a run. An open challenge falls
 back to the ordinary reroute, and the rerouted researcher sees the
 rulings in the critic's verdict. With nothing open the critic's own
 DECISION line decides. The exchanges and rulings are appended to the

@@ -973,8 +973,8 @@ and **More…** opens the next batch (ending with **Done**):
     set-cross-examination on|off` (default off). A critic not convinced
     challenges the claims it doubts (`CHALLENGE report=N: … Settle with:
     …`); each challenged lane resumes its own conversation and answers
-    with a run or a concession, then the critic rules on each (upheld /
-    withdrawn / open). An open challenge falls back to the usual
+    with a run, a narrowed claim or a concession, then the critic rules
+    on each claim (stands / narrowed / falls / open). An open challenge falls back to the usual
     reroute. Experimental until a graded run shows it pays.
 17. **Lane escalation** — `claude-consultants config set-escalation
     --model <expert> [--max N]` (`--model ''` = off, the default). A

@@ -131,6 +131,9 @@ class CouncilState(TypedDict, total=False):
     research_lanes: Annotated[list, operator.add]
     cross_exam: Annotated[list, operator.add]
     cross_exam_round: int
+    # One per challenged report: the critic's ruling (stands / narrowed /
+    # falls / open), read by the synthesis audits.
+    cross_exam_rulings: Annotated[list, operator.add]
     # Send-injected: the one lane a cross_examine node answers for.
     cross_exam_item: Optional[dict]
     # Send-injected, per-lane fields. Set on a researcher invocation
@@ -737,6 +740,7 @@ def _wrap_researcher(deps: GraphDeps):
     def _node(state: dict) -> dict:
         return _with_lane_tags(state, council.researcher_node(
             state,
+            held_note=_held_note(deps, state),
             chat_client=deps.chat_clients["researcher"],
             # The shared executor, told which lane is calling (read
             # cache scoping now; the shell's lane views later).
@@ -755,6 +759,32 @@ def _wrap_researcher(deps: GraphDeps):
             **_wrap_up_kw(deps),
         ))
     return _node
+
+
+def _held_note(deps: GraphDeps, state: dict) -> str:
+    """A lane after the first round (a reroute or a checkpoint rewind:
+    no plan item, reports before it) on a shell run gets every other
+    lane's changes in its /scratch and a note naming them. First-round
+    lanes stay blind to each other."""
+    if state.get("plan_item") or not state.get("research") \
+            or not deps.sid or not _has_shell(deps):
+        return ""
+    from consultants.engine.held_patches import hand_over
+    from claude_hooks.tool_registry.shell_provider import lane_dirname
+    me = lane_dirname(researcher_lane_id(state))
+    idx = state.get("lane_idx")
+    rnd = (int(idx) // REWIND_LANE_BASE) if isinstance(idx, int) else None
+
+    def _sibling(other: str) -> bool:     # the same round, still writing
+        role, _, n = other.rpartition("-")
+        return (rnd is not None and role == "researcher" and n.isdigit()
+                and int(n) // REWIND_LANE_BASE == rnd)
+    return hand_over(state.get("cwd") or deps.cwd, deps.sid, me, skip=_sibling)
+
+
+def _has_shell(deps: GraphDeps) -> bool:
+    return any((s.get("function") or {}).get("name") in LANE_ONLY_TOOLS
+               for s in deps.tool_specs or ())
 
 
 def _with_lane_tags(state: dict, out: dict) -> dict:

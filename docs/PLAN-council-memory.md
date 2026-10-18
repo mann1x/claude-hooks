@@ -218,8 +218,8 @@ unchanged line and shows whether it is refused.
   (`load_role_messages`) with the challenge as a harness note, and must
   answer with a run or a concession; one exchange, tools on, bounded
   turns; challenged lanes run in parallel;
-- the critic rules on each: `upheld` (the claim falls), `withdrawn`
-  (the lane's run answered it), or `open`;
+- the critic rules on each, about the claim: `stands`, `narrowed`,
+  `falls` or `open` (run 9 replaced `upheld` / `withdrawn`, see below);
 - an `open` challenge falls back to today's reroute, so nothing is lost;
 - a lane re-raising a `refuted` or `by_design` finding is challenged
   against the recorded decision.
@@ -239,8 +239,8 @@ router after the critic (`_route_to_cross_exam`) sends one
 each); it resumes the lane's last `llm_call` (`load_lane_thread`, one
 row) on the lane's model and view, recorded as
 `researcher:cross_exam`, 12 turns. `cross_exam_ruling` asks the critic
-for `RULING report=N: upheld | withdrawn | open`; no ruling, or a
-withdrawn one with no answer, is open; any open one reroutes whatever
+for `RULING report=N: stands | narrowed | falls | open`; no ruling, or
+one with no answer (unless it falls), is open; any open one reroutes whatever
 the DECISION line says; with none open the DECISION line decides (and
 the evidence bar still holds a ready), and a ready refunds the reroute
 the critic counted. Once per round. The block (every answer whole)
@@ -248,6 +248,41 @@ is appended to the critique, so the synthesizer reads the rulings.
 
 Found on the way: a critic reroute never showed the researcher the
 verdict — it was told to "address the gaps" without them.
+
+Run 9 (csl-2026-10-18-2314-4c0f, cross-examination on, graded best run
+yet) fixed:
+- rulings were `upheld` (the claim falls) / `withdrawn`; the critic read
+  "upheld" as "the claim is upheld" both times. Now each word is about
+  the claim (`stands` / `narrowed` / `falls` / `open`), the old words
+  rule nothing, and the lane's own `ANSWER report=N: settled | narrowed
+  | conceded` caps the ruling in code (`outcome()`): a conceded claim
+  falls, a narrowed one is at most narrowed;
+- lane 2 (minimax-m3) had `run_command` offered and said it had none —
+  its own earlier report said so after a cut turn — so it could only
+  concede, and it numbered its answers 1–3 for one `report=3`. The note
+  now names the exchange's tools and the report numbers to answer;
+- each ruling is recorded on `cross_exam_rulings` (declared in both
+  state classes), and the settled audit reads it: an item close to a
+  by_design / refuted finding that a cross-examination ruled stands or
+  narrowed against it gets the ruling (`EXAMINED_NOTE`), not "needs a
+  run against that reason" — the cross-examination was that run;
+- the round after the adversary brief could not reach the coder
+  patches (the views live under the masked session store; researchers
+  100–103 spent ~220 calls looking). A lane after the first round on a
+  shell run now gets every other lane's diff in its own
+  `/scratch/held/<lane>.patch` with a note naming files and overlaps and
+  how to apply and revert (`held_patches.hand_over()`, via
+  `graph._held_note()`; same-round siblings skipped), and hunks it
+  leaves applied are dropped from its own held patch
+  (`_drop_handed_copies()`). No mount or launcher change;
+- Held patches: a `fixes` list was read for its first ref only
+  ("coder-1: fixes #2 (C322), #4 (C322), #8 (C322)" audited #2), and
+  "Fixes known csf-2" not at all. `_fix_claims()` reads every ref with
+  its own cite and skips "addresses / not verified / leaves" ones;
+  `HeldAudit.elsewhere` flags a fix for a defect whose cited files the
+  lane's patch does not change (coder-1's #4 was grep.ts);
+- an item labelled "(new)" that the ledger already holds (csf-20) is
+  noted (`memory.note_known_new()`, `Ledger.match`, no write).
 `build_researcher_messages(critique=)` now carries it on a reroute.
 
 ## Order and tests

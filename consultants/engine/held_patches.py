@@ -157,6 +157,7 @@ def held_changes(cwd: str, sid: str) -> list[LanePatch]:
             if lp.source_files:
                 lp.post = _post_files(views, lane, lp.source_files)
                 out.append(lp)
+        out = [lp for lp in _drop_handed_copies(out, views) if lp.source_files]
         known = _ledger_findings(cwd)
         for lp in out:
             lp.touches = touched_findings(lp, known)
@@ -178,6 +179,106 @@ def _post_files(views, lane: str, paths: list[str]) -> dict:
         except Exception:  # noqa: BLE001 — the diff alone still audits
             log.debug("post-patch %s of %s unreadable", rel, lane, exc_info=True)
     return out
+
+
+# ------------------------------------------------------- hand-over
+#: Where the patches handed to a later lane land in its /scratch.
+HANDOVER_DIR = "held"
+
+HANDOVER_HEAD = (
+    "HELD PATCHES FROM EARLIER LANES. The views those lanes wrote in live "
+    "in the session store, which no command can see, so each lane's "
+    "changes against the base are copied into your /scratch/held/ (read "
+    "only):")
+HANDOVER_RULES = (
+    "To run one, from the repo root in your own view: `git apply --check "
+    "/scratch/held/<lane>.patch && git apply /scratch/held/<lane>.patch`, "
+    "then the tests. Patches that overlap (listed) may not apply "
+    "together: apply one, run it, `git apply -R` it, then the next, or "
+    "resolve the conflict and say how. Before your report, revert every "
+    "patch you applied (`git apply -R /scratch/held/<lane>.patch`): what "
+    "your view still changes is held as YOUR patch. Cite each run with "
+    "the patches it had applied.")
+
+
+def _lane_diff(views, lane: str, rec: dict) -> str:
+    if rec.get("state") == "active":
+        return views.preview(lane)
+    p = rec.get("patch")
+    if rec.get("state") == "held" and p and os.path.isfile(p):
+        with open(p, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    return ""
+
+
+def hand_over(cwd: str, sid: str, lane: str, *, skip=None) -> str:
+    """Write every other lane's changes into ``lane``'s ``/scratch/held/``
+    and return the note naming them; "" when there are none or no write
+    views. Council run 9: the round after the brief, asked to apply the
+    three coders' patches together, spent 220 calls looking for them —
+    the views sit under the masked session store. ``skip(lane)`` names
+    lanes not to copy (siblings still writing). Never raises."""
+    if not cwd or not sid or not lane:
+        return ""
+    try:
+        from claude_hooks.sandbox.views import session_views
+        views = session_views(sid=sid, cwd=cwd)
+        if views is None:
+            return ""
+        patches: list[LanePatch] = []
+        for other, rec in sorted(views.lanes().items(),
+                                 key=lambda kv: (not kv[0].startswith("coder"), kv[0])):
+            if other == lane or (skip and skip(other)):
+                continue
+            diff = _lane_diff(views, other, rec)
+            if diff.strip():
+                patches.append(LanePatch(lane=other, diff=diff,
+                                         hunks=parse_diff(other, diff)))
+        if not patches:
+            return ""
+        out = views.lane_dir(lane) / "scratch" / HANDOVER_DIR
+        out.mkdir(parents=True, exist_ok=True)
+        os.chmod(out, 0o755)
+        lines = [HANDOVER_HEAD]
+        for lp in patches:
+            f = out / f"{lp.lane}.patch"
+            f.write_text(lp.diff, encoding="utf-8")
+            os.chmod(f, 0o644)
+            files = ", ".join(lp.files) or "(no parsed hunks)"
+            lines.append(f"- /scratch/held/{lp.lane}.patch — {files}")
+        ovl = overlaps(patches)
+        for o in ovl:
+            a, b = o["lanes"]
+            lo, hi = o["lines"]
+            lines.append(f"- OVERLAP: {a} and {b} both change {o['path']} "
+                         f"lines {lo}-{hi - 1}")
+        lines.append(HANDOVER_RULES)
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001 — the lane still runs without them
+        log.exception("could not hand held patches of %s to %s", sid, lane)
+        return ""
+
+
+def _hunk_key(h: Hunk) -> tuple:
+    return (h.path, h.old_start, h.old_len, tuple(h.added), tuple(h.removed))
+
+
+def _drop_handed_copies(patches: list[LanePatch], views) -> list[LanePatch]:
+    """A lane that applied a handed-over patch and left it in its view
+    does not own those hunks: drop each hunk identical to one of the lane
+    it came from (named by the files in its ``/scratch/held/``)."""
+    by_lane = {lp.lane: lp for lp in patches}
+    for lp in patches:
+        try:
+            held = views.lane_dir(lp.lane) / "scratch" / HANDOVER_DIR
+            sources = [p.stem for p in held.glob("*.patch")] if held.is_dir() else []
+        except Exception:  # noqa: BLE001
+            sources = []
+        theirs = {_hunk_key(h) for s in sources if s in by_lane
+                  for h in by_lane[s].hunks}
+        if theirs:
+            lp.hunks = [h for h in lp.hunks if _hunk_key(h) not in theirs]
+    return patches
 
 
 def _ledger_findings(cwd: str) -> list:
@@ -448,8 +549,46 @@ def _blocks(lines: list[str], a: int, b: int) -> list[str]:
 
 _NOT_FIX = re.compile(r"\b(?:does\s+not|doesn['’]t|not|never|no)\s+fix(?:es)?\b"
                       r"[^;.\n]*", re.I)
-_FIX = re.compile(r"\bfix(?:es|ed)?\s+#?(\d{1,3}|[a-z]{1,6}f-\d+)\b([^;\n]*)",
+_FIX = re.compile(r"\bfix(?:es|ed)?\s+(?:known\s+)?#?(\d{1,3}|[a-z]{1,6}f-\d+)\b",
                   re.I)
+#: The refs listed after one "fixes": ``#4`` or a ledger id.
+_FIX_REF = re.compile(r"(?<![\w#-])#(\d{1,3})\b|(?<![\w-])([a-z]{1,6}f-\d+)\b", re.I)
+#: A clause ends at ``;``, a line end, a sentence end, or another verb.
+_CLAUSE_END = re.compile(r";|\n|\.(?:\s|$)|\b(?:address(?:es)?|leaves?|widens?)\s+(?:#|[a-z]{1,6}f-)",
+                         re.I)
+#: A ref whose own words take the fix back: ``#6 (addresses, not verified)``.
+_NOT_A_FIX = re.compile(r"address|not\s+verified|leaves?\b|widen", re.I)
+
+
+def _fix_claims(text: str) -> list[tuple[object, str]]:
+    """``[(ref, its words)]`` for every defect a ``fixes`` clause claims:
+    council run 9 wrote "coder-1: fixes #2 (C322), #4 (C322), #8 (C322)"
+    and only #2 was ever audited. A ref's words run to the next ref; one
+    with no run of its own takes the clause's next cite ("fixes #1, #2
+    (C5)")."""
+    text = _NOT_FIX.sub("", text or "")
+    out: list[tuple[object, str]] = []
+    for h in _FIX.finditer(text):
+        end = _CLAUSE_END.search(text, h.end())
+        clause_end = end.start() if end else len(text)
+        refs = [(h.group(1), h.end())]
+        for m in _FIX_REF.finditer(text, h.end(), clause_end):
+            refs.append((m.group(1) or m.group(2), m.end()))
+        for k, (tok, at) in enumerate(refs):
+            nxt = clause_end if k + 1 == len(refs) else \
+                text.rfind(refs[k + 1][0], at, refs[k + 1][1])
+            words = text[at:max(nxt, at)]
+            if _NOT_A_FIX.search(words):
+                continue
+            cites = words if re.search(r"\bC\d+\b", words) else text[at:clause_end]
+            ref = _ref(tok)
+            if all(r != ref for r, _ in out):
+                out.append((ref, cites))
+    return out
+
+
+def _fmt_ref(ref) -> str:
+    return f"#{ref}" if isinstance(ref, int) else str(ref)
 
 
 def _ref(tok: str):
@@ -464,11 +603,15 @@ class HeldAudit:
     unbacked: list = field(default_factory=list)    # (lane, n) fixes with no green run
     touched: list = field(default_factory=list)     # (lane, touch) not assessed
     unwired: list = field(default_factory=list)     # (lane, option) not named
+    #: (lane, ref, files): a fix claimed for a defect whose code the
+    #: lane's patch does not change (run 9: "coder-1 fixes #4", #4 being
+    #: grep.ts, which only coder-2 changed).
+    elsewhere: list = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return not (self.missing or self.open or self.unbacked
-                    or self.touched or self.unwired)
+                    or self.touched or self.unwired or self.elsewhere)
 
 
 def audit(text: str, patches: list[LanePatch], ovl: list[dict],
@@ -485,6 +628,8 @@ def audit(text: str, patches: list[LanePatch], ovl: list[dict],
         else:
             blocks += _blocks(lines, x, y)
     by_n = {r["n"]: r for r in rows or []}
+    from consultants.engine.evidence import ranked_items
+    ranked = ranked_items(text)
     for p in patches:
         rx = _lane_rx(p.lane)
         mine = [b for b in blocks if rx.search(b)]
@@ -500,18 +645,47 @@ def audit(text: str, patches: list[LanePatch], ovl: list[dict],
                 a.unwired.append((p.lane, u))
         role, idx = p.role_lane
         for b in mine:
-            for m in _FIX.finditer(_NOT_FIX.sub("", b)):
-                runs = [by_n[n] for n in cited(m.group(2)) if n in by_n]
+            for ref, words in _fix_claims(b):
+                runs = [by_n[n] for n in cited(words) if n in by_n]
                 green = any(r.get("role") == role and r.get("lane") == idx
                             and r.get("ran") and str(r.get("exit")) == "exit 0"
                             for r in runs)
                 if not green:
-                    a.unbacked.append((p.lane, _ref(m.group(1))))
+                    a.unbacked.append((p.lane, ref))
+                away = _fix_elsewhere(p, ref, ranked, patches)
+                if away and (p.lane, ref, away) not in a.elsewhere:
+                    a.elsewhere.append((p.lane, ref, away))
     for o in ovl:
         ra, rb = (_lane_rx(x) for x in o["lanes"])
         if not any(ra.search(b) and rb.search(b) for b in blocks):
             a.open.append(o)
     return a
+
+
+_CITE = re.compile(r"([\w./-]*\w\.[A-Za-z]{1,5}):\d+")
+
+
+def _fix_elsewhere(p: LanePatch, ref, ranked: list[dict],
+                   patches: list[LanePatch]) -> tuple:
+    """The source files of the defect ``ref`` none of which ``p``'s
+    patch changes; () when it changes one, or nothing says where the
+    defect is. ``#n`` is the n-th ranked item and its ``path:line``
+    cites; a ledger id is placed by the other lanes' ``touches``."""
+    if isinstance(ref, int):
+        if not 1 <= ref <= len(ranked):
+            return ()
+        files = {f for f in _CITE.findall(ranked[ref - 1]["text"])
+                 if not _tr.TEST_FILE.search(f)}
+    else:
+        if any(t["id"] == ref for t in p.touches):
+            return ()
+        files = {str(t.get("where") or "").rsplit(":", 1)[0]
+                 for q in patches if q is not p for t in q.touches
+                 if t["id"] == ref}
+        files.discard("")
+    if not files or any(_same_file(f, mine) for f in files for mine in p.files):
+        return ()
+    return tuple(sorted(files))
 
 
 def revision_note(h: HeldAudit) -> str:
@@ -528,6 +702,12 @@ def revision_note(h: HeldAudit) -> str:
                      "after its patch. Cite one, or write `addresses #n, not "
                      "verified`:\n" + "\n".join(
                          f"  - `{lane}` fixes #{n}" for lane, n in h.unbacked))
+    if h.elsewhere:
+        parts.append("- These `fixes` name a defect whose code the lane's "
+                     "patch does not change. Name the lane whose patch "
+                     "does, or drop the claim:\n" + "\n".join(
+                         f"  - `{lane}` fixes {_fmt_ref(r)}, but changes none "
+                         f"of {', '.join(fs)}" for lane, r, fs in h.elsewhere))
     if h.touched:
         parts.append("- These patches change the code of known findings "
                      "their entries do not mention. Say, naming the id, "
@@ -557,6 +737,8 @@ UNBACKED_FIX = ("harness: no green run of this lane after its patch is "
 TOUCHED = ("`{lane}` changes the code of {id} ({title}, {where}); the "
            "answer does not say whether it fixes, leaves or widens it "
            "(harness) — check before applying")
+ELSEWHERE = ("harness: this lane's patch changes none of {files}, where "
+             "{ref} is")
 UNWIRED = ("`{lane}` adds `{name}` ({where}), which no production file the "
            "patch changes passes: a fix through it is not wired into the "
            "product until a caller passes it (harness)")
@@ -580,9 +762,10 @@ def enforce(text: str, h: HeldAudit) -> str:
         return text
     lines = text.rstrip().split("\n")
     sec = _held_section(lines)
-    if sec and h.unbacked:
+    if sec and (h.unbacked or h.elsewhere):
         from consultants.engine.evidence import _HEADING
-        owed = set(h.unbacked)
+        owed = set(h.unbacked) | {(lane, r) for lane, r, _ in h.elsewhere}
+        away = {(lane, r): fs for lane, r, fs in h.elsewhere}
         lane, by_heading = None, False
         for i in range(*sec):
             ln = lines[i]
@@ -595,10 +778,14 @@ def enforce(text: str, h: HeldAudit) -> str:
             elif re.match(r"^\s{0,3}(?:[-*+]|\d{1,3}[.)])\s|^\s*\|", ln) \
                     and not ln[:1].isspace() and not by_heading:
                 lane = None              # a new entry for another lane
-            for m in _FIX.finditer(_NOT_FIX.sub("", ln)):
-                n = _ref(m.group(1))
+            for n, _ in _fix_claims(ln):
                 note = UNBACKED_FIX.format(n=n)
-                if (lane, n) in owed and note not in ln:
+                if (lane, n) in set(h.unbacked) and note not in ln:
+                    lines[i] = lines[i].rstrip() + f" _({note})_"
+                fs = away.get((lane, n))
+                note = ELSEWHERE.format(files=", ".join(fs), ref=_fmt_ref(n)) \
+                    if fs else ""
+                if note and note not in lines[i]:
                     lines[i] = lines[i].rstrip() + f" _({note})_"
     new = [f"- `{p.lane}` ({', '.join(p.source_files[:6])}): {NOT_ASSESSED}."
            for p in h.missing]

@@ -122,3 +122,55 @@ def test_the_planner_and_critics_read_it(tmp_path):
         c = _Seq("DECISION: ready\nPLAN: x")
         node(dict(state), chat_client=c, model="m")
         assert "KNOWN FINDINGS" in c.calls[0]["messages"][-1]["content"], node
+
+
+class TestRun9:
+
+    def test_an_item_called_new_that_the_ledger_holds_is_noted(self, tmp_path):
+        # Council run 9 ranked csf-20 as "(new)".
+        lg = Ledger(tmp_path)
+        f, _ = lg.record("Create then edit refused", "the editor refuses a "
+                         "file apply_patch created", paths=[PATH])
+        new = ANSWER.replace("(C1).", "(C1). (new)")
+        out, n = memory.note_known_new(str(tmp_path), new)
+        line = next(ln for ln in out.split("\n") if "(new)" in ln)
+        assert n == 1 and memory.KNOWN_NOTE.format(
+            id=f.id, status=f.status, title=f.title) in line
+        assert memory.note_known_new(str(tmp_path), out) == (out, 0)   # once
+        tagged = new.replace("(C1).", f"(C1, {f.id}).")
+        assert memory.note_known_new(str(tmp_path), tagged)[1] == 0
+        assert memory.note_known_new(str(tmp_path), ANSWER) == (ANSWER, 0)
+
+    def test_no_ledger_or_nothing_new_changes_nothing(self, tmp_path):
+        new = ANSWER.replace("(C1).", "(C1). (new)")
+        assert memory.note_known_new(str(tmp_path), new) == (new, 0)
+        assert memory.note_known_new("", new) == (new, 0)
+
+    def test_a_cross_examined_claim_is_not_asked_for_a_run_again(self):
+        # Council run 9: lane 0 narrowed its grep claim against csf-12 in
+        # the cross-examination; the answer still demanded "a run against
+        # that reason".
+        f = SimpleNamespace(id="csf-12", status="by_design", title="t",
+                            decision="The full-file read credit is deliberate.")
+        other = SimpleNamespace(id="csf-3", status="refuted", title="u",
+                                decision="not real")
+        rulings = [
+            {"round": 1, "report": 1, "lane": 0, "ruling": "narrowed",
+             "why": "only the column axis csf-12 never decided",
+             "challenges": ["restates csf-12"], "answer": "conceded spans"},
+            {"round": 1, "report": 2, "lane": 1, "ruling": "falls", "why": "x",
+             "challenges": ["restates csf-3"], "answer": ""},
+            {"round": 1, "report": 3, "lane": 2, "ruling": "stands", "why": "y",
+             "challenges": ["about csf-123"], "answer": ""}]
+        ex = memory.examined_against([f, other], rulings)
+        assert list(ex) == ["csf-12"]
+        text = "## Defects\n\n1. grep credits a cut line (C3)\n2. lock (C3)\n"
+        items = memory.answer_items(text)
+        out, n = memory.apply_settled_audit(text, [f, other], items,
+                                            {1: 1, 2: 2}, examined=ex)
+        one, two = (ln for ln in out.split("\n") if ln.startswith(("1.", "2.")))
+        assert "cross-examined against it in round 1 and ruled narrowed — only " \
+               "the column axis csf-12 never decided." in one
+        assert "needs a run" not in one and "needs a run" in two
+        assert memory.apply_settled_audit(out, [f, other], items, {1: 1, 2: 2},
+                                          examined=ex)[1] == 0

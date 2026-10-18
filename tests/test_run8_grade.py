@@ -111,7 +111,8 @@ class TestItem2LaneSubHeadings:
     def test_a_ledger_id_fix_needs_that_lanes_green_run(self):
         a = hp.audit(RUN8_HELD, [_lane("coder-0", _diff(AP, 400, 2, ["x();"]))],
                      [], [_row(3, role="researcher", lane=4)])
-        assert a.unbacked == [("coder-0", "csf-1")]
+        # Both refs of the one "fixes" (run 9: only the first was read).
+        assert a.unbacked == [("coder-0", "csf-1"), ("coder-0", "csf-2")]
         out = hp.enforce(RUN8_HELD, a)
         line = next(ln for ln in out.split("\n") if "fixes #csf-1" in ln)
         assert hp.UNBACKED_FIX.format(n="csf-1") in line

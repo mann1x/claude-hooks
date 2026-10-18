@@ -133,6 +133,47 @@ class TestTheHeldPatchesSection:
         a = hp.audit(text, [CODER_1, R100], hp.overlaps([CODER_1, R100]), rows)
         assert a.ok, a
 
+    def test_a_fix_for_a_defect_the_patch_does_not_touch(self, tmp_path):
+        # Council run 9: "coder-1 fixes #4 (C322)"; #4 is grep.ts, which
+        # only coder-2 changed.
+        rows = _rows(tmp_path)
+        grep = "sdk/packages/core/src/extensions/tools/executors/grep.ts"
+        r4 = _lane("researcher-4", _diff(AP, 10, 2, ["x();"]))
+        g = _lane("coder-2", _diff(grep, 260, 2, ["y();"]),
+                  _diff(AP, 400, 2, ["z();"]))
+        g.touches = [{"id": "csf-1", "status": "candidate", "title": "t",
+                      "where": f"{grep}:260"}]
+        text = ("## Defects\n\n| # | Defect | Where |\n| --- | --- | --- |\n"
+                "| 1 | patch launders | `apply-patch.ts:403` (C5) |\n"
+                "| 2 | CRLF anchor | `grep.ts:266` (C5) |\n\n## Held patches\n\n"
+                "- researcher lane 4: fixes #1 (C5), fixes #2 (C5), fixes csf-1 (C5).\n"
+                "- coder-2: addresses #2, not verified; addresses csf-1, not verified.\n"
+                "\n## Unverified\n\n(none)\n")
+        a = hp.audit(text, [r4, g], [], rows)
+        assert a.elsewhere == [("researcher-4", 2, ("grep.ts",)),
+                               ("researcher-4", "csf-1", (grep,))]
+        assert "fixes #2, but changes none of grep.ts" in hp.revision_note(a)
+        out = hp.enforce(text, a)
+        line = next(ln for ln in out.split("\n") if "researcher lane 4" in ln)
+        assert hp.ELSEWHERE.format(files="grep.ts", ref="#2") in line
+        assert hp.ELSEWHERE.format(files=grep, ref="csf-1") in line
+        assert "#1 is" not in line                     # apply-patch.ts: its own
+        assert hp.UNBACKED_FIX.format(n=2) not in line  # C5 is green and its own
+
+    def test_every_ref_of_one_fixes_is_a_claim(self):
+        # Council run 9's Held patches, verbatim.
+        got = hp._fix_claims(
+            "- `coder-0`: fixes #1 (C288), #6 (addresses, not verified), #7 "
+            "(addresses, not verified), #10 (C46). Fixes known csf-1, csf-12 "
+            "(leaves as is), csf-7 (addresses, not verified).")
+        assert [r for r, _ in got] == [1, 10, "csf-1"]
+        assert [r for r, _ in hp._fix_claims(
+            "- `coder-1`: fixes #2 (C322), #4 (C322), #8 (C322).")] == [2, 4, 8]
+        [(r, w)] = hp._fix_claims("fixes #1, does not fix #2 (C9)")
+        assert r == 1
+        assert [r for r, w in hp._fix_claims("fixes #1, #2 (C5)")] == [1, 2]
+        assert all("C5" in w for _, w in hp._fix_claims("fixes #1, #2 (C5)"))
+
     def test_a_held_patches_table_is_neither_ranked_nor_a_matrix(self):
         text = ("## Held patches\n\n| Lane | Fixes |\n| --- | --- |\n"
                 "| coder-1 | ✓ #3 (C3) |\n\n## Unverified\n\n(none)\n")
@@ -233,6 +274,43 @@ class TestLiveViews:
     def test_no_session_or_no_views_is_nothing(self, tmp_path):
         assert hp.held_changes("", "x") == []
         assert hp.held_changes(str(tmp_path), "csl-none") == []
+        assert hp.hand_over(str(tmp_path), "csl-none", "researcher-100") == ""
+
+    def test_a_later_lane_is_handed_the_other_lanes_patches(self, repo):
+        # Council run 9: the round after the brief spent 220 calls looking
+        # for the coders' patches under the masked session store.
+        v = V.session_views(sid="csl-ho", cwd=str(repo))
+        for lane in ("coder-0", "coder-1", "researcher-100", "researcher-101"):
+            v.ensure(lane)
+        wt = {lane: Path(r["wt"]) for lane, r in v.lanes().items()}
+        (wt["coder-0"] / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+        (wt["coder-1"] / "calc.py").write_text("def add(a, b):\n    return b + a\n")
+        (wt["coder-1"] / "test_calc.py").write_text("def test_add(): pass\n")
+        (wt["researcher-101"] / "calc.py").write_text("sibling\n")
+        note = hp.hand_over(str(repo), "csl-ho", "researcher-100",
+                            skip=lambda lane: lane == "researcher-101")
+        held = v.lane_dir("researcher-100") / "scratch" / hp.HANDOVER_DIR
+        assert sorted(p.name for p in held.iterdir()) == ["coder-0.patch",
+                                                          "coder-1.patch"]
+        assert (held / "coder-0.patch").read_text() == v.preview("coder-0")
+        assert note.startswith(hp.HANDOVER_HEAD) and hp.HANDOVER_RULES in note
+        assert "- /scratch/held/coder-1.patch — calc.py, test_calc.py" in note
+        assert "OVERLAP: coder-0 and coder-1 both change calc.py lines 1-2" in note
+        # It applies in the later lane's own view, and the copy left there
+        # is not that lane's patch.
+        env = {**os.environ, **V.SessionViews._host_env(v.lanes()["researcher-100"])}
+        subprocess.run(["git", "apply", str(held / "coder-0.patch")],
+                       cwd=wt["researcher-100"], check=True, env=env,
+                       capture_output=True)
+        assert "return a + b" in (wt["researcher-100"] / "calc.py").read_text()
+        lanes = [p.lane for p in hp.held_changes(str(repo), "csl-ho")]
+        assert "researcher-100" not in lanes and "coder-0" in lanes
+
+    def test_nothing_to_hand_over_writes_nothing(self, repo):
+        v = V.session_views(sid="csl-h0", cwd=str(repo))
+        v.ensure("coder-0")
+        assert hp.hand_over(str(repo), "csl-h0", "researcher-100") == ""
+        assert not (v.lane_dir("researcher-100") / "scratch").exists()
 
 
 def test_the_synthesizer_is_shown_the_patches_and_owes_the_section(
@@ -277,3 +355,29 @@ def test_a_comment_audit_sees_every_hunk_whole_and_batches_by_budget():
     assert sorted(i for g in groups for i in g) == list(range(len(items)))
     assert [0] in groups                                 # the big hunk alone
     assert hp.comment_audit_batches(items, 10**7) == [list(range(len(items)))]
+
+
+def test_only_a_later_lane_on_a_shell_run_is_handed_patches(monkeypatch):
+    from consultants.engine import council, graph
+    calls = []
+    monkeypatch.setattr(hp, "hand_over", lambda cwd, sid, lane, skip=None: (
+        calls.append((cwd, sid, lane, skip)) or "HELD NOTE"))
+    shell = [{"function": {"name": "run_command"}}]
+    deps = SimpleNamespace(sid="csl-x", cwd="/r", tool_specs=shell)
+    later = {"research": ["r1"], "lane_idx": 101, "cwd": "/r"}
+    assert graph._held_note(deps, later) == "HELD NOTE"
+    _, _, lane, skip = calls[-1]
+    assert lane == "researcher-101"
+    assert skip("researcher-100") and skip("researcher-102")     # siblings
+    assert not skip("researcher-3") and not skip("coder-0")
+    assert graph._held_note(deps, {**later, "plan_item": "x"}) == ""   # round 1
+    assert graph._held_note(deps, {"lane_idx": 0}) == ""
+    assert graph._held_note(SimpleNamespace(sid="s", cwd="/r", tool_specs=[]),
+                            later) == ""                             # no shell
+    n = len(calls)
+    msgs = council.build_researcher_messages("q", "p", ["r1"], [],
+                                             held_patches="HELD NOTE")
+    assert msgs[-1]["content"].count("HELD NOTE") == 1
+    assert "HELD" not in council.build_researcher_messages(
+        "q", "p", ["r1"], [])[-1]["content"]
+    assert len(calls) == n

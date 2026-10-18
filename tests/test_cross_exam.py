@@ -40,7 +40,7 @@ class _Researcher:
 
 
 class _Critic:
-    def __init__(self, ruling="withdrawn", after="DECISION: ready"):
+    def __init__(self, ruling="stands", after="DECISION: ready"):
         self.payloads, self.ruling, self.after, self.verdicts = [], ruling, after, 0
         self._lock = threading.Lock()
 
@@ -114,13 +114,13 @@ class TestOnTheGraph:
         assert msgs[-2]["content"] == report2.strip() or item in msgs[-2]["content"]
         assert "CHALLENGE report=2: the edit is called blind" in msgs[-1]["content"]
 
-    def test_a_withdrawn_challenge_needs_no_second_round(self, tmp_path):
+    def test_a_claim_that_stands_needs_no_second_round(self, tmp_path):
         _, clients, out = _run(tmp_path)
         assert out["critic_decision"] == "ready"
         assert int(out.get("critic_reroutes_used") or 0) == 0
         assert len(clients["researcher"].payloads) == 4    # 3 lanes + 1 exam
         synth = clients["synthesizer"].payloads[0]["messages"][-1]["content"]
-        assert cx.BLOCK_HEADER in synth and "WITHDRAWN" in synth
+        assert cx.BLOCK_HEADER in synth and "): STANDS" in synth
         assert "settled — C1 printed it" in synth          # the answer, whole
 
     def test_an_open_challenge_falls_back_to_the_reroute(self, tmp_path):
@@ -130,6 +130,19 @@ class TestOnTheGraph:
         assert "THE CRITIC'S VERDICT ON THE ROUNDS ABOVE" in reroute
         assert cx.BLOCK_HEADER in reroute and "): OPEN" in reroute
         assert len(_exams(clients["researcher"])) == 1     # once a round
+
+    def test_the_reroute_lane_is_handed_the_held_patches(self, tmp_path, monkeypatch):
+        seen = []
+
+        def _note(deps, state):
+            seen.append(state.get("lane_idx"))
+            return "" if state.get("plan_item") else "HELD PATCHES NOTE"
+        monkeypatch.setattr(graph, "_held_note", _note)
+        _, clients, _ = _run(tmp_path, critic=_Critic(ruling="open"))
+        reroute = clients["researcher"].payloads[-1]["messages"][-1]["content"]
+        assert reroute.count("HELD PATCHES NOTE") == 1
+        first = clients["researcher"].payloads[0]["messages"][-1]["content"]
+        assert "HELD PATCHES NOTE" not in first and len(seen) == 4
 
     def test_off_the_graph_is_unchanged(self, tmp_path):
         g, clients, out = _run(tmp_path, on=False)
@@ -194,12 +207,38 @@ class TestRulings:
     def test_no_ruling_is_open(self):
         assert cx.outcome(self.EXAMS, {}) == {1: cx.OPEN, 2: cx.OPEN}
 
-    def test_a_lane_that_did_not_answer_cannot_be_withdrawn(self):
-        ruled = cx.rulings("RULING report=1: **withdrawn** — ok\n"
-                           "RULING report=2: withdrawn — ok")
-        assert cx.outcome(self.EXAMS, ruled) == {1: cx.WITHDRAWN, 2: cx.OPEN}
-        ruled = cx.rulings("RULING report=2: upheld — it never answered")
-        assert cx.outcome(self.EXAMS, ruled)[2] == cx.UPHELD
+    def test_a_lane_that_did_not_answer_cannot_stand(self):
+        ruled = cx.rulings("RULING report=1: **stands** — ok\n"
+                           "RULING report=2: stands — ok")
+        assert cx.outcome(self.EXAMS, ruled) == {1: cx.STANDS, 2: cx.OPEN}
+        ruled = cx.rulings("RULING report=2: falls — it never answered")
+        assert cx.outcome(self.EXAMS, ruled)[2] == cx.FALLS
+
+    def test_the_old_words_rule_nothing(self):
+        # Council run 9: "upheld" was read both ways. Not a ruling now.
+        ruled = cx.rulings("RULING report=1: upheld — the claims are reproduced")
+        assert cx.outcome(self.EXAMS, ruled)[1] == cx.OPEN
+
+    def test_the_lanes_own_word_caps_the_ruling(self):
+        # Council run 9: lane 2 conceded "grounded" and the critic ruled
+        # the claim upheld-as-verified.
+        ex = [{"lane": 2, "reports": {3: ["x"], 4: ["y"], 5: ["z"]}, "ok": True,
+               "answer": "ANSWER report=3 (A6): conceded — I ran nothing\n"
+                         "ANSWER report=4: **narrowed** — only the ADD path\n"
+                         "ANSWER report=5: settled — C9 printed it"}]
+        ruled = cx.rulings("RULING report=3: stands — read the code\n"
+                           "RULING report=4: stands — fine\n"
+                           "RULING report=5: stands — C9")
+        assert cx.outcome(ex, ruled) == {3: cx.FALLS, 4: cx.NARROWED, 5: cx.STANDS}
+        assert cx.lane_answers(ex[0]["answer"]) == {
+            3: "conceded", 4: "narrowed", 5: "settled"}
+
+    def test_the_rulings_are_recorded_for_the_synthesis_audits(self, tmp_path):
+        out = self._rule(tmp_path, "RULING report=1: narrowed — only csf-12's "
+                                   "column\nDECISION: ready")
+        [r] = out["cross_exam_rulings"]
+        assert (r["report"], r["lane"], r["ruling"], r["round"]) == (1, 0, "narrowed", 1)
+        assert r["challenges"] == ["x"] and r["answer"] == "ran it"
 
     def _rule(self, tmp_path, text, exams=None):
         class _C:
@@ -210,10 +249,10 @@ class TestRulings:
         return cx.ruling_node(state, chat_client=_C(), model="m")
 
     def test_all_settled_is_ready_and_refunds_the_reroute(self, tmp_path):
-        out = self._rule(tmp_path, "RULING report=1: upheld — conceded\nDECISION: ready")
+        out = self._rule(tmp_path, "RULING report=1: falls — conceded\nDECISION: ready")
         assert (out["critic_decision"], out["critic_reroutes_used"],
                 out["cross_exam_round"]) == ("ready", -1, 1)
-        assert "UPHELD — conceded" in out["critique"] and "ran it" in out["critique"]
+        assert "FALLS — conceded" in out["critique"] and "ran it" in out["critique"]
 
     def test_an_open_one_reroutes_whatever_the_decision_line_says(self, tmp_path):
         out = self._rule(tmp_path, "RULING report=1: open — unclear\nDECISION: ready")
@@ -221,7 +260,7 @@ class TestRulings:
             "needs_more_research", 0)
 
     def test_settled_but_more_to_research_still_reroutes(self, tmp_path):
-        out = self._rule(tmp_path, "RULING report=1: withdrawn — ok\n"
+        out = self._rule(tmp_path, "RULING report=1: stands — ok\n"
                                    "DECISION: needs_more_research")
         assert out["critic_decision"] == "needs_more_research"
 
@@ -281,6 +320,42 @@ def test_examine_resumes_the_thread_on_the_lanes_model_and_view(tmp_path):
     assert [m["content"].split()[0] for m in p["messages"][:3]] == ["sys", "item", "my"]
     assert p["messages"][-1]["content"].startswith("[SYSTEM MESSAGE]")
     assert out["cross_exam"][0]["answer"].startswith("ANSWER report=4: conceded")
+    assert "Answer with report=4" in p["messages"][-1]["content"]
+
+
+def test_the_note_names_the_tools_the_exchange_really_has():
+    # Council run 9: lane 2 had run_command offered and said it had none.
+    note = cx.lane_note({3: ["x"]}, ["read_file", "run_command"])
+    assert "Your tools in this exchange: read_file, run_command." in note
+    assert "whatever an earlier turn of yours said" in note
+    assert "run_command is among" not in cx.lane_note({3: ["x"]}, ["read_file"])
+    assert "Your tools" not in cx.lane_note({3: ["x"]})
+
+
+def test_examine_names_the_offered_tools(tmp_path):
+    rec = MessageRecorder(tmp_path / "t.db", meta=RecorderMeta(
+        sid="s", cwd=str(tmp_path), question="q", effort="high",
+        topology="council", models={}))
+    rec.record_llm(role="researcher", round=1, lane_idx=0, model="m",
+                   request={"model": "m", "messages": [
+                       {"role": "user", "content": "item"}]},
+                   response=_reply("r"), prompt_tokens=1, completion_tokens=1,
+                   duration_ms=1)
+    seen = []
+
+    class _C:
+        def chat(self, payload, **kw):
+            seen.append(payload)
+            return _reply("ANSWER report=1: settled — ok")
+    specs = [{"type": "function", "function": {"name": n, "parameters": {}}}
+             for n in ("read_file", "run_command")]
+    cx.examine_node({"research_rounds_used": 1,
+                     "cross_exam_item": {"lane": 0, "reports": {1: ["x"]}}},
+                    chat_client=_C(), recorder=rec, tool_specs=specs,
+                    tool_executor=lambda *a, **k: "")
+    rec.close()
+    note = [m for m in seen[0]["messages"] if cx.LANE_NOTE in str(m.get("content"))][-1]
+    assert "run_command is among them" in note["content"]
 
 
 def test_a_lane_with_no_conversation_leaves_it_open(tmp_path):
