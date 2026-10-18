@@ -65,6 +65,11 @@ file files line lines code tool tools call calls test tests case cases
 _WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]{3,}")
 #: Lines within this many of each other in the same file are the same place.
 LINE_WINDOW = 40
+#: Shared words a claim at the same place needs to be the same finding.
+#: Two claims at one line can differ: "grep launders an outside write"
+#: (a defect) and "grep credits a full-file read" (by design) share
+#: grep.ts:260 and score 0.25; restatements of one claim score 0.5+.
+SAME_PLACE_WORDS = 0.35
 
 
 def _stem(w: str) -> str:
@@ -95,7 +100,9 @@ def _same_file(a: str, b: str) -> bool:
     if a == b:
         return True
     long, short = (a, b) if len(a) >= len(b) else (b, a)
-    return "/" in short and long.endswith("/" + short)
+    # A bare name (``grep.ts``, as answers cite) is the file of that name;
+    # the word threshold keeps unrelated claims in same-named files apart.
+    return long.endswith("/" + short)
 
 
 def place_score(a: Sequence[str], b: Sequence[str]) -> float:
@@ -129,7 +136,7 @@ def same_finding(f: Finding, claim: str, paths: Sequence[str]) -> bool:
     place = place_score(f.paths, paths)
     wscore = word_score(text, claim)
     if place >= 1.0:
-        return wscore >= 0.15
+        return wscore >= SAME_PLACE_WORDS
     if not f.paths or not paths:
         return wscore >= 0.5
     return False
@@ -142,7 +149,9 @@ class Ledger:
     """One project's findings."""
 
     def __init__(self, root: Path):
-        self.root = Path(root)
+        # Resolved: the prefix comes from the directory's name, and
+        # Path(".").name is "" (it gave "taf", from "task").
+        self.root = Path(root).resolve()
         self.dir = self.root / FINDINGS_DIR
         self._config: Optional[dict] = None
 

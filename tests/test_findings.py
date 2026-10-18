@@ -155,3 +155,47 @@ def test_the_cli(tmp_path):
     assert r.returncode == 0, r.stderr
     assert lg.read(f.id).commit == "abc123"
     assert "[fixed M]" in cli("list").stdout
+
+
+class TestSeedBugs:
+    """Seeding cline-sync's ledger (2026-10-18) merged two grep claims at
+    one line and named the ledger "taf"."""
+
+    LAUNDER = ("grep launders an outside write into a fresh read stamp",
+               "After an outside write, a grep that matches only other lines "
+               "records a full-file read receipt (1..Infinity) without "
+               "changedSince, so the editor then accepts an edit aimed at the "
+               "stale, changed line.")
+    CREDIT = ("grep credits a full-file read",
+              "grep records a 1..Infinity read receipt for a file it searched.")
+    CRLF = ("delimiter scan prescribes a column past the line end on CRLF files",
+            "On a CRLF file the delimiter scan counts the \\r as part of the "
+            "line, so it suggests insert_column 390")
+    CRLF_FALSE = ("delimiter offset walk counts one character early per CRLF line",
+                  "offsetIn's lines[i].length + 1 puts every position one "
+                  "character early per preceding line on CRLF files.")
+    RANKED = ("Laundering Outside Writes",
+              "grep.ts:260 | read_files → Outside write → grep (matching other "
+              "lines) → editor on changed line. | grep records a full-file "
+              "receipt (1..Infinity) without checking changedSince, clearing the "
+              "outside change flag. Editor then accepts an edit on stale content.")
+
+    def test_two_claims_at_one_line_stay_apart(self, lg):
+        a, _ = lg.record(*self.LAUNDER, paths=["x/executors/grep.ts:260"])
+        b, new = lg.record(*self.CREDIT, paths=["x/executors/grep.ts:260"])
+        assert new and a.id != b.id
+        c, _ = lg.record(*self.CRLF, paths=["x/delimiter-balance.ts:479"])
+        d, new = lg.record(*self.CRLF_FALSE, paths=["x/delimiter-balance.ts:479"])
+        assert new and c.id != d.id
+
+    def test_a_restatement_still_matches(self, lg):
+        a, _ = lg.record(*self.LAUNDER, paths=["x/executors/grep.ts:260"])
+        b, new = lg.record(*self.RANKED, paths=["grep.ts:260"])
+        assert not new and a.id == b.id
+
+    def test_the_prefix_comes_from_the_resolved_directory(self, tmp_path, monkeypatch):
+        proj = tmp_path / "cline-sync"
+        proj.mkdir()
+        monkeypatch.chdir(proj)
+        f, _ = Ledger(".").record(*self.CREDIT)
+        assert f.id == "csf-1"
