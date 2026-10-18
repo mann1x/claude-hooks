@@ -205,3 +205,63 @@ class TestNoRunReportCheck:
         from consultants.engine.evidence import no_run_report_check
         msgs = _conv((_call("a", "run_command", command="bun x vitest run a.test.ts"), OK))
         assert no_run_report_check(msgs) is None
+
+
+class TestRun6Coder:
+    """Council run 6 (mail #1646): the coder's tools went at turn 14, it
+    went on calling run_command, every call ran, and it wrote nothing."""
+
+    def test_calls_after_the_strip_are_not_run(self):
+        ran, events = [], []
+        script = [_turn(calls=[_call(f"c{k}", "run_command", command=f"ls {k}")])
+                  for k in range(6)] + [_turn("REPORT")]
+        sent = []
+
+        def chat_fn(payload):
+            sent.append(dict(payload, messages=list(payload["messages"])))
+            return script.pop(0)
+        out = runner.run_loop(
+            {"model": "m", "messages": [{"role": "user", "content": "q"}]}, "/tmp",
+            config=runner.LoopConfig(force_first_tool_call=False, force_answer_after=2,
+                                     max_iterations=20, on_guard=events.append),
+            tool_specs=SPEC, chat_fn=chat_fn,
+            tool_executor=lambda name, args, cwd: ran.append(args) or "ok")
+        assert len(ran) == 2                       # turns 0 and 1 only
+        offs = [e for e in events if e.get("guard") == "tools_off"]
+        assert [e["action"] for e in offs] == ["refuse", "stop"]
+        assert out.get("_stop_reason") == "tools_off"
+        assert "tools" not in sent[-1]
+
+    def test_turn_check_fires_once_on_the_last_tool_result(self):
+        seen = []
+
+        def check(i, msgs):
+            seen.append(i)
+            return "write something" if i >= 2 else None
+        script = [_turn(calls=[_call(f"c{k}", "run_command", command="ls")])
+                  for k in range(4)] + [_turn("REPORT")]
+        sent = []
+
+        def chat_fn(payload):
+            sent.append(dict(payload, messages=[dict(m) for m in payload["messages"]]))
+            return script.pop(0)
+        runner.run_loop(
+            {"model": "m", "messages": [{"role": "user", "content": "q"}]}, "/tmp",
+            config=runner.LoopConfig(force_first_tool_call=False, force_answer_after=0,
+                                     turn_check=check),
+            tool_specs=SPEC, chat_fn=chat_fn, tool_executor=lambda *a: "ok")
+        assert seen == [1, 2]                      # asked until it answered
+        assert sent[2]["messages"][-1]["content"].endswith("write something")
+        assert sum("write something" in (m.get("content") or "")
+                   for m in sent[-1]["messages"]) == 1
+
+    def test_nothing_written(self):
+        chk = tr.nothing_written_check(3)
+        reads = _conv((_call("a", "run_command", command="cat x.ts"), "x"))
+        assert chk(1, reads) is None               # too early
+        assert "write your first test file" in chk(2, reads)
+        wrote = _conv((_call("a", "run_command",
+                             command="cat > /scratch/t.test.ts <<'EOF'\nx\nEOF"), "ok"))
+        assert chk(5, wrote) is None
+        assert chk(5, _conv((_call("b", "write_file", path="a.ts", content="x"),
+                             "wrote"))) is None

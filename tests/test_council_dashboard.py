@@ -452,3 +452,16 @@ def test_the_detail_shows_the_whole_question(tmp_path, monkeypatch):
 def test_the_question_is_a_folded_panel():
     from consultants.server.dashboard_page import PAGE
     assert "fold(`q:" in PAGE and "armFolds(B)" in PAGE and 'class="flap"' in PAGE
+
+
+def test_awaiting_adversary_is_the_wait_window_only():
+    """Run 6 (#1646): released at 16:22, lanes running, the dashboard
+    still said awaiting adversary — it read the /resume guard flag."""
+    s = SimpleNamespace(status="running", progress={}, consultancy_status=None,
+                        _adversary_checkpoint_active=True,
+                        _checkpoint_deadline_ts=None)
+    assert "phase" not in dashboard._live_view(s)
+    s._checkpoint_deadline_ts = 123.0
+    assert dashboard._live_view(s)["phase"] == "awaiting_adversary"
+    assert dashboard._signal_text("adversary_released", None, None, {"reason": "ack"}) == (
+        "adversary checkpoint released (acknowledged)")

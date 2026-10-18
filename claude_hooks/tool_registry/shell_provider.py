@@ -83,7 +83,9 @@ _VIEW_TEXT = {
               "git worktree of the user's current tree, uncommitted changes "
               "included): edit, build, run the tests, even git commit. The "
               "user's files are never changed; what you change is handed back "
-              "as a patch for them to review. Other roots are read-only. "),
+              "as a patch for them to review. Git-ignored entries "
+              "(node_modules, build output) are the user's and stay "
+              "READ-ONLY. Other roots are read-only. "),
     "scoped": ("Only {scopes} {are} YOUR PRIVATE WRITABLE COPY, at the real "
                "path{s}; the rest of the project and the other roots are "
                "READ-ONLY. The user's files are never changed; the files you "
@@ -104,8 +106,10 @@ def _view_text(settings: "ShellSettings") -> str:
 #: (csl-2026-10-18-1120-95ce: vite writes its bundled config beside the
 #: config file, into the read-only tree, and fails EROFS).
 JS_RECIPE = (
-    "vitest / vite in a read-only tree: pass --configLoader runner (no "
-    "temp file beside the config), or copy the config into /scratch and "
+    "vitest / vite: node_modules is read-only here (in a writable copy "
+    "too), and loading a config writes a temp file, which fails EROFS. "
+    "Always pass --configLoader runner (e.g. bun x vitest run "
+    "--configLoader runner <file>), or copy the config into /scratch and "
     "pass --config /scratch/<it> --root <the package dir>. ")
 
 

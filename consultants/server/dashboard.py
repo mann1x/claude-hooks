@@ -52,10 +52,13 @@ def _live_view(s) -> dict:
     out = {"status": getattr(s, "status", None),
            "progress": dict(getattr(s, "progress", {}) or {}),
            "consultancy_status": getattr(s, "consultancy_status", None)}
-    if getattr(s, "_adversary_checkpoint_active", False):
+    # Waiting is the deadline window only. ``_adversary_checkpoint_active``
+    # spans the whole runner-owned stretch (the /resume guard), rewind
+    # included, so run 6 showed "awaiting adversary" with lanes running.
+    deadline = getattr(s, "_checkpoint_deadline_ts", None)
+    if deadline is not None:
         out["phase"] = "awaiting_adversary"
-        out["checkpoint_deadline_ts"] = getattr(
-            s, "_checkpoint_deadline_ts", None)
+        out["checkpoint_deadline_ts"] = deadline
     rc = getattr(s, "run_control", None)
     if rc is not None:
         for k in ("paused", "cancelled", "wrapping_up", "suspended"):
@@ -283,7 +286,8 @@ MESSAGE_MAX_CHARS = 60_000
 PREVIEW_CHARS = 700
 CALL_MESSAGE_MAX_CHARS = 40_000
 #: Runtime events shown as signals between the roles' messages.
-SIGNAL_KINDS = ("inject", "rewind", "awaiting_adversary", "adversary_ack",
+SIGNAL_KINDS = ("inject", "rewind", "awaiting_adversary", "adversary_released",
+                "adversary_ack",
                 "decision", "guard", "truncation", "lane_retry",
                 "lane_escalation", "council_complete", "wrap_up", "cancel",
                 "infra_wait", "pause", "resume", "checkpoint")
@@ -377,6 +381,13 @@ def _signal_text(kind: str, role: Optional[str], lane, body: dict) -> str:
                 + (f", waits up to {int(t) // 60} min" if t else "")
                 + (f" (synthesizer self-confidence {body['self_confidence']})"
                    if body.get("self_confidence") is not None else ""))
+    if kind == "adversary_released":
+        return {"ack": "adversary checkpoint released (acknowledged)",
+                "timeout": "adversary checkpoint closed: no challenge in time",
+                "suspended": "adversary checkpoint closed by an engine shutdown "
+                             "(it reopens on resume)",
+                "closed": "adversary checkpoint closed: the session ended",
+                }.get(body.get("reason"), "adversary checkpoint closed")
     if kind == "decision":
         ans = body.get("answers") or {}
         bits = []

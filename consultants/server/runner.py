@@ -1491,9 +1491,11 @@ def _await_adversary_checkpoint(*, state, final_state, recorder, timeout_s,
     log.info("%s: adversary checkpoint open (sid=%s deadline=%.0f timeout=%ss)",
              log_label, state.sid, deadline, timeout_s)
     acked = False
+    why = "timeout"
     while now_fn() < deadline:
         if state.take_adversary_ack():
             acked = True
+            why = "ack"
             break
         # Break promptly if the session is cancelled / closed (explicit
         # /cancel sets the ack; discard-cancel and the idle reaper set
@@ -1501,11 +1503,13 @@ def _await_adversary_checkpoint(*, state, final_state, recorder, timeout_s,
         # full timeout on a session that's already gone — the park does
         # not bump activity, so a long pause is itself idle-reapable.
         if getattr(state, "closed", False):
+            why = "closed"
             break
         # An engine shutdown ends the park; the resumed run opens the
         # checkpoint again, so the consumer still gets its window.
         rc = getattr(state, "_run_control", None)
         if rc is not None and rc.suspended:
+            why = "suspended"
             break
         remaining = deadline - now_fn()
         if remaining <= 0:
@@ -1513,8 +1517,19 @@ def _await_adversary_checkpoint(*, state, final_state, recorder, timeout_s,
         sleep_fn(min(poll_interval, remaining))
     with state._inject_lock:
         state._checkpoint_deadline_ts = None
-    log.info("%s: adversary checkpoint closed (sid=%s acked=%s)",
-             log_label, state.sid, acked)
+    # Run 6 (mail #1646): the record had the opening and the inject but
+    # not the close, so a reader of the record saw a checkpoint open for
+    # the rest of the run.
+    if recorder is not None and hasattr(recorder, "record_event"):
+        try:
+            recorder.record_event(kind="adversary_released", payload={
+                "sid": state.sid, "kind": "adversary_released",
+                "reason": why, "acked": acked, "ts": time.time()})
+        except Exception:  # pragma: no cover
+            log.exception("record_event(adversary_released) failed sid=%s",
+                          state.sid)
+    log.info("%s: adversary checkpoint closed (sid=%s acked=%s why=%s)",
+             log_label, state.sid, acked, why)
     return acked
 
 

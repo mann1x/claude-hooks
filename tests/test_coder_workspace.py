@@ -29,6 +29,8 @@ def _loop(seen):
         seen["specs"] = [t["function"]["name"] for t in tool_specs]
         seen["system"] = payload["messages"][0]["content"]
         seen["iters"] = config.max_iterations
+        seen["force"] = config.force_answer_after
+        seen["turn_check"] = config.turn_check
         seen["write"] = tool_executor("write_file", json.dumps(
             {"path": "tests/test_x.py", "content": "def test_x():\n    assert 1\n"}), cwd)
         seen["run"] = tool_executor("run_command", json.dumps(

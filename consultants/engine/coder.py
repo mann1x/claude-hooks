@@ -47,6 +47,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from claude_hooks.test_reruns import nothing_written_check
 from consultants.engine.coder_defaults import language_from_path
 from consultants.engine.state_v2 import CoderArtifact, CoderTaskItem
 from consultants.engine.recorder import guard_sink
@@ -716,7 +717,13 @@ def coder_node(state: dict,
             # Write a test, run it, fix it, run it again (runs 3/4 capped at
             # 16; run 5 capped at 40 while still fixing and re-running).
             max_iterations=60 if ws is not None else 12,
-            force_answer_after=14 if ws is not None else 6,
+            # The tools go 6 turns before the cap, as for a researcher;
+            # at 14 the run-6 coder lost them before writing anything.
+            force_answer_after=54 if ws is not None else 6,
+            # Writing is the coder's job: a nudge once, a fifth of the way
+            # in, when it has written nothing (run 6: 60 turns, no test).
+            turn_check=(nothing_written_check(12) if ws is not None
+                        else nothing_written_check(4)),
             tools_available=True,
             think=think,
             # Plan §0.7: strict lanes open with a tool call.

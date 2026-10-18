@@ -160,6 +160,12 @@ class LoopConfig:
     # stand. The caller owns the rule (council run 4: a lane on a shell
     # run whose runs never reached the code). Exceptions are ignored.
     report_check: Optional[Callable[[list], Optional[str]]] = None
+    # Asked before every turn after the first, until it answers once:
+    # given ``(iteration, messages)``, a note to put on the last tool
+    # result, or None. The caller owns the rule (council run 6: a coder
+    # that spent its 60 turns on reconnaissance and wrote no test).
+    # Exceptions are ignored.
+    turn_check: Optional[Callable[[int, list], Optional[str]]] = None
 
 
 #: Plan D13: every message the harness writes into a conversation opens
@@ -490,6 +496,18 @@ CAP_FINAL_REPORT = (
 
 #: Plan D9: the operator asked the run to stop and synthesize what it has
 #: (Cerebriline ``wrapUpNote``). Unlike the cap, nothing went wrong.
+#: A call made after the tools were taken away is answered with this, not
+#: run (council run 6: a coder whose tools were stripped at turn 14 went
+#: on calling run_command, and every call ran, to the cap).
+TOOLS_OFF_ANSWER = (
+    "Not run: your tools are off now. Write your answer from what you "
+    "already have — what you found, with its evidence, and what is still "
+    "open.")
+TOOLS_OFF_FINAL = (
+    "[SYSTEM MESSAGE] Your tools are off and calls are not run. Do not "
+    "call any tool. In this one reply, report what you found, with its "
+    "evidence, what you verified, and what is still open.")
+
 WRAP_UP_FINAL = (
     "[SYSTEM MESSAGE] The operator is wrapping this run up: the answer is "
     "being written from the work done so far. Do not call any tool. In this "
@@ -1008,6 +1026,8 @@ def run_loop(
     silent = _SilentTurns(strict=strict)
     tests_nudged = False
     report_checked = False
+    turn_checked = False
+    tools_off_turns = 0
 
     if config.tools_available and preseed_builder is not None:
         preseed = preseed_builder(cwd)
@@ -1068,6 +1088,23 @@ def run_loop(
             _emit_guard(config, {"guard": "iteration_cap", "action": "warn",
                                  "iteration": i,
                                  "cap": config.max_iterations})
+        if (config.turn_check is not None and not turn_checked and i > 0
+                and config.tools_available and not tools_stripped):
+            try:
+                note = config.turn_check(i, payload.get("messages") or [])
+            except Exception:  # noqa: BLE001 — the caller's rule
+                log.exception("turn_check raised; ignored")
+                note = None
+            if note:
+                turn_checked = True
+                last = (payload.get("messages") or [None])[-1]
+                if isinstance(last, dict) and last.get("role") == "tool":
+                    last["content"] = f"{last.get('content') or ''}\n\n{note}"
+                else:
+                    payload["messages"] = list(payload["messages"]) + [
+                        harness_note(note)]
+                _emit_guard(config, {"guard": "turn_check", "action": "nudge",
+                                     "iteration": i})
         if config.tools_available and not tools_stripped:
             if force_first and not has_called_tool:
                 payload["tool_choice"] = "required"
@@ -1333,6 +1370,22 @@ def run_loop(
                 clean_msg, getattr(config, "reasoning_replay", "none"))
         payload["messages"] = list(payload["messages"]) + [clean_msg]
         runnable = [tc for tc in tool_calls if tc not in results_called]
+        if tools_stripped and runnable:
+            tools_off_turns += 1
+            _emit_guard(config, {"guard": "tools_off", "iteration": i,
+                                 "action": ("stop" if tools_off_turns >= 2
+                                            else "refuse"),
+                                 "calls": len(runnable)})
+            payload["messages"].extend(
+                {"role": "tool", "tool_call_id": tc.get("id") or "",
+                 "name": (tc.get("function") or {}).get("name") or "",
+                 "content": TOOLS_OFF_ANSWER} for tc in tool_calls)
+            if tools_off_turns >= 2:
+                payload, final = _forced_report(
+                    payload, payload["messages"], TOOLS_OFF_FINAL,
+                    "tools_off", chat_fn, config, on_iter, i)
+                break
+            continue
         guards.iteration = i
         batch = execute_tool_calls(
             runnable, cwd, seen_calls, tool_executor,

@@ -181,10 +181,55 @@ def unrun_tests(messages: list[dict]) -> dict[str, str]:
                     for c in order)
 
 
+NOTHING_WRITTEN = (
+    "[SYSTEM MESSAGE] {turn} turns in, you have written nothing. Writing is "
+    "your job: write your first test file now, with what you already know, "
+    "and run it. If the toolchain does not start, read the run_command "
+    "description (vitest needs --configLoader runner here) instead of "
+    "working around it.")
+
+
+def wrote_anything(messages: list[dict]) -> bool:
+    """Whether a conversation has a ``write_file`` call, or a shell command
+    that writes a file (``cat > …``, ``tee``, ``cp`` / ``mv`` into place)."""
+    for m in messages or []:
+        if m.get("role") != "assistant":
+            continue
+        for tc in m.get("tool_calls") or []:
+            name = (tc.get("function") or {}).get("name") or ""
+            if name == "write_file":
+                return True
+            if name == "run_command":
+                cmd = _command(_args(tc))
+                if _WRITE_TARGET.search(cmd) or _copied_any(cmd):
+                    return True
+    return False
+
+
+def _copied_any(command: str) -> bool:
+    for seg in _SEGMENT.split(command or ""):
+        words = seg.split()
+        if words and words[0] in ("cp", "mv", "install") and len(
+                [w for w in words[1:] if not w.startswith("-")]) >= 2:
+            return True
+    return False
+
+
+def nothing_written_check(at: int):
+    """A ``LoopConfig.turn_check`` for a role whose job is writing (the
+    coder): from turn ``at`` on, a note when it has written nothing."""
+    def check(iteration: int, messages: list) -> "str | None":
+        if iteration + 1 < at or wrote_anything(messages):
+            return None
+        return NOTHING_WRITTEN.format(turn=iteration)
+    return check
+
+
 def nudge(found: dict[str, str]) -> str:
     return NUDGE.format(files="\n".join(f"- `{p}`: {why}"
                                         for p, why in sorted(found.items())))
 
 
 __all__ = ["TEST_FILE", "TEST_LIKE", "TEST_FAILED", "classify", "unrun_tests",
-           "nudge", "exit_of", "run_result", "written_by", "NUDGE"]
+           "nudge", "exit_of", "run_result", "written_by", "NUDGE",
+           "wrote_anything", "nothing_written_check", "NOTHING_WRITTEN"]

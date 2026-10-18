@@ -120,7 +120,7 @@ ol.kvl{margin:4px 0;padding-left:20px}
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const LIVE=["running","paused","awaiting_tool","awaiting_adversary","suspended","queued"];
-const ICON={inject:"↪",rewind:"⟲",awaiting_adversary:"⚑",adversary_ack:"✔",decision:"◆",guard:"⚠",truncation:"✂",
+const ICON={inject:"↪",rewind:"⟲",awaiting_adversary:"⚑",adversary_released:"⚐",adversary_ack:"✔",decision:"◆",guard:"⚠",truncation:"✂",
   lane_retry:"↻",lane_escalation:"⇧",council_complete:"✓",wrap_up:"⏹",cancel:"✕",infra_wait:"⏳",pause:"⏸",resume:"▶",checkpoint:"●"};
 let sel=null,tab="overview",es=null,lastId=0,listTimer=null,detTimer=null,flowKey=null,openState={},D=null,FLOW=[];
 let callAtLoad=null;
@@ -271,7 +271,7 @@ async function loadDetail(){
   flowKey=null;renderTab();
   if(es){es.close();es=null}
   if(LIVE.includes(status)&&window.EventSource){es=new EventSource("/v1/consult/"+encodeURIComponent(sel)+"/events");
-    es.onmessage=onEv;["node_enter","node_exit","inject","rewind","guard","awaiting_adversary","council_complete","lane_retry","truncation"].forEach(k=>es.addEventListener(k,onEv));
+    es.onmessage=onEv;["node_enter","node_exit","inject","rewind","guard","awaiting_adversary","adversary_released","council_complete","lane_retry","truncation"].forEach(k=>es.addEventListener(k,onEv));
     es.onerror=()=>{es&&es.close();es=null}}
 }
 function setTab(t){tab=t;setHash();document.querySelectorAll(".tabs button").forEach(b=>b.classList.toggle("on",b.dataset.tab===t));flowKey=null;renderTab()}
@@ -353,7 +353,7 @@ function closeDrawer(){$("#drawer").classList.remove("on")}
 $("#drawer").onclick=e=>{if(e.target.id==="drawer")closeDrawer()};document.addEventListener("keydown",e=>{if(e.key==="Escape")closeDrawer()});
 function onEv(ev){const id=+ev.lastEventId||0;if(id&&id<=lastId)return;lastId=id||lastId;let data={};try{data=JSON.parse(ev.data)}catch(_){}
   if(tab==="timeline"){const tl=$("#tl");if(tl)tl.insertAdjacentHTML("beforeend",evLine({ts:Date.now()/1000,kind:ev.type==="message"?(data.kind||"event"):ev.type,role:data.role,round:data.round,lane_idx:data.lane_idx,data}))}
-  if(tab==="messages"&&["node_exit","inject","rewind","awaiting_adversary","council_complete"].includes(ev.type))setTimeout(loadFlow,600);
+  if(tab==="messages"&&["node_exit","inject","rewind","awaiting_adversary","adversary_released","council_complete"].includes(ev.type))setTimeout(loadFlow,600);
   if(ev.type==="council_complete")setTimeout(loadDetail,1000)}
 function schedule(){clearInterval(listTimer);clearInterval(detTimer);if(!$("#auto").checked)return;
   listTimer=setInterval(loadList,5000);

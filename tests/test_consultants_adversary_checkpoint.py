@@ -104,7 +104,9 @@ class TestAwaitAdversaryCheckpoint(unittest.TestCase):
         # deadline cleared on exit
         self.assertIsNone(s._checkpoint_deadline_ts)
         # event recorded with a deadline + self-confidence from M0 channel
-        self.assertEqual(rec.kinds(), ["awaiting_adversary"])
+        # run 6 (#1646): the close is recorded, with why
+        self.assertEqual(rec.kinds(), ["awaiting_adversary", "adversary_released"])
+        self.assertEqual(rec.events[1]["payload"]["reason"], "ack")
         payload = rec.events[0]["payload"]
         self.assertEqual(payload["deadline_ts"], 1000.0 + 600.0)
         self.assertEqual(payload["self_confidence"], 0.4)
@@ -130,6 +132,8 @@ class TestAwaitAdversaryCheckpoint(unittest.TestCase):
         self.assertIsNone(s._checkpoint_deadline_ts)
         # clock advanced to or past the deadline
         self.assertGreaterEqual(clock[0], 1002.0)
+        self.assertEqual(rec.events[-1]["kind"], "adversary_released")
+        self.assertEqual(rec.events[-1]["payload"]["reason"], "timeout")
 
     def test_deadline_ts_visible_while_parked(self):
         s = _session()
