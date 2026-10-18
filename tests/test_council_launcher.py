@@ -272,6 +272,8 @@ class TestChain:
         pre = LauncherBackend("/x").preflight(refresh=True)
         assert not pre.ok and pre.missing[0] == "launcher"
         assert "sha256 bad" in pre.reason()
+        # it names itself, not the bwrap chain it inherits from
+        assert pre.backend == "launcher" and pre.reason().startswith("launcher:")
 
     def test_its_setup_failure_is_not_the_commands_exit(self, tmp_path):
         if not sys.platform.startswith("linux"):

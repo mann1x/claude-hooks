@@ -293,7 +293,7 @@ class BwrapBackend:
         required = list(self.required) + (["uid"] if is_root() else [])
         missing = [k for k in required if layers.get(k) != "ok"]
         missing += [k for k in layers if k.startswith("tool:")]
-        return Preflight(backend=NAME, ok=not missing, layers=layers,
+        return Preflight(backend=self.name, ok=not missing, layers=layers,
                          missing=missing)
 
     def _smoke(self, spec: RunSpec, *, scope: bool) -> str:
