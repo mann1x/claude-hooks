@@ -1,6 +1,6 @@
 # Council memory and a critic that can check
 
-Status: M1, M2 and M3 done (2026-10-18); M4 next. Owner decisions are marked **(decided)**.
+Status: M1–M4 done (2026-10-18); M5 next. Owner decisions are marked **(decided)**.
 
 ## Why
 
@@ -190,6 +190,17 @@ backend, policy gate and session store mask as the lanes:
 run commands becomes explicit (`SHELL_ROLES` = researcher,
 tool_executor, coder, critic), and the synthesizer and planner stay
 without.
+
+Built: `SHELL_ROLES` and `JUDGE_SHELL_ROLES` (critic, meta_critic) in
+`consultants/engine/graph.py`. On a shell run `_tools_for(deps, role,
+lane)` gives a judge every tool, the shell bound to `critic:<lane_idx>`
+(`meta_critic:0`), whether or not `[tools] all_roles` is on, so each
+judge has its own view (`critic-0`, held and applied like a lane's). Its
+loop is `judge_iters()` = the role caps 4/3 plus a lane's shell bonus
+(14/13), and `JUDGE_SHELL_NOTE` tells it to run the check itself before
+sending anyone back. Its runs are `tool_call` rows with role `critic`,
+so they get C<n> ids and count for the evidence hold. The meta-critic
+gets the same, since at x-tiers it is the judge that holds `ready`.
 
 ## M5 — cross-examination
 

@@ -1949,6 +1949,30 @@ ROLE_TOOL_MAX_CALLS_PER_TURN = 4
 ROLE_TOOL_FORCE_ANSWER_AFTER = 3
 
 
+def judge_iters(tool_specs) -> tuple[int, int]:
+    """``(max_iterations, force_answer_after)`` for a critic or
+    meta-critic: the role caps, plus a lane's shell bonus
+    (``max(10, iters // 2)``) when it holds the shell (plan
+    council-memory M4: writing and running a check takes turns)."""
+    if not _offers_shell(tool_specs):
+        return ROLE_TOOL_MAX_ITERATIONS, ROLE_TOOL_FORCE_ANSWER_AFTER
+    bonus = max(10, ROLE_TOOL_MAX_ITERATIONS // 2)
+    return (ROLE_TOOL_MAX_ITERATIONS + bonus,
+            ROLE_TOOL_FORCE_ANSWER_AFTER + bonus)
+
+
+#: Plan council-memory M4: what a judge with the shell is told.
+JUDGE_SHELL_NOTE = (
+    "YOU CAN RUN COMMANDS: run_command runs in a sandboxed view of your "
+    "own (nothing you write reaches a lane or the user's tree). When you "
+    "doubt a claim and one run would settle it, run it yourself before "
+    "sending the council back: a test, a probe, the reproduction the "
+    "report names. Say in your critique what you ran and what it printed. "
+    "Your runs are recorded with the lanes' and count as evidence; a "
+    "doubt you could have settled with one run is not a reason for "
+    "another round.")
+
+
 # ---------------------------------------------------------------------- #
 # The tool addendum — why wiring alone was not enough
 # ---------------------------------------------------------------------- #
@@ -2183,9 +2207,12 @@ def _role_turn(chat_client, model: str, messages: list[dict],
                loop_runner=None,
                result: Optional[str] = None,
                knobs: Optional["budget.Knobs"] = None,
-               sampling: Optional[dict] = None
+               sampling: Optional[dict] = None,
+               iters: Optional[tuple[int, int]] = None
                ) -> tuple[str, int, int]:
     """One role turn, returning ``(text, prompt_tokens, completion_tokens)``.
+    ``iters`` overrides the tool loop's ``(max_iterations,
+    force_answer_after)`` (a judge with the shell, :func:`judge_iters`).
 
     ``result`` (typed protocol, plan G): the role's result tool. Its
     record ends the turn and comes back rendered as the role's prose;
@@ -2271,9 +2298,9 @@ def _role_turn(chat_client, model: str, messages: list[dict],
                                            lane_idx=lane_idx)
         cfg = LoopConfig(
             **result_kw,
-            max_iterations=ROLE_TOOL_MAX_ITERATIONS,
+            max_iterations=(iters or (ROLE_TOOL_MAX_ITERATIONS,))[0],
             max_tool_calls_per_turn=ROLE_TOOL_MAX_CALLS_PER_TURN,
-            force_answer_after=ROLE_TOOL_FORCE_ANSWER_AFTER,
+            force_answer_after=(iters or (0, ROLE_TOOL_FORCE_ANSWER_AFTER))[1],
             tools_available=True,
             think=think,
             # These roles are handed a full brief and must be free to
@@ -3487,6 +3514,15 @@ def _with_cited_comments(msgs: list[dict], state: dict, reports, *, cwd: str,
         max(16_000, int(w * COMMENTS_WINDOW_SHARE * budget.CHARS_PER_TOKEN)))
 
 
+def _with_judge_shell_note(msgs: list[dict], tool_specs) -> list[dict]:
+    """Plan council-memory M4: a judge holding the shell is told to use
+    it before it sends anyone back. Unchanged without the shell."""
+    if not _offers_shell(tool_specs) or not msgs or msgs[-1].get("role") != "user":
+        return msgs
+    return msgs[:-1] + [{**msgs[-1], "content": (
+        str(msgs[-1].get("content") or "") + "\n\n" + JUDGE_SHELL_NOTE)}]
+
+
 def _with_command_ledger(msgs: list[dict], recorder, *, chat_client=None,
                          model: str = "", state=None,
                          role: str = "critic") -> list[dict]:
@@ -3551,6 +3587,7 @@ def critic_node(state: dict, *, chat_client, model: str,
     msgs = _with_cited_comments(msgs, state, _reports, cwd=cwd,
                                 chat_client=chat_client, model=model,
                                 role="critic")
+    msgs = _with_judge_shell_note(msgs, tool_specs)
     if shell:
         msgs = _with_command_ledger(msgs, recorder, chat_client=chat_client,
                                     model=model, state=state, role="critic")
@@ -3564,6 +3601,7 @@ def critic_node(state: dict, *, chat_client, model: str,
             tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
             result=_typed_result_name(state, "critic"),
             knobs=_budget_knobs(state, "critic", model),
+            iters=judge_iters(tool_specs),
             sampling=_instance_sampling(state, "critic", model, chat_client),
         )
     except Exception as e:
@@ -3719,6 +3757,7 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
     msgs = _with_cited_comments(msgs, state, state.get("research") or [],
                                 cwd=cwd, chat_client=chat_client, model=model,
                                 role="meta_critic")
+    msgs = _with_judge_shell_note(msgs, tool_specs)
     if shell:
         msgs = _with_command_ledger(msgs, recorder, chat_client=chat_client,
                                     model=model, state=state,
@@ -3732,6 +3771,7 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
             tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
             result=_typed_result_name(state, "meta_critic"),
             knobs=_budget_knobs(state, "meta_critic", model),
+            iters=judge_iters(tool_specs),
             sampling=_instance_sampling(state, "meta_critic", model, chat_client),
         )
     except Exception as e:

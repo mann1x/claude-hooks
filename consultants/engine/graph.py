@@ -237,16 +237,27 @@ TOOLABLE_ROLES: tuple[str, ...] = (
 )
 
 
-def _tools_for(deps: "GraphDeps", role: str) -> dict:
+def _tools_for(deps: "GraphDeps", role: str, lane: Optional[str] = None) -> dict:
     """Kwargs handing ``role`` its tools, or an empty dict.
 
     Returning ``{}`` rather than ``tool_specs=None`` matters: the node
     signatures default these to None, so an ungated role is called with
     exactly the argument list it had before M-B.
+
+    Plan council-memory M4: on a shell run a judging role (``critic``,
+    ``meta_critic``) gets every tool, the shell included, bound to its
+    own ``lane`` (its own view), whether or not ``[tools] all_roles``
+    is on: if the lanes can run commands, the critic can check a doubt.
     """
-    if role not in (deps.tooled_roles or ()):
-        return {}
     if not deps.tool_specs or deps.tool_executor is None:
+        return {}
+    if role in JUDGE_SHELL_ROLES and lane and any(
+            (s.get("function") or {}).get("name") in LANE_ONLY_TOOLS
+            for s in deps.tool_specs):
+        return {"tool_specs": deps.tool_specs,
+                "tool_executor": bind_lane(deps.tool_executor, lane, deps.sid),
+                "cwd": deps.cwd}
+    if role not in (deps.tooled_roles or ()):
         return {}
     specs = [s for s in deps.tool_specs
              if (s.get("function") or {}).get("name") not in LANE_ONLY_TOOLS]
@@ -259,9 +270,14 @@ def _tools_for(deps: "GraphDeps", role: str) -> dict:
             "cwd": deps.cwd}
 
 
-#: Tools only the researcher and tool_executor lanes get (plan E5): the
-#: shell's state lives in a lane's view, and these roles have no lane.
+#: The shell's tools (plan E5): its state lives in a lane's view, so only
+#: a role bound to a lane gets them.
 LANE_ONLY_TOOLS = frozenset({"run_command"})
+#: Roles that may run commands (plan council-memory M4). The lanes, and
+#: the judges, each in a view of its own; the planner and the
+#: synthesizer stay without.
+JUDGE_SHELL_ROLES = frozenset({"critic", "meta_critic"})
+SHELL_ROLES = frozenset({"researcher", "tool_executor", "coder"}) | JUDGE_SHELL_ROLES
 
 
 def _without_lane_tools(executor: Callable[..., str], role: str):
@@ -269,8 +285,8 @@ def _without_lane_tools(executor: Callable[..., str], role: str):
     not offered the shell does not get it by naming it anyway."""
     def run(name: str, raw_args: str, cwd: str, **kw: Any) -> str:
         if name in LANE_ONLY_TOOLS:
-            return (f"error: {name} is not offered to the {role}; only the "
-                    "research lanes have the shell")
+            return (f"error: {name} is not offered to the {role}; only "
+                    f"{', '.join(sorted(SHELL_ROLES))} have the shell")
         return executor(name, raw_args, cwd, **kw)
     return run
 
@@ -737,7 +753,8 @@ def _wrap_critic(deps: GraphDeps):
             model=deps.models["critic"],
             think=_think_for(deps, "critic"),
             recorder=deps.recorder,
-            **_tools_for(deps, "critic"),
+            **_tools_for(deps, "critic",
+                         f"critic:{state.get('lane_idx') or 0}"),
             **_shell_kw(deps),
         )
     return _node
@@ -996,7 +1013,7 @@ def _wrap_meta_critic(deps: GraphDeps):
             model=deps.models["critic"],
             think=_think_for(deps, "critic"),
             recorder=deps.recorder,
-            **_tools_for(deps, "meta_critic"),
+            **_tools_for(deps, "meta_critic", "meta_critic:0"),
             **_shell_kw(deps),
         )
     return _node

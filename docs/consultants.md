@@ -1884,9 +1884,12 @@ not survive measurement.
 ### The sandboxed shell (`--shell`, plan E)
 
 A council can only read unless a run asks for the shell. With `--shell`
-(on `consult` or `follow-up`) the researcher and tool_executor lanes get
-`run_command`; the planner, critics, synthesizer and adversary never do,
-since a shell's state belongs to a lane.
+(on `consult` or `follow-up`) the researcher, tool_executor and coder
+lanes get `run_command`, and so do the critic and meta-critic, each
+bound to a lane of its own (`critic:<n>`, `meta_critic:0`) with a lane's
+extra turns (14 / 13), so a judge can run the check itself instead of
+sending a lane back for it. The planner, synthesizer and adversary never
+do, since a shell's state belongs to a lane.
 
 ```bash
 claude-consultants consult --message "do the tests in tests/test_x.py pass on dev?" \
