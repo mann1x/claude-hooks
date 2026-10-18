@@ -124,6 +124,15 @@ class CouncilState(TypedDict, total=False):
     # Plan D9: the xauto automatic lane retry — 0 not yet decided,
     # 1 retrying, 2 done. Written only by the ``lane_retry`` node.
     lane_retry: int
+    # Plan council-memory M5: ``research_lanes[i]`` is ``{"lane": idx}``
+    # of the lane that wrote ``research[i]`` (filled beside it by the
+    # researcher wrapper); ``cross_exam`` one entry per examined lane;
+    # ``cross_exam_round`` the last round examined (ruling node only).
+    research_lanes: Annotated[list, operator.add]
+    cross_exam: Annotated[list, operator.add]
+    cross_exam_round: int
+    # Send-injected: the one lane a cross_examine node answers for.
+    cross_exam_item: Optional[dict]
     # Send-injected, per-lane fields. Set on a researcher invocation
     # spawned by the fan-out conditional edge after planner; absent
     # on the single-researcher path used by critic re-routes.
@@ -424,6 +433,9 @@ class GraphDeps:
     # once, before the critic. The runner sets it for xauto runs only
     # (``[runtime] xauto_retry_infra_lanes``); off, the node is not wired.
     xauto_lane_retry: bool = False
+    # Plan council-memory M5: ``[critic] cross_examination``. Off: the
+    # graph is unchanged.
+    cross_examination: bool = False
     # Per-lane model escalation (plan D): a first-round lane a guard ended,
     # or one that failed on its task, reruns once on this model with a
     # brief of the attempt, at most ``escalation_max`` lanes. Empty: off,
@@ -723,7 +735,7 @@ def _wrap_researcher(deps: GraphDeps):
     tool_exec_on = "tool_executor" in deps.enabled_roles
 
     def _node(state: dict) -> dict:
-        return council.researcher_node(
+        return _with_lane_tags(state, council.researcher_node(
             state,
             chat_client=deps.chat_clients["researcher"],
             # The shared executor, told which lane is calling (read
@@ -741,8 +753,83 @@ def _wrap_researcher(deps: GraphDeps):
             store=deps.store,
             sid=deps.sid,
             **_wrap_up_kw(deps),
-        )
+        ))
     return _node
+
+
+def _with_lane_tags(state: dict, out: dict) -> dict:
+    """``out`` with one ``research_lanes`` entry per report it adds, so
+    report N can be traced to the lane that wrote it (plan
+    council-memory M5)."""
+    reports = out.get("research") if isinstance(out, dict) else None
+    if not reports:
+        return out
+    return {**out, "research_lanes": [{"lane": state.get("lane_idx")}
+                                      for _ in reports]}
+
+
+def _wrap_cross_examine(deps: GraphDeps):
+    """Plan council-memory M5: a challenged lane answers in its own
+    conversation, with its own tools and view."""
+    from consultants.engine import cross_exam
+
+    def _node(state: dict) -> dict:
+        lane = (state.get("cross_exam_item") or {}).get("lane")
+        return cross_exam.examine_node(
+            state, chat_client=deps.chat_clients["researcher"],
+            recorder=deps.recorder,
+            tool_specs=deps.tool_specs,
+            tool_executor=bind_lane(deps.tool_executor,
+                                    researcher_lane_id({"lane_idx": lane}),
+                                    deps.sid),
+            cwd=deps.cwd, think=_think_for(deps, "researcher"))
+    return _node
+
+
+def _wrap_cross_exam_ruling(deps: GraphDeps):
+    from consultants.engine import cross_exam
+
+    def _node(state: dict) -> dict:
+        return cross_exam.ruling_node(
+            state, chat_client=deps.chat_clients["critic"],
+            model=deps.models["critic"], recorder=deps.recorder,
+            think=_think_for(deps, "critic"), **_shell_kw(deps))
+    return _node
+
+
+def _route_to_cross_exam(deps: GraphDeps, route: Callable) -> Callable:
+    """``route``, except that a critic's challenges go to the challenged
+    lanes first (one ``Send`` each) when cross-examination is on."""
+    from consultants.engine import cross_exam
+    from consultants.engine.control import runtime_deadline_passed
+
+    def _routed(state: dict):
+        from langgraph.types import Send
+        if not _stopping(deps) and not runtime_deadline_passed(state):
+            exams = cross_exam.plan(state)
+            if exams:
+                rnd = max(int(state.get("research_rounds_used") or 0), 1)
+                return [Send(CROSS_EXAM_NODE, {
+                    "question": state.get("question"),
+                    "cwd": state.get("cwd"),
+                    "extra_roots": list(state.get("extra_roots") or []),
+                    "runtime_control": dict(state.get("runtime_control") or {}),
+                    "additional_context": list(state.get("additional_context") or []),
+                    "effort": state.get("effort"),
+                    "models": state.get("models", {}),
+                    "topology": state.get("topology"),
+                    "research_rounds_used": rnd,
+                    "cross_exam_item": {**e, "round": rnd},
+                    "turns": [], "total_prompt_tokens": 0,
+                    "total_completion_tokens": 0,
+                }) for e in exams]
+        return route(state)
+    _routed.__name__ = getattr(route, "__name__", "route_after_critic")
+    return _routed
+
+
+CROSS_EXAM_NODE = "cross_examine"
+CROSS_EXAM_RULING_NODE = "cross_exam_ruling"
 
 
 def _wrap_critic(deps: GraphDeps):
@@ -1904,14 +1991,23 @@ def build_council_graph(deps: GraphDeps,
         else:
             conditional_source = decider
         if "researcher" in enabled:
-            sg.add_conditional_edges(
-                conditional_source,
-                _route_unless_wrapping(deps, council.route_after_critic),
-                {
-                    council.ROUTE_RESEARCHER: "researcher",
-                    council.ROUTE_SYNTHESIZER: synthesizer_target,
-                },
-            )
+            critic_route = _route_unless_wrapping(deps, council.route_after_critic)
+            routes = {council.ROUTE_RESEARCHER: "researcher",
+                      council.ROUTE_SYNTHESIZER: synthesizer_target}
+            if deps.cross_examination:
+                # Plan council-memory M5: challenged lanes answer in
+                # parallel, the critic rules, then the critic's route.
+                sg.add_node(CROSS_EXAM_NODE,
+                            _wrap(CROSS_EXAM_NODE, _wrap_cross_examine(deps)))
+                sg.add_node(CROSS_EXAM_RULING_NODE,
+                            _wrap(CROSS_EXAM_RULING_NODE,
+                                  _wrap_cross_exam_ruling(deps)))
+                sg.add_edge(CROSS_EXAM_NODE, CROSS_EXAM_RULING_NODE)
+                sg.add_conditional_edges(CROSS_EXAM_RULING_NODE, critic_route,
+                                         dict(routes))
+                critic_route = _route_to_cross_exam(deps, critic_route)
+                routes[CROSS_EXAM_NODE] = CROSS_EXAM_NODE
+            sg.add_conditional_edges(conditional_source, critic_route, routes)
         else:
             # No researcher to loop back to; the critic-side is
             # effectively advisory — straight to synthesizer (or

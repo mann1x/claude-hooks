@@ -1527,6 +1527,12 @@ def cmd_config_set_escalation(args, base: str) -> int:
     return _emit_config(cfg, args)
 
 
+def cmd_config_set_cross_examination(args, base: str) -> int:
+    cfg = cc.set_cross_examination(enabled=args.state == "on",
+                                   **_resolve_active_scope(args))
+    return _emit_config(cfg, args)
+
+
 def cmd_config_set_xauto_retry(args, base: str) -> int:
     cfg = cc.set_xauto_retry(enabled=args.state == "on",
                              **_resolve_active_scope(args))
@@ -3254,6 +3260,17 @@ def build_parser() -> argparse.ArgumentParser:
     cxr.add_argument("state", choices=["on", "off"])
     _add_scope_args(cxr)
     cxr.set_defaults(fn=cmd_config_set_xauto_retry)
+
+    ccx = cfg_sub.add_parser(
+        "set-cross-examination",
+        help="Plan council-memory M5: a critic not convinced challenges "
+             "the claims it doubts (CHALLENGE report=N); each challenged "
+             "lane resumes its own conversation and answers with a run or "
+             "a concession, then the critic rules (upheld / withdrawn / "
+             "open; open falls back to the reroute). Default off.")
+    ccx.add_argument("state", choices=["on", "off"])
+    _add_scope_args(ccx)
+    ccx.set_defaults(fn=cmd_config_set_cross_examination)
 
     cde = cfg_sub.add_parser(
         "set-decision",

@@ -420,7 +420,7 @@ def _safe_emit(emit: Callable[[str, dict], None], kind: str,
 #: tool lanes, code) or another review round. The synthesizer always runs.
 WRAP_UP_SKIPPED_ROLES = frozenset({
     "planner", "critic", "meta_critic", "xauto_escalator", "adversary",
-    "tool_executor", "coder"})
+    "tool_executor", "coder", "cross_examine", "cross_exam_ruling"})
 
 
 def wrap_up_skips(role: str, state: Any) -> bool:

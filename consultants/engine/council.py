@@ -811,8 +811,13 @@ def build_researcher_messages(question: str, plan: str,
                               grounding_msgs: list[dict],
                               *,
                               additional_context=None,
-                              peer_findings: Optional[str] = None) -> list[dict]:
+                              peer_findings: Optional[str] = None,
+                              critique: Optional[str] = None) -> list[dict]:
     """Researcher's conversation seed.
+
+    ``critique``: on a critic reroute (``prior_rounds`` set), the
+    verdict that sent the round back — until 2026-10-18 the researcher
+    was told to "address the gaps" without being shown them.
 
     Grounding (anchor files + structure map + addendum) goes first, so
     it sits at the start of context regardless of multi-round growth.
@@ -840,6 +845,9 @@ def build_researcher_messages(question: str, plan: str,
         user_parts.append(
             f"\nYOUR PRIOR REPORT (round {i}):\n{rep.strip()}"
         )
+    if prior_rounds and critique and critique.strip():
+        user_parts.append(
+            f"\nTHE CRITIC'S VERDICT ON THE ROUNDS ABOVE:\n{critique.strip()}")
     if prior_rounds:
         user_parts.append(
             "\nThe critic asked for MORE research. Address the gaps "
@@ -2870,6 +2878,7 @@ def researcher_node(state: dict, *,
                 grounding_msgs,
                 additional_context=extra_ctx_res,
                 peer_findings=peer_findings_block,
+                critique=state.get("critique"),
             )
     # ---------- M6: tool_executor branch ----------------------- #
     # When the tool_executor role is in the enabled set, the
@@ -2967,6 +2976,7 @@ def researcher_node(state: dict, *,
                     grounding_msgs,
                     additional_context=extra_ctx_res_local,
                     peer_findings=None,
+                    critique=state.get("critique"),
                 )
         # Append the mode-specific appendix to the user message.
         # Both append to msgs[-1] (the v1 user message) so the
@@ -3523,6 +3533,18 @@ def _with_judge_shell_note(msgs: list[dict], tool_specs) -> list[dict]:
         str(msgs[-1].get("content") or "") + "\n\n" + JUDGE_SHELL_NOTE)}]
 
 
+def _with_cross_exam_note(msgs: list[dict], state) -> list[dict]:
+    """Plan council-memory M5: with cross-examination on, the judge is
+    told how to challenge a claim. Unchanged when it is off."""
+    rc = (state or {}).get("runtime_control") or {}
+    if not rc.get("cross_examination") or not msgs \
+            or msgs[-1].get("role") != "user":
+        return msgs
+    from consultants.engine.cross_exam import CRITIC_NOTE
+    return msgs[:-1] + [{**msgs[-1], "content": (
+        str(msgs[-1].get("content") or "") + "\n\n" + CRITIC_NOTE)}]
+
+
 def _with_command_ledger(msgs: list[dict], recorder, *, chat_client=None,
                          model: str = "", state=None,
                          role: str = "critic") -> list[dict]:
@@ -3588,6 +3610,7 @@ def critic_node(state: dict, *, chat_client, model: str,
                                 chat_client=chat_client, model=model,
                                 role="critic")
     msgs = _with_judge_shell_note(msgs, tool_specs)
+    msgs = _with_cross_exam_note(msgs, state)
     if shell:
         msgs = _with_command_ledger(msgs, recorder, chat_client=chat_client,
                                     model=model, state=state, role="critic")
@@ -3758,6 +3781,7 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
                                 cwd=cwd, chat_client=chat_client, model=model,
                                 role="meta_critic")
     msgs = _with_judge_shell_note(msgs, tool_specs)
+    msgs = _with_cross_exam_note(msgs, state)
     if shell:
         msgs = _with_command_ledger(msgs, recorder, chat_client=chat_client,
                                     model=model, state=state,

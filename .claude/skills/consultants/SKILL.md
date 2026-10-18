@@ -969,13 +969,20 @@ and **More…** opens the next batch (ending with **Done**):
     on|off` (default on). An xauto run reruns, once and before the
     critic, the first-round lanes that failed on infrastructure. Other
     tiers never do; after any run, `retry-lanes <sid>` does it by hand.
-16. **Lane escalation** — `claude-consultants config set-escalation
+16. **Cross-examination** — `claude-consultants config
+    set-cross-examination on|off` (default off). A critic not convinced
+    challenges the claims it doubts (`CHALLENGE report=N: … Settle with:
+    …`); each challenged lane resumes its own conversation and answers
+    with a run or a concession, then the critic rules on each (upheld /
+    withdrawn / open). An open challenge falls back to the usual
+    reroute. Experimental until a graded run shows it pays.
+17. **Lane escalation** — `claude-consultants config set-escalation
     --model <expert> [--max N]` (`--model ''` = off, the default). A
     first-round lane a guard ended (struggle, loop guard, mistake limit,
     reasoning loop) or that failed on its task reruns once on the expert
     model, given a brief of the failed attempt; at most N (default 2) per
     council. Ask which model; never pick one for the user.
-17. **Shell** — `claude-consultants config set-shell --default
+18. **Shell** — `claude-consultants config set-shell --default
     off|always` (default off: only runs started with `--shell` get it),
     plus limits (`--timeout`, `--max-timeout`, `--memory-mib`, `--pids`,
     `--cpu-pct`, `--lane-disk-gib`) and `--ro-bind <dir>` for a

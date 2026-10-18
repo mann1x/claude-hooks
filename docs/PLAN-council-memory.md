@@ -1,6 +1,6 @@
 # Council memory and a critic that can check
 
-Status: M1–M4 done (2026-10-18); M5 next. Owner decisions are marked **(decided)**.
+Status: M1–M5 built (2026-10-18); M5 off by default until a graded run. Owner decisions are marked **(decided)**.
 
 ## Why
 
@@ -226,6 +226,29 @@ unchanged line and shows whether it is refused.
 
 Behind `[critic] cross_examination = on|off` (default off) until a
 graded run shows it pays.
+
+Built: `consultants/engine/cross_exam.py`. The critic (and meta-critic)
+is told the format only when it is on (`CRITIC_NOTE`, via
+`runtime_control.cross_examination`, seeded only when on). A challenge
+names the report by the number the critic sees (`CHALLENGE report=N`),
+not a lane: `research_lanes` (filled beside `research` by
+`_with_lane_tags` in the researcher wrapper) maps it to the lane, and
+when the two lists differ in length nothing is cross-examined. The
+router after the critic (`_route_to_cross_exam`) sends one
+`cross_examine` lane per challenged lane (at most 4, 3 challenges
+each); it resumes the lane's last `llm_call` (`load_lane_thread`, one
+row) on the lane's model and view, recorded as
+`researcher:cross_exam`, 12 turns. `cross_exam_ruling` asks the critic
+for `RULING report=N: upheld | withdrawn | open`; no ruling, or a
+withdrawn one with no answer, is open; any open one reroutes whatever
+the DECISION line says; with none open the DECISION line decides (and
+the evidence bar still holds a ready), and a ready refunds the reroute
+the critic counted. Once per round. The block (every answer whole)
+is appended to the critique, so the synthesizer reads the rulings.
+
+Found on the way: a critic reroute never showed the researcher the
+verdict — it was told to "address the gaps" without them.
+`build_researcher_messages(critique=)` now carries it on a reroute.
 
 ## Order and tests
 

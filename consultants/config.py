@@ -1072,6 +1072,17 @@ class EscalationConfig:
 ESCALATION_MAX = 10
 
 
+@dataclass
+class CriticConfig:
+    """Cross-examination (plan council-memory M5): a critic not convinced
+    names the claim it doubts, ``CHALLENGE report=N: ... Settle with:
+    ...``; the lane that wrote report N resumes its own conversation and
+    answers with a run or a concession, and the critic rules on each
+    (upheld / withdrawn / open). An open challenge falls back to the
+    reroute. Off by default until a graded run shows it pays."""
+    cross_examination: bool = False
+
+
 def check_guard_profile(value: Any) -> str:
     v = str(value or "").strip().lower()
     if v not in GUARD_PROFILES:
@@ -1204,6 +1215,7 @@ class ConsultantsConfig:
     protocol: ProtocolConfig = field(default_factory=ProtocolConfig)
     guards: GuardsConfig = field(default_factory=GuardsConfig)
     escalation: EscalationConfig = field(default_factory=EscalationConfig)
+    critic: CriticConfig = field(default_factory=CriticConfig)
     decision: DecisionConfig = field(default_factory=DecisionConfig)
     # Plan B: ``[budget]`` / ``[sampling]`` — only the keys a layer set.
     budget: dict[str, Any] = field(default_factory=dict)
@@ -1695,6 +1707,15 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
                         "ignored: must be an integer in [0, %d]",
                         ESCALATION_MAX)
 
+    # cross-examination (plan council-memory M5)
+    cr = raw.get("critic") or {}
+    if isinstance(cr, dict) and "cross_examination" in cr:
+        if isinstance(cr["cross_examination"], bool):
+            base.critic.cross_examination = cr["cross_examination"]
+        else:
+            log.warning("consultants config: critic.cross_examination "
+                        "ignored: must be true or false")
+
     # decision model (plan H)
     dec = raw.get("decision") or {}
     if isinstance(dec, dict) and dec:
@@ -2162,6 +2183,13 @@ def _render(cfg: ConsultantsConfig, *,
         L.append(f"expert_model = {_toml_value(es.expert_model)}")
         L.append(f"max_per_council = {es.max_per_council}")
         L.append("")
+    if cfg.critic.cross_examination:
+        L.append("[critic]")
+        L.append("# cross_examination: a critic names the claims it doubts "
+                 "(CHALLENGE report=N); each lane answers with a run or a "
+                 "concession before the critic rules. Off by default.")
+        L.append("cross_examination = true")
+        L.append("")
     g = cfg.guards
     if not g.is_default():
         L.append("[guards]")
@@ -2556,6 +2584,14 @@ def set_escalation(*, model: Optional[str] = None,
         cfg.escalation.expert_model = model.strip()
     if max_per_council is not None:
         cfg.escalation.max_per_council = int(max_per_council)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_cross_examination(*, enabled: bool, scope: str = "user",
+                          cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set ``[critic] cross_examination`` (plan council-memory M5)."""
+    cfg = _load_for_edit(scope, cwd)
+    cfg.critic.cross_examination = bool(enabled)
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 

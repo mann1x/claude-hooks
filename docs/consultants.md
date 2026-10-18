@@ -1313,6 +1313,31 @@ Boot-time it's seeded from `adversary_strictness`; `adversarial` is
 reachable only via `POST /control`. Default `normal` + empty focus
 appends nothing (byte-identical to the pre-M4 critic).
 
+### Cross-examination (`[critic] cross_examination`, off by default)
+
+```
+claude-consultants config set-cross-examination on   # or off
+```
+
+A critic not convinced by a claim challenges it instead of sending the
+whole round back:
+
+```
+CHALLENGE report=3: the edit of line 5 is called blind, but C58 shows
+line 5 read and unchanged. Settle with: a run that edits a read line.
+```
+
+The lane that wrote report 3 resumes its own conversation, on its own
+model and in its own shell view, and answers with a run or a concession
+(one exchange, 12 turns; challenged lanes run in parallel, at most 4).
+The critic then rules on each challenge: `upheld` (the claim falls),
+`withdrawn` (the answer settled it) or `open`. An open challenge falls
+back to the ordinary reroute, and the rerouted researcher sees the
+rulings in the critic's verdict. With nothing open the critic's own
+DECISION line decides. The exchanges and rulings are appended to the
+critique the synthesizer reads. Once per round. With the setting off,
+nothing is added to the graph.
+
 ### Verify budget — the skeptic-panel cap
 
 `verify_budget` (`minimal` = 2 claims / 1 round, `bounded` = 3 default,

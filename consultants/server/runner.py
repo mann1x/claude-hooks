@@ -337,6 +337,10 @@ def make_runner(*, ollama_base_url: str):
             # once, before the critic. Never wired on another tier.
             xauto_lane_retry=(cfg.effort == "xauto" and bool(getattr(
                 cfg.runtime, "xauto_retry_infra_lanes", True))),
+            # Plan council-memory M5: challenged lanes answer before the
+            # critic's verdict routes. Off: the graph is unchanged.
+            cross_examination=bool(getattr(getattr(cfg, "critic", None),
+                                           "cross_examination", False)),
             # Per-lane model escalation (plan D): off unless an expert
             # model is configured.
             escalation_model=getattr(getattr(cfg, "escalation", None),

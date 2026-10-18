@@ -269,6 +269,7 @@ class RuntimeControl(TypedDict, total=False):
     # ---- topology gates ----
     enabled_roles: list[str]    # subset of the project's roles
     typed_protocol: bool        # plan G: roles hand in typed records
+    cross_examination: bool     # plan council-memory M5: critic challenges
     guards: dict                # plan §0.7: {profile, roles}, only when not all standard
     budget: dict                # plan B: budget knob layers (control.budget_layers)
     think: dict                 # plan B3: per-(role, model) think, "<role>@<model>"
@@ -529,6 +530,12 @@ class CouncilStateV2(TypedDict, total=False):
     # Plan D9: the xauto automatic lane retry (0 / 1 retrying / 2 done),
     # written only by the ``lane_retry`` node.
     lane_retry: int
+    # Plan council-memory M5 (see graph.CouncilState).
+    research_lanes: Annotated[list, operator.add]
+    cross_exam: Annotated[list, operator.add]
+    cross_exam_round: int
+    # Send-injected: the one lane a cross_examine node answers for.
+    cross_exam_item: Optional[dict]
 
     # Synthesizer's work-in-progress draft. Overwritten on each
     # iteration. The HITL interrupt-before-synthesis flow shows this

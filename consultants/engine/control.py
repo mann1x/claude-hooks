@@ -205,6 +205,10 @@ def runtime_control_defaults(
     protocol = getattr(cfg, "protocol", None)
     if protocol is not None and getattr(protocol, "typed", False):
         rc["typed_protocol"] = True
+    # Plan council-memory M5: present only when on (readers: absent = off).
+    critic = getattr(cfg, "critic", None)
+    if critic is not None and getattr(critic, "cross_examination", False):
+        rc["cross_examination"] = True
     # Plan §0.7: the nudge profile, present only when not all standard.
     guards = getattr(cfg, "guards", None)
     if guards is not None and not guards.is_default():
