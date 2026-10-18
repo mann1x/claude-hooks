@@ -232,6 +232,10 @@ def council_detail(app, sid: str, *, since: int = 0,
                            "session_dir": str(sdir)}
     if s is not None:
         out["live"] = _live_view(s)
+        # The index keeps a 2,000-char copy for the list; the detail shows
+        # the council's own record, in full.
+        if getattr(s, "question", None):
+            row["question"] = s.question
     con = _ro(sdir / "transcript.db")
     if con is not None:
         try:
@@ -245,6 +249,8 @@ def council_detail(app, sid: str, *, since: int = 0,
                 except ValueError:
                     pass
                 out["meta"] = m
+                if m.get("question"):
+                    row["question"] = m["question"]
             tok = con.execute(
                 "SELECT COUNT(*), SUM(prompt_tokens), SUM(completion_tokens) "
                 "FROM events WHERE kind = 'llm_call'").fetchone()

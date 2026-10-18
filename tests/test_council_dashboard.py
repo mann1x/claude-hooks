@@ -432,3 +432,23 @@ def test_the_page_renders_markdown_and_json_fields():
     from consultants.server.dashboard_page import PAGE
     assert "function md(" in PAGE and "function kv(" in PAGE
     assert "jsonBlock" in PAGE and '"messages"' in PAGE and "openCall" in PAGE
+
+
+def test_the_detail_shows_the_whole_question(tmp_path, monkeypatch):
+    """The index keeps 2,000 chars for the list; run 6's 3,804-char
+    question was cut mid-sentence in the detail."""
+    monkeypatch.setattr(council_index, "known_project_roots", lambda: [])
+    q = "QUESTION. " + "x" * 3800 + " THE END"
+    _store(tmp_path, "csl-long", question=q)
+    council_index.backfill([str(tmp_path)])
+    assert len(council_index.get("csl-long")["question"]) == 2000
+    assert dashboard.council_detail(_app(), "csl-long")["council"]["question"] == q
+    live = SimpleNamespace(question=q + " (live)", cwd=str(tmp_path), status="running")
+    monkeypatch.setattr(dashboard, "_live_view", lambda s: {"status": "running"})
+    d = dashboard.council_detail(_app({"csl-long": live}), "csl-long")
+    assert d["council"]["question"].endswith("THE END")
+
+
+def test_the_question_is_a_folded_panel():
+    from consultants.server.dashboard_page import PAGE
+    assert "fold(`q:" in PAGE and "armFolds(B)" in PAGE and 'class="flap"' in PAGE

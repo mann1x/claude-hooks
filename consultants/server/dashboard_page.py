@@ -55,6 +55,11 @@ pre{white-space:pre-wrap;word-break:break-word;background:var(--code);border:1px
 .ok{color:var(--ok)}.bad{color:var(--bad)}.muted{color:var(--muted)}
 details{margin:4px 0}summary{cursor:pointer;color:var(--muted)}
 .empty{color:var(--muted);padding:30px 16px}
+.fold{position:relative;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:10px 14px}
+.fold>.fold-body{max-height:14.5em;overflow:hidden}.fold.open>.fold-body{max-height:none}
+.fold.long:not(.open)>.fold-body{-webkit-mask-image:linear-gradient(#000 70%,transparent);mask-image:linear-gradient(#000 70%,transparent)}
+.flap{position:absolute;left:50%;bottom:-11px;transform:translateX(-50%);padding:0 14px;height:20px;line-height:18px;
+border-radius:0 0 8px 8px;font-size:12px;cursor:pointer;background:var(--chip);border:1px solid var(--line)}
 .md{overflow-wrap:anywhere}.md>:first-child{margin-top:0}.md>:last-child{margin-bottom:0}
 .md h1,.md h2,.md h3,.md h4,.md h5,.md h6{margin:14px 0 6px;line-height:1.3}
 .md h1{font-size:18px}.md h2{font-size:16px}.md h3{font-size:15px}.md h4,.md h5,.md h6{font-size:14px}
@@ -144,6 +149,17 @@ const ITEM=/^\s*([-*+]|\d{1,3}[.)])\s+/;
 function asJson(t){t=t.trim();if(!/^[\[{]/.test(t))return undefined;
   try{const v=JSON.parse(t);return v&&typeof v==="object"?v:undefined}catch(_){return undefined}}
 function jsonBlock(v,raw){return`<div class="typed">${kv(v)}<details><summary>raw JSON</summary><pre>${esc(raw)}</pre></details></div>`}
+// A panel that shows a long text folded, with a flap to open it fully
+// (the command output panel of Cerebriline). Open panels stay open
+// across the live refresh.
+const openFolds=new Set();
+function fold(key,html){return `<div class="fold${openFolds.has(key)?" open":""}" data-fold="${esc(key)}"><div class="fold-body">${html}</div><button class="flap" hidden title="show all">▾</button></div>`}
+function armFolds(root){(root||document).querySelectorAll(".fold").forEach(f=>{
+  const b=f.querySelector(".fold-body"),k=f.dataset.fold,flap=f.querySelector(".flap");
+  const long=f.classList.contains("open")||b.scrollHeight>b.clientHeight+4;
+  f.classList.toggle("long",long);flap.hidden=!long;flap.textContent=f.classList.contains("open")?"▴":"▾";
+  flap.onclick=()=>{const o=f.classList.toggle("open");o?openFolds.add(k):openFolds.delete(k);
+    flap.textContent=o?"▴":"▾";flap.title=o?"fold":"show all"}})}
 function md(src){
   const L=String(src??"").replace(/\r\n?/g,"\n").split("\n");const out=[];let i=0,para=[];
   const flush=()=>{if(para.length){out.push("<p>"+para.map(inline).join("<br>")+"</p>");para=[]}};
@@ -267,7 +283,7 @@ function renderTab(){const B=$("#tabbody");if(!B||!D)return;
     lastId=Math.max(0,...(D.timeline||[]).map(e=>e.id));return}
   const c=D.council||{},m=D.meta||{},t=D.totals||{};
   const models=m.models?Object.entries(m.models).map(([r,x])=>`<span class="chip" style="${rc(r)}"><span class="who">${esc(r)}</span>: ${esc(Array.isArray(x)?x.join(", "):x)}</span>`).join(""):"";
-  B.innerHTML=`<h2>Question</h2><div class="md">${md(c.question||m.question||"")}</div>
+  B.innerHTML=`<h2>Question</h2>${fold(`q:${c.sid||sel}`,`<div class="md">${md(m.question&&m.question.length>(c.question||"").length?m.question:(c.question||m.question||""))}</div>`)}
    <div class="chips" style="margin-top:12px">${models}</div>
    <div class="chips"><span class="chip">${num(t.llm_calls)} LLM calls</span><span class="chip">${num(t.prompt_tokens)} prompt tokens</span>
      <span class="chip">${num(t.completion_tokens)} output tokens</span>${c.shell?`<span class="chip">shell ${esc(c.shell.mode||"")}</span>`:""}
@@ -276,6 +292,7 @@ function renderTab(){const B=$("#tabbody");if(!B||!D)return;
    <h2>Answer</h2>${D.answer?`<div class="md">${md(D.answer.replace(/^---\n[\s\S]*?\n---\n/,""))}</div>`:'<p class="muted">No answer yet.</p>'}
    <h2>Lanes</h2>${lanesTable(D.lanes)}
    <h2>Commands (${(D.commands||[]).length})</h2>${cmdList(D.commands)}`;
+  armFolds(B);
 }
 
 /* the messages between the roles */
