@@ -456,6 +456,19 @@ def _wrap_planner(deps: GraphDeps):
     return _node
 
 
+def _pass_through(state: dict) -> dict:
+    return {}
+
+
+def _shell_kw(deps: GraphDeps) -> dict:
+    """``{"shell": True}`` when the lanes have ``run_command`` (the
+    evidence bar applies), nothing otherwise — the call is then exactly
+    what it was."""
+    on = any((t.get("function") or {}).get("name") == "run_command"
+             for t in (deps.tool_specs or []))
+    return {"shell": True} if on else {}
+
+
 def _wrap_up_check(deps: GraphDeps) -> Optional[Callable[[], bool]]:
     """Plan D9: what a running lane's loop asks before each turn, or
     ``None`` when the graph has no run control (tests, benchmarks)."""
@@ -490,6 +503,9 @@ def _retry_lane_send(state: dict, spec: dict) -> Any:
         # planner fan-out in build_council_graph).
         "extra_roots": list(state.get("extra_roots") or []),
         "runtime_control": dict(state.get("runtime_control") or {}),
+        # Injected briefs: a Send lane sees no global channel
+        # it was not handed (#1626).
+        "additional_context": list(state.get("additional_context") or []),
         "effort": state.get("effort"),
         "models": state.get("models", {}),
         "topology": state.get("topology"),
@@ -502,6 +518,54 @@ def _retry_lane_send(state: dict, spec: dict) -> Any:
         "total_prompt_tokens": 0,
         "total_completion_tokens": 0,
     })
+
+
+#: The node a checkpoint rewind re-enters the graph at (#1626). It is
+#: never reached by an edge: ``update_state(as_node=REWIND_NODE)`` runs
+#: its router, which continues research from the existing plan and
+#: reports. ``START`` led to the planner, which re-planned from scratch
+#: and fanned out lanes that never carried the brief.
+REWIND_NODE = "rewind"
+#: Rewind lanes are numbered from here, clear of the first round's.
+REWIND_LANE_BASE = 100
+
+
+def _rewind_router(deps: GraphDeps, synthesizer_target: str):
+    """``rewind``'s router: one researcher pass on the full plan with every
+    report so far and the injected brief (the critic-reroute shape),
+    fanned out once per council model on an x-tier so the round keeps
+    its model diversity; a single invocation otherwise."""
+    from langgraph.types import Send
+
+    def _route(state: dict) -> Any:
+        if _stopping(deps):
+            return synthesizer_target
+        models = [deps.models.get("researcher", "")] + list(
+            deps.extra_models_by_role.get("researcher") or [])
+        if len(models) < 2:
+            return "researcher"      # the whole state, brief included
+        rounds = int(state.get("research_rounds_used") or 0)
+        return [Send("researcher", {
+            "question": state.get("question"),
+            "plan": state.get("plan", ""),
+            "cwd": state.get("cwd"),
+            "extra_roots": list(state.get("extra_roots") or []),
+            "runtime_control": dict(state.get("runtime_control") or {}),
+            "additional_context": list(state.get("additional_context") or []),
+            "effort": state.get("effort"),
+            "models": state.get("models", {}),
+            "topology": state.get("topology"),
+            # No plan_item: the full plan and the reports so far are the
+            # lane's context (``prior_rounds`` in researcher_node).
+            "research": list(state.get("research") or []),
+            "lane_idx": REWIND_LANE_BASE + i,
+            "model_override": m,
+            "research_rounds_used": rounds,
+            "turns": [],
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+        }) for i, m in enumerate(models)]
+    return _route
 
 
 #: Plan D9: the failure classes an xauto run retries on its own. Narrower
@@ -674,6 +738,7 @@ def _wrap_critic(deps: GraphDeps):
             think=_think_for(deps, "critic"),
             recorder=deps.recorder,
             **_tools_for(deps, "critic"),
+            **_shell_kw(deps),
         )
     return _node
 
@@ -897,6 +962,7 @@ def _wrap_synthesizer(deps: GraphDeps):
             fallback_models=list(deps.synthesizer_fallback_models),
             **({"wrap_up": True} if _wrapping_up(deps) else {}),
             **_tools_for(deps, "synthesizer"),
+            **_shell_kw(deps),
         )
     return _node
 
@@ -931,6 +997,7 @@ def _wrap_meta_critic(deps: GraphDeps):
             think=_think_for(deps, "critic"),
             recorder=deps.recorder,
             **_tools_for(deps, "meta_critic"),
+            **_shell_kw(deps),
         )
     return _node
 
@@ -1165,6 +1232,11 @@ def build_council_graph(deps: GraphDeps,
     # substitution is a single string everywhere — the rest of the
     # topology wiring is unaware of the coder layer.
     synthesizer_target = "coder_router" if coder_enabled else "synthesizer"
+    if "researcher" in enabled:
+        sg.add_node(REWIND_NODE, _pass_through)
+        sg.add_conditional_edges(
+            REWIND_NODE, _rewind_router(deps, synthesizer_target),
+            ["researcher", synthesizer_target])
     if coder_enabled:
         sg.add_node("coder", _wrap("coder", _wrap_coder(
             deps,
@@ -1246,6 +1318,9 @@ def build_council_graph(deps: GraphDeps,
                             # budget / think / sampling layers): read-only here,
                             # and absent from a lane unless handed over.
                             "runtime_control": dict(state.get("runtime_control") or {}),
+                            # Injected briefs: a Send lane sees no global channel
+                            # it was not handed (#1626).
+                            "additional_context": list(state.get("additional_context") or []),
                             "effort": state.get("effort"),
                             "models": state.get("models", {}),
                             "topology": state.get("topology"),
@@ -1303,6 +1378,9 @@ def build_council_graph(deps: GraphDeps,
                         # budget / think / sampling layers): read-only here,
                         # and absent from a lane unless handed over.
                         "runtime_control": dict(state.get("runtime_control") or {}),
+                        # Injected briefs: a Send lane sees no global channel
+                        # it was not handed (#1626).
+                        "additional_context": list(state.get("additional_context") or []),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
@@ -1525,6 +1603,9 @@ def build_council_graph(deps: GraphDeps,
                         # budget / think / sampling layers): read-only here,
                         # and absent from a lane unless handed over.
                         "runtime_control": dict(state.get("runtime_control") or {}),
+                        # Injected briefs: a Send lane sees no global channel
+                        # it was not handed (#1626).
+                        "additional_context": list(state.get("additional_context") or []),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
@@ -1685,6 +1766,9 @@ def build_council_graph(deps: GraphDeps,
                         # budget / think / sampling layers): read-only here,
                         # and absent from a lane unless handed over.
                         "runtime_control": dict(state.get("runtime_control") or {}),
+                        # Injected briefs: a Send lane sees no global channel
+                        # it was not handed (#1626).
+                        "additional_context": list(state.get("additional_context") or []),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
@@ -1874,6 +1958,9 @@ def build_council_graph(deps: GraphDeps,
                         # budget / think / sampling layers): read-only here,
                         # and absent from a lane unless handed over.
                         "runtime_control": dict(state.get("runtime_control") or {}),
+                        # Injected briefs: a Send lane sees no global channel
+                        # it was not handed (#1626).
+                        "additional_context": list(state.get("additional_context") or []),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
@@ -2006,6 +2093,9 @@ def build_follow_up_graph(deps: GraphDeps,
 
     sg = StateGraph(CouncilState)
     sg.add_node("researcher", _wrap("researcher", _wrap_researcher(deps)))
+    sg.add_node(REWIND_NODE, _pass_through)
+    sg.add_conditional_edges(REWIND_NODE, _rewind_router(deps, "synthesizer"),
+                             ["researcher", "synthesizer"])
     if "critic" in enabled:
         sg.add_node("critic", _wrap("critic", _wrap_critic(deps)))
     sg.add_node("synthesizer", _wrap("synthesizer", _wrap_synthesizer(deps)))

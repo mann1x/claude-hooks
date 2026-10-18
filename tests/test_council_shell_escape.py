@@ -419,3 +419,31 @@ class TestScopedView:
         out = _scoped_run(scoped_project, "cat scripts/lane0.txt; ls scripts",
                           lane="researcher:1")
         assert "No such file or directory" in out, out
+
+
+class TestToolchains:
+
+    def test_a_tool_under_a_private_home_runs_in_the_jail(self, project,
+                                                          monkeypatch):
+        """mail #1625: the host's node was a symlink into a mode-700 home,
+        so the jail ran /usr/bin/node v12 instead."""
+        from claude_hooks.sandbox import toolchains as T
+        home = Path(tempfile.mkdtemp(prefix="council-tc-", dir="/tmp"))
+        mirror = Path(tempfile.mkdtemp(prefix="council-tcm-", dir="/tmp"))
+        try:
+            os.chmod(mirror, 0o755)
+            node_bin = home / "priv" / "node" / "bin"
+            node_bin.mkdir(parents=True)
+            (node_bin / "node").write_text("#!/bin/sh\necho HOST_NODE_v99\n")
+            os.chmod(node_bin / "node", 0o755)
+            os.chmod(home, 0o700)
+            monkeypatch.setenv("CLAUDE_HOOKS_SANDBOX_TOOLCHAINS", str(mirror / "m"))
+            monkeypatch.setattr(T, "_CACHE", {})
+            monkeypatch.setattr(T, "TOOLS", ("node",))
+            monkeypatch.setenv("PATH", f"{node_bin}:{os.environ['PATH']}")
+            out = _run(project, "node")
+            assert "HOST_NODE_v99" in out, out
+        finally:
+            os.chmod(home, 0o755)
+            shutil.rmtree(home, ignore_errors=True)
+            shutil.rmtree(mirror, ignore_errors=True)

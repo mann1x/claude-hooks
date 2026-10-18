@@ -100,13 +100,30 @@ def _view_text(settings: "ShellSettings") -> str:
     return _VIEW_TEXT.get(settings.mode, _VIEW_TEXT["read"])
 
 
-def _spec(settings: ShellSettings) -> dict:
+#: How to run vite / vitest in a tree the jail mounts read-only
+#: (csl-2026-10-18-1120-95ce: vite writes its bundled config beside the
+#: config file, into the read-only tree, and fails EROFS).
+JS_RECIPE = (
+    "vitest / vite in a read-only tree: pass --configLoader runner (no "
+    "temp file beside the config), or copy the config into /scratch and "
+    "pass --config /scratch/<it> --root <the package dir>. ")
+
+
+def _toolchain_text(found: Optional[dict]) -> str:
+    if not found:
+        return ""
+    names = ", ".join(f"{t} ({p})" for t, p in sorted(found.items()))
+    return (f"The host's own toolchains are first on PATH: {names}. "
+            + (JS_RECIPE if {"node", "bun"} & set(found) else ""))
+
+
+def _spec(settings: ShellSettings, toolchains: Optional[dict] = None) -> dict:
     return {"type": "function", "function": {
         "name": TOOL,
         "description": (
             "Run a shell command in a sandbox, to answer what reading cannot: "
             "run the tests, a script, a linter, a build check. "
-            + _view_text(settings) +
+            + _view_text(settings) + _toolchain_text(toolchains) +
             "/scratch and /tmp are writable and private to you (/scratch is "
             "kept between your commands). There is no network and no home "
             "directory from the host. Limits: "
@@ -167,7 +184,9 @@ class ShellToolProvider(ToolProvider):
         return self.backend.preflight()
 
     def specs(self) -> list[dict]:
-        return [_spec(self.settings)]
+        tc = self._toolchains() if self.settings.extra.get(
+            "toolchains", True) else None
+        return [_spec(self.settings, tc.found if tc else None)]
 
     def default_level(self, tool: str) -> str:
         return ASK_ASSISTANT
@@ -233,6 +252,22 @@ class ShellToolProvider(ToolProvider):
                     scopes=list(self.settings.write_scopes) or None,
                     copy_cap_bytes=int(self.settings.lane_disk_gib * 2**30))
             return self._views[key]
+
+    def _toolchains(self, roots: tuple[str, ...] = ()):
+        """The host's node / bun / deno / go as the jail can see them
+        (mirrored when the sandbox user cannot reach them), or None."""
+        try:
+            from claude_hooks.sandbox.toolchains import discover
+            return discover(roots=roots,
+                            others_must_reach=self._sandbox_uid() is not None)
+        except Exception:
+            log.exception("toolchain discovery failed; the jail gets the "
+                          "system's tools only")
+            return None
+
+    def _toolchain_binds(self, roots: tuple[str, ...]) -> tuple[str, ...]:
+        tc = self._toolchains(roots)
+        return tuple(tc.binds) if tc else ()
 
     def _sandbox_uid(self) -> Optional[int]:
         """The host uid the command runs as when it is not ours (nobody,
@@ -346,7 +381,8 @@ class ShellToolProvider(ToolProvider):
                                      cpu_pct=s.cpu_pct,
                                      default_wall_s=s.timeout_s,
                                      max_wall_s=s.max_timeout_s),
-                       ro_binds=tuple(s.ro_binds), net=s.net,
+                       ro_binds=tuple(s.ro_binds) + self._toolchain_binds(roots),
+                       net=s.net,
                        name=f"{self.sid}-{lane_dirname(lane)}",
                        binds=tuple(mounts.binds) if mounts else (),
                        env=dict(mounts.env) if mounts else {})

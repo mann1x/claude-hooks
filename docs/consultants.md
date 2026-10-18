@@ -998,6 +998,39 @@ named — the synthesizer is the only node certain to run from the
 checkpoint. (Until 2026-10-18 a critic brief there said `in_place` and
 reached no prompt, and a researcher brief with the cap spent reached
 none either.)
+
+**What a rewind runs.** The run re-enters at the graph's `rewind` node,
+not at `START` (which leads to the planner). From there one research
+pass runs on the existing plan, with every report so far and the brief.
+On an x-tier it fans out one lane per council model (lane ids from 100),
+otherwise it is one full-state pass like a critic reroute. Then the
+researcher's own edges run, so the critic follows on high/max. A
+researcher brief also gets a labelled critic copy when a rewind will
+run, so the critic can judge whether the new reports checked it. Every
+fan-out `Send` carries `additional_context`; before this, no fanned-out
+lane ever saw an injected brief. (Council csl-2026-10-18-1120-95ce
+reported `rewound_extra_round`, then re-planned from scratch, and the
+brief was in 0 of 226 prompts.)
+
+**The evidence bar** (`consultants/engine/evidence.py`). Prompts were not
+enough, so on a run with the shell:
+
+- A critic or meta-critic `ready` that says the tests were not run is
+  held at `needs_more_research`, with a `[harness]` note. The round caps
+  still bound the loop.
+- The synthesizer gets **COMMANDS THE LANES RAN**, built from
+  `transcript.db`. Test and build runs, and failed commands, come with
+  their exit code and output tail; the other commands are listed one
+  per line. Only these were executed, whatever the reports say.
+- The answer must have an `Unverified` section, even an empty one. This
+  also applies when a checkpoint brief exists. An answer without one is
+  re-asked once (`REVISION_NOTE`), and gets a stub section if it still
+  has none. A claim taken from a checkpoint brief must be marked
+  `(from the checkpoint brief, not re-verified)` unless a report checks
+  it.
+
+Without the shell or a brief, none of this runs and prompts are
+unchanged.
 Toggle + timeout:
 
 ```
@@ -1796,6 +1829,21 @@ claude-consultants ask "fix the quantize script and run its self-test" \
   as relative or absolute paths, and the paths are mapped back in their
   answers. The coder gets a workspace only when a scope is the whole
   root.
+
+**Toolchains** (`claude_hooks/sandbox/toolchains.py`). The host's own
+`node`, `bun`, `deno` and `go` come first on the jail's PATH, found as
+the engine's user would find them: its PATH, then `~/.bun/bin` and the
+other usual per-user install dirs. A binary the sandbox user can reach
+is bound in place; for `node` and `go` that is the install prefix, so
+`npm` finds its `lib`. One under a directory it cannot traverse, such
+as a mode-700 home, is mirrored once into
+`/var/cache/claude-hooks-sandbox/toolchains/<tool>-<key>`, which is
+root-owned and world-readable (`CLAUDE_HOOKS_SANDBOX_TOOLCHAINS`
+overrides the location). Before this, the jail ran `/usr/bin/node`
+v12 and had no bun. The tool text names what was found, and for JS
+gives the vitest recipe: `--configLoader runner`. Without it, vite
+writes its bundled config beside the config file, into the read-only
+tree, and fails with EROFS.
 
 **The launcher.** Where the static `council-sandbox` binary is installed
 and verifies, the default `backend = "auto"` runs commands through it

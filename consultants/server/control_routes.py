@@ -258,6 +258,7 @@ def _classify_phase_from_live(s) -> tuple[str, dict]:
 def _with_synthesizer_copy(delta: dict, inj, target: str) -> dict:
     """``delta`` plus a copy of the inject's Doc addressed to the
     synthesizer, saying who the brief was for."""
+    from consultants.engine.evidence import BRIEF_ATTRIBUTION
     from consultants.engine.state_v2 import Doc
     docs = list(delta.get("additional_context") or [])
     if not docs:
@@ -265,8 +266,27 @@ def _with_synthesizer_copy(delta: dict, inj, target: str) -> dict:
     d = docs[0]
     copy = Doc(role="synthesizer",
                text=(f"[A brief addressed to the {target} at the review "
-                     f"checkpoint. Weigh it in the answer; say what of it "
-                     f"the council did not verify.]\n\n{d.text}"),
+                     f"checkpoint. Weigh it in the answer. "
+                     f"{BRIEF_ATTRIBUTION}]\n\n{d.text}"),
+               ts=d.ts, source=d.source)
+    return {**delta, "additional_context": docs + [copy]}
+
+
+def _with_critic_copy(delta: dict, target: str) -> dict:
+    """A researcher brief also goes to the critic, labelled: the critic
+    judges whether the rewound round checked it, and can only do that
+    if it has read it (#1626)."""
+    from consultants.engine.state_v2 import Doc
+    docs = list(delta.get("additional_context") or [])
+    if target != "researcher" or not docs:
+        return delta
+    d = docs[0]
+    copy = Doc(role="critic",
+               text=(f"[A brief given to the researchers at the review "
+                     f"checkpoint. Judge whether this round's reports "
+                     f"verified each of its claims (a command whose output "
+                     f"shows it, or a cited read) or only repeated them.]"
+                     f"\n\n{d.text}"),
                ts=d.ts, source=d.source)
     return {**delta, "additional_context": docs + [copy]}
 
@@ -363,6 +383,9 @@ def _make_inject_apply_fn(s):
                 # checkpoint only.
                 grant = _one_more_round(values)
                 delta = {**delta, "runtime_control": {"max_rounds": grant}}
+            if grant is not None or rewind_budget_ok(values):
+                # A rewind runs the critic after the new round.
+                delta = _with_critic_copy(delta, effective_target)
             ok, err = _apply_state_delta_core(s, delta)
             if not ok:
                 inj.status = INJECT_STATUS_FAILED
@@ -793,17 +816,20 @@ def register_control_routes(app: "FastAPI") -> None:
         (a consumer that pre-decides "proceed, no challenge") is honored:
         the first poll of the wait loop consumes it and releases
         immediately — the runner does NOT clear it on entry. A duplicate
-        ack after release is a harmless no-op. ``checkpoint_open`` echoes
-        whether a wait is currently blocking so the caller can tell
-        whether the ack landed on an active pause."""
+        ack after release is a harmless no-op. The reply describes the
+        state the ack leaves (mail #1625: it said ``checkpoint_open: true``
+        after an ack that released the pause): ``released`` is whether it
+        landed on an open pause, which it ends; ``checkpoint_open`` is
+        false after any ack; ``deadline_ts`` is the released pause's."""
         s = _require_live_session(app, sid)
+        deadline = getattr(s, "_checkpoint_deadline_ts", None)
         s.ack_adversary()
         s.bump_activity()
-        deadline = getattr(s, "_checkpoint_deadline_ts", None)
         return {
             "ok": True,
             "acked": True,
-            "checkpoint_open": deadline is not None,
+            "released": deadline is not None,
+            "checkpoint_open": False,
             "deadline_ts": deadline,
         }
 

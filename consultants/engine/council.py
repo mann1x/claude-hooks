@@ -3417,7 +3417,8 @@ def researcher_node(state: dict, *,
 def critic_node(state: dict, *, chat_client, model: str,
                 think: Any = True, recorder=None,
                 tool_specs: Optional[list[dict]] = None,
-                tool_executor=None, cwd: str = "") -> dict:
+                tool_executor=None, cwd: str = "",
+                shell: bool = False) -> dict:
     rounds_used_pre = int(state.get("research_rounds_used") or 0)
     # Phase 10: per-lane multi-model fan-out for critics. Same shape
     # as researcher's model_override path. lane_idx propagates from
@@ -3495,6 +3496,9 @@ def critic_node(state: dict, *, chat_client, model: str,
         }
     dt = time.monotonic() - t0
     decision = parse_critic_decision(text)
+    if shell:
+        from consultants.engine.evidence import hold_to_evidence_bar
+        decision, text, _held = hold_to_evidence_bar(decision, text)
     # M0: strip the critic's CONFIDENCE line out of ``text`` so it's
     # absent from the critique the synthesizer reads + the turn
     # transcript. Emit + append only on the single-critic path below;
@@ -3562,7 +3566,8 @@ def critic_node(state: dict, *, chat_client, model: str,
 def meta_critic_node(state: dict, *, chat_client, model: str,
                      think: Any = True, recorder=None,
                      tool_specs: Optional[list[dict]] = None,
-                     tool_executor=None, cwd: str = "") -> dict:
+                     tool_executor=None, cwd: str = "",
+                     shell: bool = False) -> dict:
     """Phase 10: synthesize the C parallel-critic verdicts at xmax
     into one final decision. Reads the C critic critiques from the
     additive ``turns`` list (filtering by ``role == 'critic'`` and
@@ -3649,6 +3654,9 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
         }
     dt = time.monotonic() - t0
     decision = parse_critic_decision(text)
+    if shell:
+        from consultants.engine.evidence import hold_to_evidence_bar
+        decision, text, _held = hold_to_evidence_bar(decision, text)
     # M0: strip + emit the consolidated confidence (fanned-critic path).
     text, _meta_conf = _extract_confidence(text)
     _emit_confidence(_meta_conf, source="critic", state=state)
@@ -3692,6 +3700,33 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
     return out
 
 
+def _unverified_revision(chat_client, model, msgs, text, *, state, think,
+                         recorder, tool_specs, tool_executor, cwd
+                         ) -> tuple[str, int, int]:
+    """One re-ask of an answer with no ``Unverified`` section; if the
+    revision still has none (or fails), the answer gets the stub.
+    Returns ``(text, prompt_tokens, completion_tokens)`` of the re-ask."""
+    from consultants.engine import evidence
+    rpt = rct = 0
+    try:
+        revised, rpt, rct = _role_turn(
+            chat_client, model, list(msgs) + [
+                {"role": "assistant", "content": text},
+                harness_note(evidence.REVISION_NOTE)],
+            think=_think_for(state, "synthesizer", model, think),
+            recorder=recorder, role="synthesizer", round=1,
+            tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
+            knobs=_budget_knobs(state, "synthesizer", model),
+            sampling=_instance_sampling(state, "synthesizer", model,
+                                        chat_client))
+        if revised and revised.strip():
+            text = revised
+    except Exception:
+        log.exception("synthesizer Unverified revision failed; keeping "
+                      "the first answer")
+    return evidence.with_unverified_stub(text), rpt, rct
+
+
 def synthesizer_node(state: dict, *, chat_client, model: str,
                      think: Any = True,
                      self_critic: bool = False,
@@ -3700,7 +3735,7 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                      fallback_models: Optional[list[str]] = None,
                      tool_specs: Optional[list[dict]] = None,
                      tool_executor=None, cwd: str = "",
-                     wrap_up: bool = False) -> dict:
+                     wrap_up: bool = False, shell: bool = False) -> dict:
     _emit_started("synthesizer", round=1, model=model)
     if recorder is not None:
         try:
@@ -3781,6 +3816,17 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
     # wins; if every model fails, fall through to the degraded-answer
     # path. Each attempt logs an llm_call event with the actual model
     # used so the audit trail in transcript.db is accurate.
+    # The evidence bar (consultants/engine/evidence.py): on a run with
+    # the shell, or with a checkpoint brief, the synthesizer is told
+    # which commands really ran and must give an Unverified section.
+    from consultants.engine import evidence
+    evidence_mode = shell or bool(_additional_context_for(state,
+                                                          "synthesizer"))
+    if shell:
+        ledger = evidence.commands_block(getattr(recorder, "db_path", None))
+        if ledger and msgs and msgs[-1].get("role") == "user":
+            msgs = msgs[:-1] + [{**msgs[-1], "content": (
+                str(msgs[-1].get("content") or "") + "\n\n" + ledger)}]
     models_to_try: list[str] = [model] + list(fallback_models or [])
     t0 = time.monotonic()
     text: Optional[str] = None
@@ -3795,6 +3841,12 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                 cwd=cwd, knobs=_budget_knobs(state, "synthesizer", try_model),
             sampling=_instance_sampling(state, "synthesizer", try_model, chat_client),
             )
+            if evidence_mode and evidence.needs_unverified_revision(text):
+                text, rpt, rct = _unverified_revision(
+                    chat_client, try_model, msgs, text, state=state,
+                    think=think, recorder=recorder, tool_specs=tool_specs,
+                    tool_executor=tool_executor, cwd=cwd)
+                pt, ct = pt + rpt, ct + rct
             if attempt_idx > 0:
                 log.warning(
                     "synthesizer fell back from %s to %s on attempt %d/%d",

@@ -884,3 +884,173 @@ class TestDriveCouncilStream(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ============================================================== #
+# 8. #1626: a checkpoint rewind on the REAL council graph
+# ============================================================== #
+@unittest.skipUnless(HAVE_LANGGRAPH, "langgraph not installed")
+class TestCheckpointRewindOnTheCouncilGraph(unittest.TestCase):
+    """csl-2026-10-18-1120-95ce: a researcher brief at the adversary
+    checkpoint said ``applied, rewound_extra_round``, then the run went
+    back to the PLANNER, all lanes restarted as round 1, and the brief
+    was in 0 of 226 prompts. The toy graphs above have no planner, so
+    they could not see it."""
+
+    BRIEF = "ADVERSARY BRIEF: grep re-stamps without changedSince"
+
+    def _run(self, *, extras=("m2",)):
+        from langgraph.checkpoint.memory import MemorySaver
+        from consultants.engine.graph import GraphDeps, build_council_graph
+        from consultants.server.app import SessionState
+        from consultants.server.control import Injection
+        from consultants.server.control_routes import _make_inject_apply_fn
+        from consultants.server.runner import _drive_council_stream
+
+        calls: dict[str, list] = {"planner": [], "researcher": [],
+                                  "critic": [], "synthesizer": []}
+
+        def _text(payload):
+            return "\n".join(str(m.get("content") or "")
+                             for m in payload.get("messages") or [])
+
+        class _Role:
+            def __init__(self, role, reply):
+                self.role, self.reply = role, reply
+
+            def chat(self, payload, *, think=True, **_kw):
+                calls[self.role].append(
+                    (payload.get("model"), _text(payload)))
+                n = len(calls[self.role])
+                return {"choices": [{"message": {
+                    "role": "assistant",
+                    "content": self.reply(n)}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+        deps = GraphDeps(
+            chat_clients={
+                "planner": _Role("planner", lambda n:
+                                 "1. read the grep tool\n2. read apply_patch"),
+                "researcher": _Role("researcher",
+                                    lambda n: f"REPORT-{n}: findings"),
+                "critic": _Role("critic", lambda n: "DECISION: ready"),
+                "synthesizer": _Role("synthesizer",
+                                     lambda n: "FINAL ANSWER"),
+            },
+            models={r: "m1" for r in ("planner", "researcher", "critic",
+                                      "synthesizer")},
+            enabled_roles=("planner", "researcher", "critic", "synthesizer"),
+            extra_models_by_role={"researcher": list(extras)},
+            cwd="/tmp", tool_executor=lambda *a, **kw: "",
+            tool_specs=[], grounding_msgs=[], disable_cache=True,
+        )
+        compiled = build_council_graph(deps, checkpointer=MemorySaver(),
+                                       interrupt_before=["synthesizer"])
+        s = SessionState(sid="rw", cwd="/tmp", question="audit the tools",
+                         effort="high", topology="council")
+        s.progress = {r: "pending" for r in calls}
+        cfg = {"configurable": {"thread_id": s.sid}}
+        s._compiled, s._thread_config = compiled, cfg
+        apply_fn = _make_inject_apply_fn(s)
+        sent, before = [], {}
+
+        def during_pause(_secs):
+            if not sent:
+                before.update({k: len(v) for k, v in calls.items()})
+                inj = Injection(id="i1", role="researcher", text=self.BRIEF,
+                                source="adversary")
+                apply_fn(inj)
+                sent.append(inj)
+                s.ack_adversary()
+        initial = {"question": "audit the tools", "cwd": "/tmp",
+                   "models": deps.models, "topology": "council",
+                   "effort": "high", "research_rounds_used": 0,
+                   "runtime_control": {"max_rounds": 1}}
+        final = _drive_council_stream(
+            compiled, initial, cfg, state=s,
+            enabled=("planner", "researcher", "critic", "synthesizer"),
+            review_before_synthesis=False, recorder=None, log_label="t",
+            adversary_checkpoint=True, adversary_checkpoint_timeout_s=60,
+            sleep_fn=during_pause)
+        return final, calls, before, sent[0]
+
+    def test_the_rewind_continues_research_with_the_brief(self):
+        final, calls, before, inj = self._run()
+        self.assertEqual(inj.routed, "rewound_extra_round")
+        # Never back to the planner.
+        self.assertEqual(len(calls["planner"]), before["planner"])
+        after = calls["researcher"][before["researcher"]:]
+        # One lane per council model, each with the brief and the
+        # reports of the first round.
+        self.assertEqual(sorted(m for m, _ in after), ["m1", "m2"])
+        for _m, text in after:
+            self.assertIn(self.BRIEF, text)
+            self.assertIn("REPORT-1", text)
+        # The first round never saw a brief (it did not exist yet).
+        for _m, text in calls["researcher"][:before["researcher"]]:
+            self.assertNotIn(self.BRIEF, text)
+
+    def test_the_critic_runs_on_the_new_reports_and_reads_the_brief(self):
+        final, calls, before, _inj = self._run()
+        after = calls["critic"][before["critic"]:]
+        self.assertEqual(len(after), 1, "no critic pass after the rewind")
+        self.assertIn(self.BRIEF, after[0][1])
+        self.assertIn("verified", after[0][1])
+        self.assertIn("FINAL ANSWER", final.get("final_answer", ""))
+        self.assertIn(self.BRIEF, calls["synthesizer"][-1][1])
+
+    def test_a_single_model_council_rewinds_as_one_full_state_pass(self):
+        _final, calls, before, _inj = self._run(extras=())
+        self.assertEqual(len(calls["planner"]), before["planner"])
+        after = calls["researcher"][before["researcher"]:]
+        self.assertEqual(len(after), 1)
+        self.assertIn(self.BRIEF, after[0][1])
+
+
+@unittest.skipUnless(HAVE_LANGGRAPH, "langgraph not installed")
+class TestProgressFollowsTheLanes(unittest.TestCase):
+    """mail #1625: status.progress said researcher=done, critic=in_progress
+    while 6 of 8 lanes were still making calls."""
+
+    def test_a_role_is_done_when_its_last_lane_ends(self):
+        import time as _t
+        from langgraph.graph import StateGraph, START, END
+        from langgraph.checkpoint.memory import MemorySaver
+        from langgraph.types import Send
+        from consultants.server.app import SessionState
+        from consultants.server.runner import _drive_council_stream
+
+        s = SessionState(sid="prog", cwd="/x", question="q",
+                         effort="medium", topology="council")
+        s.progress = {"planner": "in_progress", "researcher": "pending",
+                      "critic": "pending", "synthesizer": "pending"}
+        seen = []
+
+        def researcher(st):
+            _t.sleep(0.05 * (st["i"] + 1))
+            if st["i"] == 2:        # the slowest lane, after two have ended
+                seen.append(dict(s.progress))
+            return {"log": [f"R{st['i']}"]}
+
+        g = StateGraph(_DriveSt)
+        g.add_node("planner", lambda st: {"log": ["P"]})
+        g.add_node("researcher", researcher)
+        g.add_node("critic", lambda st: {"log": ["C"]})
+        g.add_node("synthesizer", lambda st: {"log": ["S"]})
+        g.add_edge(START, "planner")
+        g.add_conditional_edges("planner", lambda st: [
+            Send("researcher", {"i": i}) for i in range(3)], ["researcher"])
+        g.add_edge("researcher", "critic")
+        g.add_edge("critic", "synthesizer")
+        g.add_edge("synthesizer", END)
+        compiled = g.compile(checkpointer=MemorySaver(),
+                             interrupt_before=["synthesizer"])
+        _drive_council_stream(
+            compiled, {"log": []}, {"configurable": {"thread_id": "prog"}},
+            state=s, enabled=("planner", "researcher", "critic",
+                              "synthesizer"),
+            review_before_synthesis=False, recorder=None, log_label="t")
+        self.assertEqual(seen[0]["researcher"], "in_progress")
+        self.assertEqual(seen[0]["critic"], "pending")
+        self.assertEqual(seen[0]["planner"], "done")
+        self.assertEqual(set(s.progress.values()), {"done"})

@@ -1337,6 +1337,21 @@ def _lane_workspace(registry, cwd: str):
     return None
 
 
+def _track_task(state, running: dict, ev: dict) -> None:
+    """One ``tasks`` stream event: a role is ``in_progress`` while any of
+    its tasks runs and ``done`` when the last one ends."""
+    name = ev.get("name")
+    if not name or name not in state.progress:
+        return
+    if "input" in ev:                       # a task started
+        running[name] = running.get(name, 0) + 1
+        state.progress[name] = "in_progress"
+    else:                                   # a task ended
+        running[name] = max(0, running.get(name, 0) - 1)
+        if not running[name]:
+            state.progress[name] = "done"
+
+
 def _rewind_budget_ok(snap) -> bool:
     """#314: is there room for one more researcher round? Delegates to
     the shared pure check in server.control so the inject handler and
@@ -1367,15 +1382,20 @@ def _rewind_to_researcher(compiled, thread_config, state, recorder,
                           log_label: str) -> None:
     """#314: re-enter the graph at the researcher for one more pass.
 
-    ``update_state(as_node=START)`` is the verified topology-uniform
-    rewind: from a state parked before the synthesizer interrupt it
-    sets ``next`` back to the researcher (low/med) or
-    researcher→critic (high/max), re-runs that pass — picking up the
-    injected Doc already written into ``additional_context`` — and
-    re-parks before the synthesizer. Empty values: we only redirect
+    ``update_state(as_node="rewind")`` runs the graph's rewind router:
+    one more researcher pass on the existing plan and every report so
+    far, carrying the injected brief already written into
+    ``additional_context``, then the researcher's own edges (the critic
+    on high/max) and the synthesizer interrupt again. A graph built
+    before the node existed falls back to ``START`` — which, on a
+    council graph, means the planner (#1626: a re-plan that dropped the
+    brief and the round-1 reports). Empty values: we only redirect
     flow; the inject already wrote the content."""
     from langgraph.graph import START
-    compiled.update_state(thread_config, {}, as_node=START)
+    from consultants.engine.graph import REWIND_NODE
+    nodes = getattr(compiled, "nodes", None) or {}
+    as_node = REWIND_NODE if REWIND_NODE in nodes else START
+    compiled.update_state(thread_config, {}, as_node=as_node)
     try:
         if "researcher" in state.progress:
             state.progress["researcher"] = "in_progress"
@@ -1385,7 +1405,7 @@ def _rewind_to_researcher(compiled, thread_config, state, recorder,
         try:
             recorder.record_event(
                 kind="rewind", role="researcher",
-                payload={"sid": state.sid,
+                payload={"sid": state.sid, "as_node": str(as_node),
                          "reason": "mid-flight inject revalidation"},
             )
         except Exception:  # pragma: no cover
@@ -1683,16 +1703,28 @@ def _drive_council_stream(compiled, initial, thread_config, *,
 
     checkpoint_fired = False  # M2: fire the adversary checkpoint once
     MAX_RESUMES = 64  # safety bound vs. a pathological rewind loop
+    # A role is done when its last running task ends, not when its first
+    # fanned-out lane reports (mail #1625: researcher "done" while 6 of
+    # 8 lanes were still making calls). LangGraph's ``tasks`` stream
+    # marks every task's start and end; a graph that emits none (a stub)
+    # keeps the per-update rule below.
+    running: dict[str, int] = {}
+    saw_tasks = False
     try:
         for _ in range(MAX_RESUMES):
             _check_suspend()
             for mode, payload in compiled.stream(
                     stream_input, config=thread_config,
-                    stream_mode=["updates", "values"]):
+                    stream_mode=["updates", "values", "tasks"]):
                 if mode == "values" and isinstance(payload, dict):
                     final_state = payload
                     continue
-                if mode != "updates" or not isinstance(payload, dict):
+                if mode == "tasks" and isinstance(payload, dict):
+                    saw_tasks = True
+                    _track_task(state, running, payload)
+                    continue
+                if mode != "updates" or not isinstance(payload, dict) \
+                        or saw_tasks:
                     continue
                 for node, partial in payload.items():
                     if node in state.progress:

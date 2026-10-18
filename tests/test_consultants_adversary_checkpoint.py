@@ -445,7 +445,9 @@ class TestAdversaryAckEndpoint(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         body = r.json()
         self.assertTrue(body["acked"])
-        self.assertTrue(body["checkpoint_open"])
+        # mail #1625: the reply is the state the ack leaves.
+        self.assertTrue(body["released"])
+        self.assertFalse(body["checkpoint_open"])
         self.assertEqual(body["deadline_ts"], 2000.0)
         # the flag is set for the runner to read+clear
         self.assertTrue(s.take_adversary_ack())
@@ -456,6 +458,7 @@ class TestAdversaryAckEndpoint(unittest.TestCase):
         r = c.post("/v1/consult/csl-ack2/adversary-ack", json={})
         self.assertEqual(r.status_code, 200)
         self.assertFalse(r.json()["checkpoint_open"])
+        self.assertFalse(r.json()["released"])
 
     def test_404_when_unknown(self):
         c, _app = self._client()

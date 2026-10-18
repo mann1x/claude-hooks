@@ -77,8 +77,12 @@ def _unit(name: str) -> str:
 def sandbox_env(spec: RunSpec) -> dict[str, str]:
     """The allowlisted environment (layer 9). Everything else — tokens,
     keys, ``OLLAMA_*``, ``SSH_AUTH_SOCK`` — never reaches the command."""
-    path = [os.path.join(b, "bin") for b in spec.ro_binds
-            if os.path.isdir(os.path.join(b, "bin"))]
+    # A bound ``bin`` directory goes on PATH itself, an install prefix
+    # by its ``bin`` (the toolchains of claude_hooks.sandbox.toolchains
+    # come both ways).
+    path = [b if os.path.basename(b.rstrip("/")) == "bin"
+            else os.path.join(b, "bin") for b in spec.ro_binds]
+    path = [p for p in dict.fromkeys(path) if os.path.isdir(p)]
     path += ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin",
              "/sbin", "/bin"]
     env = {
