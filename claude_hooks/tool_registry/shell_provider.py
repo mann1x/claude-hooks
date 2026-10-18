@@ -69,6 +69,9 @@ class ShellSettings:
     lane_disk_gib: float = 2.0
     free_floor_gib: float = 20.0
     free_floor_pct: float = 10.0
+    #: Write mode on these paths only, each a reflink clone per lane
+    #: (:mod:`claude_hooks.sandbox.clone_views`); empty = a git worktree.
+    write_scopes: tuple[str, ...] = ()
     extra: dict = field(default_factory=dict)
 
 
@@ -81,7 +84,20 @@ _VIEW_TEXT = {
               "included): edit, build, run the tests, even git commit. The "
               "user's files are never changed; what you change is handed back "
               "as a patch for them to review. Other roots are read-only. "),
+    "scoped": ("Only {scopes} {are} YOUR PRIVATE WRITABLE COPY, at the real "
+               "path{s}; the rest of the project and the other roots are "
+               "READ-ONLY. The user's files are never changed; the files you "
+               "change are handed back for them to review. "),
 }
+
+
+def _view_text(settings: "ShellSettings") -> str:
+    if settings.mode == "write" and settings.write_scopes:
+        n = len(settings.write_scopes)
+        return _VIEW_TEXT["scoped"].format(
+            scopes=", ".join(settings.write_scopes), are="is" if n == 1
+            else "are", s="" if n == 1 else "s")
+    return _VIEW_TEXT.get(settings.mode, _VIEW_TEXT["read"])
 
 
 def _spec(settings: ShellSettings) -> dict:
@@ -90,7 +106,7 @@ def _spec(settings: ShellSettings) -> dict:
         "description": (
             "Run a shell command in a sandbox, to answer what reading cannot: "
             "run the tests, a script, a linter, a build check. "
-            + _VIEW_TEXT.get(settings.mode, _VIEW_TEXT["read"]) +
+            + _view_text(settings) +
             "/scratch and /tmp are writable and private to you (/scratch is "
             "kept between your commands). There is no network and no home "
             "directory from the host. Limits: "
@@ -213,7 +229,9 @@ class ShellToolProvider(ToolProvider):
             if key not in self._views:
                 from claude_hooks.sandbox.views import session_views
                 self._views[key] = session_views(
-                    sid=self.sid, cwd=cwd, uid=self._sandbox_uid())
+                    sid=self.sid, cwd=cwd, uid=self._sandbox_uid(),
+                    scopes=list(self.settings.write_scopes) or None,
+                    copy_cap_bytes=int(self.settings.lane_disk_gib * 2**30))
             return self._views[key]
 
     def _sandbox_uid(self) -> Optional[int]:
@@ -231,20 +249,18 @@ class ShellToolProvider(ToolProvider):
             return None
         v.ensure(lane_dirname(lane))
         rec = v.lanes().get(lane_dirname(lane)) or {}
-        if rec.get("state") != "active":
-            return None
+        if rec.get("state") != "active" or not rec.get("wt"):
+            return None     # a scoped view that does not cover the root
         return rec["wt"], self._sandbox_uid()
 
     def view_root(self, cwd: str, lane: Optional[str]):
-        """``(repo, host view dir)`` when ``lane`` has an active write view,
-        so the file tools read what its commands see; else None."""
+        """``[(real path, host view dir), …]`` when ``lane`` has an active
+        write view, so the file tools read what its commands see; else
+        None."""
         v = self.views(cwd)
         if v is None:
             return None
-        rec = v.lanes().get(lane_dirname(lane)) or {}
-        if rec.get("state") != "active":
-            return None
-        return v.repo, rec["wt"]
+        return v.mappings(lane_dirname(lane)) or None
 
     def _roots(self, cwd: str) -> tuple[str, ...]:
         return tuple(os.path.realpath(r) for r in (cwd, *self.extra_roots))
@@ -295,12 +311,15 @@ class ShellToolProvider(ToolProvider):
         refusal = self._space_refusal(ldir)
         if refusal:
             return refusal
-        views, mounts = self.views(cwd), None
+        from claude_hooks.sandbox.views import ViewError
+        try:
+            views, mounts = self.views(cwd), None
+        except ViewError as e:
+            return f"error: your writable view could not be made: {e}"
         if self.settings.mode == "write":
             if views is None:
-                return ("error: shell mode 'write' needs a git work tree; "
-                        f"{root} is not in one")
-            from claude_hooks.sandbox.views import ViewError
+                return ("error: shell mode 'write' needs a git work tree "
+                        f"or declared write scopes; {root} is not in one")
             try:
                 mounts = views.ensure(lane_dirname(lane))
             except (ViewError, OSError) as e:

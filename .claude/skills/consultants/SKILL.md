@@ -228,6 +228,13 @@ are still never changed. Use it when the question is "fix it and show me
 it passes" or "would this change break the tests"; it needs a git root
 (the engine refuses the run otherwise). Say in one line that you used it.
 
+For a tree that is **not a git repo** (or a huge one), name what the
+council may change: `--shell write --write-scope scripts` (repeatable).
+Each lane gets a reflink clone of only those directories, writable at
+their real paths, and everything else stays read-only. Pick the
+smallest scope that covers the fix. The engine refuses a scope outside
+the root, and a big one on a filesystem that cannot reflink.
+
 Returns:
 
 ```json
@@ -724,7 +731,10 @@ After you accept (or whenever the user wants to act on them):
    It checks first and refuses when the patch no longer fits their tree
    (it was made against the tree as the council found it); then offer
    `--3way` (stages the result, may leave conflict markers) or a manual
-   review — never retry silently. `--dry-run` only checks.
+   review — never retry silently. `--dry-run` only checks. A
+   `--write-scope` run holds files, not a patch: apply refuses when any
+   of them changed in the user's tree since the clone (no `--3way`);
+   tell the user which ones, and offer a manual review.
 4. Discard: `claude-consultants discard <sid> --lane <lane>` (or `--all`).
 5. Keeping is fine, but tell the user when it expires: held patches move
    to the session's `expired/` after `[tools.shell] held_ttl_days`

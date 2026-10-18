@@ -331,6 +331,13 @@ class SessionViews:
                  "GIT_ALTERNATE_OBJECT_DIRECTORIES": f"{JAIL_GIT}/objects"}
         return m
 
+    def mappings(self, lane: str) -> list[tuple[str, str]]:
+        """``(real path, host path in the view)`` of an active lane."""
+        rec = self.lanes().get(lane) or {}
+        if rec.get("state") != "active":
+            return []
+        return [(self.repo, rec["wt"])]
+
     def host_path(self, lane: str, path: str) -> str:
         """``path`` (a real-tree path) as it is in ``lane``'s view on the
         host, or unchanged when it is outside the repo or there is none."""
@@ -521,13 +528,33 @@ def _files(names: list[str], numstat: list[str]) -> list[dict]:
     return out
 
 
-def session_views(*, sid: str, cwd: str, uid: Optional[int] = None
-                  ) -> Optional[SessionViews]:
+def session_views(*, sid: str, cwd: str, uid: Optional[int] = None,
+                  scopes: Optional[list] = None,
+                  copy_cap_bytes: Optional[int] = None):
+    """The session's write views at ``cwd``: reflink clones of
+    ``scopes`` when the run declared write scopes (or the session's
+    ``sandbox.json`` says it did), else a git worktree per lane when
+    ``cwd`` is in a work tree, else None."""
+    sdir = os.path.join(cwd, ".claude-hooks", "consultants", sid)
+    saved = _read_json(Path(sdir) / "sandbox.json")
+    if scopes or saved.get("kind") == "clone":
+        from claude_hooks.sandbox.clone_views import CloneViews
+        kw = {} if copy_cap_bytes is None else {"copy_cap_bytes": copy_cap_bytes}
+        return CloneViews(sid=sid, root=saved.get("repo") or cwd,
+                          session_dir=sdir, scopes=scopes, uid=uid, **kw)
     top = toplevel(cwd)
     if top is None:
         return None
-    return SessionViews(sid=sid, repo=top, uid=uid, session_dir=os.path.join(
-        cwd, ".claude-hooks", "consultants", sid))
+    return SessionViews(sid=sid, repo=top, uid=uid, session_dir=sdir)
+
+
+def _from_record(rec: dict):
+    if rec.get("kind") == "clone":
+        from claude_hooks.sandbox.clone_views import CloneViews
+        return CloneViews(sid=rec["sid"], root=rec["repo"],
+                          session_dir=rec["session_dir"])
+    return SessionViews(sid=rec["sid"], repo=rec["repo"],
+                        session_dir=rec["session_dir"])
 
 
 def summary(views: SessionViews, *, include_empty: bool = False) -> str:
@@ -536,8 +563,10 @@ def summary(views: SessionViews, *, include_empty: bool = False) -> str:
              if v.get("state") == HELD or (include_empty and v.get("state"))}
     if not lanes:
         return ""
+    held_as = ("as copies of the changed files" if getattr(
+        views, "kind", "") == "clone" else "as patches")
     L = ["## Sandbox changes", "",
-         "Your files are UNCHANGED. These changes are held, as patches, "
+         f"Your files are UNCHANGED. These changes are held, {held_as}, "
          "from the lanes' private views:", ""]
     for lane, rec in sorted(lanes.items()):
         files = rec.get("files") or []
@@ -569,7 +598,11 @@ def sweep(*, live_sids: set[str], held_ttl_days: float = 7.0,
                 _registry_update(f"{repo}::{sid}", None)
             did.append(f"forget {sid} (repo gone)")
             continue
-        v = SessionViews(sid=sid, repo=repo, session_dir=sdir)
+        try:
+            v = _from_record(rec)
+        except ViewError as e:      # a scope that is gone
+            did.append(f"skip {sid} ({e})")
+            continue
         for lane, lrec in v.lanes().items():
             st = lrec.get("state")
             if st in ACTIVE and sid not in live_sids:

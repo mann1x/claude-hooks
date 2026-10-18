@@ -158,8 +158,8 @@ class ToolRegistry:
             if getattr(owner, "accepts_lane", False):
                 return owner.execute(tool, raw_args, cwd, lane=lane)
             view = self._lane_view(owner, cwd, lane)
-            if view is not None:
-                return _in_view(owner, tool, raw_args, cwd, *view)
+            if view:
+                return _in_view(owner, tool, raw_args, cwd, view)
             return owner.execute(tool, raw_args, cwd)
         except Exception as e:  # pragma: no cover - providers shouldn't raise
             log.exception("provider %s raised executing %s",
@@ -167,8 +167,9 @@ class ToolRegistry:
             return f"error: tool raised: {e}"
 
     def _lane_view(self, owner, cwd: str, lane: Optional[str]):
-        """``(repo, view dir)`` when ``lane`` has a private writable view
-        (plan E): the file tools must read what its commands see."""
+        """``[(real path, view dir), …]`` when ``lane`` has a private
+        writable view (plan E): the file tools must read what its commands
+        see."""
         if lane is None:
             return None
         for p in self.providers:
@@ -247,27 +248,60 @@ class ToolRegistry:
                               getattr(p, "name", "?"))
 
 
-def _in_view(owner, tool: str, raw_args: str, cwd: str, repo: str,
-             view: str) -> str:
-    """Run ``tool`` with the repo's paths moved into ``view``, and the
-    view's paths moved back in the answer, so the model keeps citing the
-    real path it will later find the change at."""
-    def move(v, a, b):
-        if isinstance(v, str):
-            return b + v[len(a):] if v == a or v.startswith(a + "/") else v
-        if isinstance(v, list):
-            return [move(x, a, b) for x in v]
-        if isinstance(v, dict):
-            return {k: move(x, a, b) for k, x in v.items()}
+#: Argument keys that name a path, for a view that does not cover the
+#: cwd: there a relative path is resolved first, so one under a write
+#: scope reads the lane's copy.
+PATH_KEYS = ("path", "file_path", "paths", "cwd", "dir", "directory", "root")
+
+
+def _in_view(owner, tool: str, raw_args: str, cwd: str, maps) -> str:
+    """Run ``tool`` with real paths moved into the lane's view (``maps``:
+    ``[(real, view), …]``, or one such pair), and the view's paths moved
+    back in the answer, so the model keeps citing the real path it will
+    later find the change at."""
+    if maps and isinstance(maps[0], str):
+        maps = [tuple(maps)]
+    maps = sorted(maps, key=lambda m: -len(m[0]))
+
+    def move_str(v):
+        for a, b in maps:
+            if v == a or v.startswith(a + "/"):
+                return b + v[len(a):]
         return v
+
+    def move(v):
+        if isinstance(v, str):
+            return move_str(v)
+        if isinstance(v, list):
+            return [move(x) for x in v]
+        if isinstance(v, dict):
+            return {k: move(x) for k, x in v.items()}
+        return v
+
+    real = os.path.realpath(cwd)
+    run_cwd = move_str(real)
+
+    def absolute(v):
+        if isinstance(v, str) and v and not os.path.isabs(v):
+            p = os.path.normpath(os.path.join(real, v))
+            return p if move_str(p) != p else v
+        if isinstance(v, list):
+            return [absolute(x) for x in v]
+        return v
+
     try:
         args = json.loads(raw_args or "{}")
-        raw_args = json.dumps(move(args, repo, view))
+        if run_cwd == real and isinstance(args, dict):
+            args = {k: absolute(x) if k in PATH_KEYS else x
+                    for k, x in args.items()}
+        raw_args = json.dumps(move(args))
     except (ValueError, TypeError):
         pass
-    real = os.path.realpath(cwd)
-    out = owner.execute(tool, raw_args, move(real, repo, view))
-    return out.replace(view, repo) if isinstance(out, str) else out
+    out = owner.execute(tool, raw_args, run_cwd)
+    if isinstance(out, str):
+        for a, b in maps:
+            out = out.replace(b, a)
+    return out
 
 
 __all__ = ["ToolRegistry", "ApprovalFn"]

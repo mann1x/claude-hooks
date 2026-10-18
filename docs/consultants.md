@@ -1757,6 +1757,46 @@ is never written. (`claude_hooks/sandbox/views.py`.)
   loop iterations than its effort's cap (xhigh: 16, tools stripped at
   14) — writing, running and fixing takes turns of its own.
 
+#### Write scopes (`--write-scope PATH`): a reflink clone per lane
+
+A tree that is not a git repo, or a huge one, gets a writable view of
+**only the directories you name** (`claude_hooks/sandbox/clone_views.py`):
+
+```bash
+claude-consultants ask "fix the quantize script and run its self-test" \
+  --cwd "$(pwd)" --shell write --write-scope scripts [--write-scope conf]
+```
+
+- **View.** Each lane's first command clones every scope with
+  `cp --reflink` into the session store, and the clone is bound
+  read-write at the scope's real path; the rest of the root and the
+  other roots stay read-only. On XFS / btrfs a clone shares the
+  original's data extents, so it costs metadata only. Measured on
+  backup_models (`scripts/`, 4,745 entries / 136 GiB,
+  `scripts/bench_clone_views.py`): 0.6–1.3 s and 3–4 MiB per lane once
+  the filesystem's metadata is warm, 10–15 s for the first lane of a
+  cold one. A filesystem that cannot reflink falls back to a plain copy
+  only while the scope is under `[tools.shell] lane_disk_gib`; a bigger
+  scope is refused, as is one over 250,000 entries. The session store is
+  never cloned. With a scope, write mode uses clones even on a git root,
+  which is the way to give a big repo a cheap view of one part.
+- **When the council ends**, each clone is checked against the manifest
+  taken when it was made. Size, mtime and ctime are compared, so a
+  `touch -d` that restores mtime is still caught. The changed files are
+  moved into `lanes/<lane>/held/` and the clone is removed. A review
+  diff goes to `changes.patch`.
+- **apply** copies the held files back, deletes what the lane deleted,
+  and gives each file its original owner. It refuses as a whole when any
+  of those files changed in your tree since the clone. A deleted
+  directory you have since added files to is kept, and `apply` names it.
+  There is no `--3way`, because the held changes are files, not a git
+  patch. `changes`, `discard`, `sandbox ls|gc` and the TTL work as for
+  worktrees.
+- The lane's file tools read its clone for paths under a scope, given
+  as relative or absolute paths, and the paths are mapped back in their
+  answers. The coder gets a workspace only when a scope is the whole
+  root.
+
 **The launcher.** Where the static `council-sandbox` binary is installed
 and verifies, the default `backend = "auto"` runs commands through it
 instead of `prlimit → setpriv → bwrap`: one binary, no dependencies,

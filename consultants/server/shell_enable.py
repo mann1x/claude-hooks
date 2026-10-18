@@ -46,13 +46,25 @@ def parse(raw: Any) -> Optional[dict] | bool:
             "shell must be true, false, a mode string or an object")
     mode = raw.get("mode") or "read"
     net = raw.get("net") or "none"
+    scopes = raw.get("scopes")
     if mode not in MODES:
         raise ShellRequestError(f"shell mode must be one of {MODES}")
+    if scopes is not None and (
+            not isinstance(scopes, list) or not scopes
+            or not all(isinstance(x, str) and x.strip() for x in scopes)):
+        raise ShellRequestError("shell scopes must be a non-empty list of "
+                                "paths")
+    if scopes and mode != "write":
+        raise ShellRequestError("shell scopes name what write mode may "
+                                "change; they need mode 'write'")
     if net != "none":
         raise ShellRequestError(
             "shell network access (net=proxy|host) is plan E6 and not built "
             "yet; the sandbox runs with net=none")
-    return {"mode": mode, "net": net}
+    out = {"mode": mode, "net": net}
+    if scopes:      # only when given: a run without them is unchanged
+        out["scopes"] = list(scopes)
+    return out
 
 
 def _shell_cfg(cfg: Any):
@@ -106,12 +118,19 @@ def preflight_error(cfg: Any, shell: Optional[dict],
                 "registry back on (config set-tools --enabled true) or run "
                 "without --shell.")
     if shell.get("mode") == "write" and cwd is not None:
-        from claude_hooks.sandbox.views import toplevel
-        if toplevel(cwd) is None:
+        from claude_hooks.sandbox.views import ViewError, toplevel
+        if shell.get("scopes"):
+            from claude_hooks.sandbox.clone_views import resolve_scopes
+            try:
+                resolve_scopes(cwd, shell["scopes"])
+            except ViewError as e:
+                return f"shell write scopes: {e}"
+        elif toplevel(cwd) is None:
             return (f"shell mode 'write' gives each lane a private git "
-                    f"worktree, and {cwd} is not in a git work tree (views "
-                    f"of other trees are plan E3's reflink / overlay, not "
-                    f"built yet). Use --shell read, or run from a git root.")
+                    f"worktree, and {cwd} is not in a git work tree. Name "
+                    f"the directories the council may change with "
+                    f"--write-scope PATH (each lane gets a reflink clone of "
+                    f"them), use --shell read, or run from a git root.")
     from claude_hooks.sandbox import backend_for
     sc = _shell_cfg(cfg)
     pre = backend_for(getattr(sc, "backend", "auto") or "auto").preflight()
@@ -126,8 +145,11 @@ def preflight_error(cfg: Any, shell: Optional[dict],
 def provenance(shell: Optional[dict]) -> str:
     if not shell:
         return ""
+    scopes = shell.get("scopes")
     return (f"shell: enabled since {shell.get('since') or 'this run'} "
-            f"({shell.get('mode', 'read')}, net {shell.get('net', 'none')})")
+            f"({shell.get('mode', 'read')}"
+            + (f" on {', '.join(scopes)}" if scopes else "")
+            + f", net {shell.get('net', 'none')})")
 
 
 def with_provenance(answer: str, shell: Optional[dict]) -> str:
@@ -169,10 +191,13 @@ def settings_for(cfg: Any, shell: dict):
     request (mode and net come from the request)."""
     from claude_hooks.tool_registry.shell_provider import ShellSettings
     sc = _shell_cfg(cfg)
+    scopes = tuple(shell.get("scopes") or ())
     if sc is None:
-        return ShellSettings(mode=shell["mode"], net=shell["net"])
+        return ShellSettings(mode=shell["mode"], net=shell["net"],
+                             write_scopes=scopes)
     return ShellSettings(
         mode=shell["mode"], net=shell["net"], backend=sc.backend,
+        write_scopes=scopes,
         ro_binds=tuple(sc.ro_binds), timeout_s=sc.timeout_s,
         max_timeout_s=sc.max_timeout_s, memory_mib=sc.memory_mib,
         pids=sc.pids, cpu_pct=sc.cpu_pct, lane_disk_gib=sc.lane_disk_gib,

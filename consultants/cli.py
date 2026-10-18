@@ -168,7 +168,7 @@ def cmd_consult(args, base: str) -> int:
     if getattr(args, "skip_preflight", False):
         body["skip_preflight"] = True
     if getattr(args, "shell", None) is not None:
-        body["shell"] = args.shell
+        body["shell"] = _shell_body(args)
     # --trace / --no-trace are deprecated in v1.1 (the JSONL trace
     # was replaced by the per-session transcript.db). The flag is
     # still accepted but no longer forwarded to the engine; warn
@@ -312,7 +312,7 @@ def cmd_follow_up(args, base: str) -> int:
     if getattr(args, "skip_preflight", False):
         body["skip_preflight"] = True
     if getattr(args, "shell", None) is not None:
-        body["shell"] = args.shell
+        body["shell"] = _shell_body(args)
     # Consultancy review loop: ``--allow-extra [N]`` / ``--force`` is
     # the over-cap approval carrier. In the Claude Code harness the
     # skill re-issues the followup with this flag after the user
@@ -1297,6 +1297,20 @@ def cmd_config_set_guards(args, base: str) -> int:
     return _emit_config(cfg, args)
 
 
+def _shell_body(args):
+    """``--shell`` as the request's ``shell`` value; ``--write-scope``
+    paths are made absolute against the run's cwd."""
+    scopes = getattr(args, "write_scope", None)
+    if not scopes or args.shell is False:
+        return args.shell
+    if args.shell != "write":
+        raise CLIError("--write-scope names what --shell write may change; "
+                       "pass --shell write", exit_code=2)
+    base = Path(getattr(args, "cwd", None) or os.getcwd())
+    return {"mode": "write",
+            "scopes": [str((base / s).resolve()) for s in scopes]}
+
+
 def _add_shell_args(p) -> None:
     g = p.add_mutually_exclusive_group()
     g.add_argument(
@@ -1312,6 +1326,13 @@ def _add_shell_args(p) -> None:
         "--no-shell", dest="shell", action="store_false",
         help="No shell for this run (and, on a follow-up, the rest of the "
              "consultancy), even with [tools.shell] default = \"always\".")
+    p.add_argument(
+        "--write-scope", action="append", default=None, metavar="PATH",
+        help="With --shell write: the only directories the lanes may "
+             "change (repeatable). Each lane gets a reflink clone of them "
+             "at their real paths, the rest stays read-only — the way to "
+             "give a writable view of a tree that is not a git repo, or "
+             "of a small part of a huge one.")
 
 
 def cmd_config_set_shell(args, base: str) -> int:

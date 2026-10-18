@@ -370,3 +370,52 @@ class TestWriteView:
         # the restarted lane is told; the command is not re-run
         out = _write_run(git_project, "true", sid="csl-kill")
         assert "view is held" in out   # the sweep froze it: no more commands
+
+
+# ------------------------------------------- write scopes (plan E3, non-git)
+@pytest.fixture
+def scoped_project(project):
+    (project / "scripts").mkdir()
+    (project / "scripts" / "calc.py").write_text(
+        "def add(a, b):\n    return a - b\n")
+    (project / "scripts" / "test_calc.py").write_text(
+        "from calc import add\n\ndef test_add():\n    assert add(2, 2) == 4\n")
+    for f in (project / "scripts").iterdir():
+        os.chmod(f, 0o644)
+    os.chmod(project / "scripts", 0o755)
+    return project
+
+
+def _scoped_run(project, command, lane="researcher:0", sid="csl-sc", t=60):
+    p = ShellToolProvider(sid=sid, settings=ShellSettings(
+        mode="write", write_scopes=(str(project / "scripts"),),
+        free_floor_gib=0, free_floor_pct=0))
+    return p.execute("run_command", json.dumps(
+        {"command": command, "timeout_s": t}), str(project), lane=lane)
+
+
+class TestScopedView:
+
+    def test_only_the_scope_is_writable_and_its_changes_are_held(
+            self, scoped_project):
+        from claude_hooks.sandbox import views as V
+        out = _scoped_run(
+            scoped_project,
+            "sed -i 's/a - b/a + b/' scripts/calc.py && "
+            "cd scripts && " + PY + " -c 'import calc; print(calc.add(2, 2))' "
+            "&& echo SCOPE_OK; echo x > ../outside.txt || echo OUTSIDE_REFUSED")
+        assert "4\nSCOPE_OK" in out and "OUTSIDE_REFUSED" in out, out
+        assert "M scripts/calc.py" in out                # vs the user's tree
+        assert "a - b" in (scoped_project / "scripts" / "calc.py").read_text()
+        assert not (scoped_project / "outside.txt").exists()
+        v = V.session_views(sid="csl-sc", cwd=str(scoped_project))
+        v.freeze_all()
+        assert "scripts/calc.py" in V.summary(v)
+        assert v.apply("researcher-0") == "applied"
+        assert "a + b" in (scoped_project / "scripts" / "calc.py").read_text()
+
+    def test_lanes_get_their_own_clone(self, scoped_project):
+        _scoped_run(scoped_project, "echo one > scripts/lane0.txt")
+        out = _scoped_run(scoped_project, "cat scripts/lane0.txt; ls scripts",
+                          lane="researcher:1")
+        assert "No such file or directory" in out, out
