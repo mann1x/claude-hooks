@@ -262,10 +262,8 @@ DEFAULT_THINK_BY_ROLE: dict[str, Any] = {
 #
 # - ``tool_executor`` → ``gemma4:31b-cloud`` per the user's
 #   observation + the M11c bench (pending).
-# - ``coder`` → ``glm-5.2:cloud`` (succession from the
-#   2026-05-16 M11b winner glm-5.1; see MODEL_SUCCESSIONS)
-#   (suite v1.0 rubric winner: pass=100%, avg_quality=4.88,
-#   median_tokens=1841, median_wall=4.9 s). The constant lives in
+# - ``coder`` → ``RECOMMENDED_CODER_MODEL`` (the 2026-09-23 coder_med
+#   re-baseline: ``deepseek-v4.1-flash:cloud``). The constant lives in
 #   ``consultants/engine/coder_defaults.py`` and is sourced from
 #   the baselines ledger; imported at module top.
 DEFAULT_MODEL_BY_ROLE: dict[str, str] = {
@@ -529,9 +527,8 @@ StoreReaperThread` finds expiring research rows, it groups them by
 
     - ``model = "gemma4:31b-cloud"`` — the M11c-2 tool_executor
       winner; already trusted in the council pipeline.
-    - ``fallback_models = ["glm-5.2:cloud"]`` — caliber-init
-      fallback model; ~64k context window comfortable for prompt
-      overflow.
+    - ``fallback_models = ["glm-5.3-flash:cloud"]`` — the council's
+      glm lane since 2026-10-18 (operator decision; was glm-5.2).
     - ``sweep_interval_seconds = 3600`` — hourly. Cheap on a
       24-hour TTL boundary; safe on a 30-day TTL.
     - ``min_entries_per_distillation = 3`` — cost gate.
@@ -557,7 +554,7 @@ StoreReaperThread` finds expiring research rows, it groups them by
     """
     enabled: bool = True
     model: str = "gemma4:31b-cloud"
-    fallback_models: tuple[str, ...] = ("glm-5.2:cloud",)
+    fallback_models: tuple[str, ...] = ("glm-5.3-flash:cloud",)
     sweep_interval_seconds: float = 3600.0
     min_entries_per_distillation: int = 3
     max_session_entries: int = 50
