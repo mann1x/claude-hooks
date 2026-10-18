@@ -1,6 +1,6 @@
 # Council memory and a critic that can check
 
-Status: M1 in progress (2026-10-18). Owner decisions are marked **(decided)**.
+Status: M1 and M2 done (2026-10-18); M3 next. Owner decisions are marked **(decided)**.
 
 ## Why
 

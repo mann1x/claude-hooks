@@ -1028,8 +1028,21 @@ said so), then `confirmed` / `refuted` / `by_design` / `fixed`, set
 way. Nothing the council runs can settle. Tools: `finding-list`,
 `-show`, `-record`, `-settle`, `-reopen`, `-note` on both memory
 servers (off with `hooks.findings.enabled: false`), and
-`claude-consultants findings list|show|settle|reopen|note`. The
-council reads and writes it from M2 on.
+`claude-consultants findings list|show|settle|reopen|note`.
+
+The council uses it (M2, `consultants/engine/memory.py`). The planner,
+critic, meta-critic and synthesizer get **KNOWN FINDINGS**: the ledger
+entries relevant to the question (shared place first, then shared
+words, up to 12), each with its decision and what that role should do —
+the planner re-verifies a confirmed one with its reproduction instead of
+spending a lane rediscovering it, the critic may challenge a `by_design`
+one only with a run that contradicts the recorded reason, the
+synthesizer tags each ranked item `(known: <id>)` or `(new)`. With no
+ledger the prompts are byte-identical. On a run with the shell, the
+final answer's ranked items and matrix rows that cite a run that reached
+the code are recorded as candidates (or as evidence on the finding they
+restate, the council id added). The `/consultants` review loop lists
+the new candidates and asks the user to settle them.
 
 **The evidence bar** (`consultants/engine/evidence.py`). Prompts were not
 enough, so on a run with the shell:

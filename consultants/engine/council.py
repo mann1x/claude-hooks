@@ -2468,6 +2468,10 @@ def planner_node(state: dict, *, chat_client, model: str,
                 "content": (sys_msg.get("content") or "")
                             + PLANNER_CODER_GATE_BLOCK,
             }
+    # Plan council-memory M2: what earlier councils found and what was
+    # decided, so a known defect is re-verified rather than rediscovered.
+    from consultants.engine.memory import with_known_findings
+    msgs = with_known_findings(msgs, state, "planner")
     try:
         plan, pt, ct = _role_turn(
             chat_client, model, msgs, think=_think_for(state, "planner", model, think),
@@ -3437,6 +3441,12 @@ def researcher_node(state: dict, *,
     }
 
 
+def _with_known(msgs: list[dict], state: dict, role: str) -> list[dict]:
+    """Plan council-memory M2: the project's known findings."""
+    from consultants.engine.memory import with_known_findings
+    return with_known_findings(msgs, state, role)
+
+
 def _with_command_ledger(msgs: list[dict], recorder) -> list[dict]:
     """A critic's prompt on a shell run, with the commands the lanes ran
     (run 3: a lane's "verified live" claim contradicted its own output
@@ -3494,6 +3504,7 @@ def critic_node(state: dict, *, chat_client, model: str,
             for t in tool_specs),
     )
     msgs = _with_claims_framing(msgs, state)
+    msgs = _with_known(msgs, state, "critic")
     if shell:
         msgs = _with_command_ledger(msgs, recorder)
     t0 = time.monotonic()
@@ -3655,6 +3666,7 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
         strictness=_mc_strict, adversarial_focus=_mc_focus,
     )
     msgs = _with_claims_framing(msgs, state)
+    msgs = _with_known(msgs, state, "meta_critic")
     if shell:
         msgs = _with_command_ledger(msgs, recorder)
     t0 = time.monotonic()
@@ -3909,6 +3921,7 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
     # the shell, or with a checkpoint brief, the synthesizer is told
     # which commands really ran and must give an Unverified section.
     from consultants.engine import evidence
+    msgs = _with_known(msgs, state, "synthesizer")
     evidence_mode = shell or bool(_additional_context_for(state,
                                                           "synthesizer"))
     _rows = None
@@ -3985,6 +3998,13 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                 duration_seconds=0.0,
             )],
         }
+    # Plan council-memory M2: what the answer ranked, citing a run that
+    # reached the code, goes to the ledger as candidates (never settled).
+    if _rows is not None:
+        from consultants.engine.memory import record_answer
+        _meta = getattr(recorder, "_meta", None)
+        record_answer(cwd or state.get("cwd") or "",
+                      getattr(_meta, "sid", "") or "", text, _rows)
     dt = time.monotonic() - t0
     # M0: pull the synthesizer's self-confidence out of ``text`` BEFORE
     # the citation lint reassigns it and before the user-facing return,

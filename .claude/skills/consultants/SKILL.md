@@ -624,6 +624,43 @@ consultancy (and persisted, so it survives compaction). Never tell the
 user the cap "can only be raised on the next follow-up" — that is what
 `grant` is for.
 
+### 2b. Settle what the council found (the findings ledger)
+
+On a run with the shell, every ranked item and matrix row that cites a
+run that reached the code is recorded in the project's findings ledger
+(`<project>/.claude-hooks/findings/`) as a **candidate**, or as new
+evidence on the finding it restates. Councils read the ledger: a
+confirmed finding is re-verified instead of rediscovered, a refuted or
+by-design one is not re-raised without a run against the recorded
+decision. A finding is settled **only** by the user or by you — never
+by the council.
+
+After you accept (or the loop stops), list what this consultancy left:
+
+```
+claude-consultants findings list --status candidate --cwd "$(pwd)"
+```
+
+For each candidate, propose a settlement with its reason and ask the
+user to decide (one question, all candidates):
+
+- `confirmed` — the cited run shows it and you re-checked the output;
+- `refuted` — a run shows the opposite (name it);
+- `by_design` — the behaviour is intended (name the comment, doc or
+  decision that says so);
+- leave it `candidate` when nothing settles it yet.
+
+Apply the user's decisions; settle on your own (`--by assistant`) only
+what the user has told you to decide:
+
+```
+claude-consultants findings settle <id> --status confirmed --reason "<run / re-check>" --by user --cwd "$(pwd)"
+claude-consultants findings settle <id> --status fixed --reason "<what fixed it>" --commit <sha> --by user --cwd "$(pwd)"
+claude-consultants findings reopen <id> --reason "<new evidence>" --by user --cwd "$(pwd)"
+```
+
+The `finding-*` MCP tools do the same from either memory server.
+
 ### 3. Stop conditions (mirror /get-advice)
 
 Stop the loop when **any** of:
