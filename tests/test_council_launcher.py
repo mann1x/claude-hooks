@@ -404,5 +404,23 @@ class TestLiveLauncher:
         assert r.returncode == 1 and "unknown option" in r.stderr
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="linux")
+@pytest.mark.parametrize("which", ["bwrap", "launcher"])
+def test_the_deploy_smoke_passes_on_a_good_jail(which):
+    """verify_deploy's escape smoke, run as deploy runs it. Its pid check
+    once allowed 4 processes where the probe pipeline itself is 5, and
+    the first deploy failed on a correct jail."""
+    from claude_hooks.sandbox.linux_bwrap import BwrapBackend, LauncherBackend
+    if which == "launcher":
+        if BIN is None:
+            pytest.skip("no council-sandbox that verifies against the pin")
+        be = LauncherBackend(BIN)
+    else:
+        be = BwrapBackend()
+    if not be.preflight().ok:
+        pytest.skip(be.preflight().reason())
+    assert launcher.escape_smoke(be) == []
+
+
 def test_json_pin_is_valid_json():
     json.loads(launcher.PIN.read_text())

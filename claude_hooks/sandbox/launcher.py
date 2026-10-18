@@ -320,7 +320,10 @@ SMOKE = (
     ("/usr read-only", "! touch /usr/.council-x 2>/dev/null"),
     ("/etc filtered", "[ ! -e /etc/shadow ]"),
     ("loopback only", "[ \"$(grep -c : /proc/net/dev)\" = 1 ]"),
-    ("own pid namespace", "[ \"$(ls /proc | grep -c '^[0-9]')\" -le 4 ]"),
+    # The caller's pid must be invisible; the jail's own pipeline (pid 1,
+    # sh, the $( ) subshell, ls, grep) is five processes already.
+    ("own pid namespace", "[ ! -e /proc/{caller} ] && "
+     "[ \"$(ls /proc | grep -c '^[0-9]')\" -lt 10 ]"),
     ("no new namespaces", "! unshare -U true 2>/dev/null"),
     ("no capabilities", "grep -q '^CapEff:[[:space:]]*0*$' /proc/self/status"),
     ("no_new_privs", "grep -q '^NoNewPrivs:[[:space:]]*1' /proc/self/status"),
@@ -333,8 +336,9 @@ def escape_smoke(backend) -> list[str]:
     (empty = every escape attempt was refused)."""
     from claude_hooks.sandbox.linux_bwrap import NOBODY, is_root
     from claude_hooks.sandbox.spec import Limits, RunSpec
-    script = "\n".join(f'if {t}; then echo "ok {n}"; else echo "FAIL {n}"; fi'
-                       for n, t in SMOKE)
+    script = "\n".join(
+        f'if {t.replace("{caller}", str(os.getpid()))}; then echo "ok {n}"; '
+        f'else echo "FAIL {n}"; fi' for n, t in SMOKE)
     scratch = tempfile.mkdtemp(prefix="council-smoke-")
     try:
         if is_root():
