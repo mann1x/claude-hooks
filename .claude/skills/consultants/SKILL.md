@@ -648,6 +648,9 @@ user to decide (one question, all candidates):
 - `refuted` — a run shows the opposite (name it);
 - `by_design` — the behaviour is intended (name the comment, doc or
   decision that says so);
+- `merge into <id>` — it restates a finding the ledger already has (a
+  council can record the same defect twice under other words); the
+  target keeps its status and gains this one's evidence;
 - leave it `candidate` when nothing settles it yet.
 
 Apply the user's decisions; settle on your own (`--by assistant`) only
@@ -657,7 +660,11 @@ what the user has told you to decide:
 claude-consultants findings settle <id> --status confirmed --reason "<run / re-check>" --by user --cwd "$(pwd)"
 claude-consultants findings settle <id> --status fixed --reason "<what fixed it>" --commit <sha> --by user --cwd "$(pwd)"
 claude-consultants findings reopen <id> --reason "<new evidence>" --by user --cwd "$(pwd)"
+claude-consultants findings merge <dup-id> --into <id> --reason "<why it is the same finding>" --by user --cwd "$(pwd)"
 ```
+
+A merged finding leaves the list but keeps its file under
+`findings/merged/` and its id: a later tag of it lands on the target.
 
 The `finding-*` MCP tools do the same from either memory server.
 

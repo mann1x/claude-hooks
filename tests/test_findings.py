@@ -1,7 +1,6 @@
 """The council findings ledger (docs/PLAN-council-memory.md, M1)."""
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 
@@ -124,7 +123,8 @@ class TestTools:
     def test_the_catalog_and_a_round_trip(self, lg):
         names = {t["name"] for t in tool_catalog()}
         assert names == {"finding-list", "finding-show", "finding-record",
-                         "finding-settle", "finding-reopen", "finding-note"}
+                         "finding-settle", "finding-reopen", "finding-merge",
+                         "finding-note"}
         ft = FindingTools(lambda: lg)
         out = ft.call("finding-record", {"title": "t", "claim": CLAIM,
                                          "paths": [PATH]})
@@ -199,3 +199,80 @@ class TestSeedBugs:
         monkeypatch.chdir(proj)
         f, _ = Ledger(".").record(*self.CREDIT)
         assert f.id == "csf-1"
+
+
+class TestMerge:
+    """Run 7 left three duplicates settled beside their originals
+    (csf-15 of csf-7, csf-17 / csf-18 of csf-12)."""
+
+    def _pair(self, lg):
+        a, _ = lg.record("apply_patch create, then edit refused", CLAIM,
+                         paths=[PATH], council="csl-1",
+                         evidence="C212 exit 1", reproduce="bun x vitest run a.test.ts")
+        lg.settle(a.id, "confirmed", "re-run on ac1ee35", by="assistant")
+        b, _ = lg.record("adding a file via patch skips noteRead",
+                         "grep launders nothing here, wholly other words",
+                         paths=["executors/other.ts:9", "apply-patch.ts:383"],
+                         council="csl-7", evidence="C216 shows it")
+        return a, b
+
+    def test_the_duplicate_folds_into_the_target(self, lg):
+        a, b = self._pair(lg)
+        t = lg.merge(b.id, a.id, "restates it (run 7)", by="assistant")
+        assert t.id == a.id and t.status == "confirmed"
+        assert t.decision == "re-run on ac1ee35"
+        assert t.councils == ["csl-1", "csl-7"]
+        assert any("C216 shows it" in ln for ln in t.evidence_lines)
+        assert any("C212 exit 1" in ln for ln in t.evidence_lines)
+        assert "executors/other.ts:9" in t.paths
+        assert "apply-patch.ts:383" not in t.paths       # a bare name it has
+        assert f"merged {b.id} (" in t.section("Log")
+        assert [f.id for f in lg.list()] == [a.id]
+        assert lg.merged_path(b.id).is_file()
+
+    def test_the_merged_id_still_leads_somewhere_and_is_never_reused(self, lg):
+        a, b = self._pair(lg)
+        lg.merge(b.id, a.id, "dup", by="user")
+        assert lg.resolve(b.id) == a.id and lg.resolve(a.id) == a.id
+        assert lg.resolve("zzf-9") is None
+        with pytest.raises(Exception, match=f"{b.id} was merged into {a.id}"):
+            lg.read(b.id)
+        c, created = lg.record("something new", "a wholly unrelated claim "
+                               "about bash", paths=["bash.ts:1"])
+        assert created and int(c.id.split("-")[1]) > int(b.id.split("-")[1])
+        g, created = lg.record("x", "y", known=b.id, council="csl-8")
+        assert not created and g.id == a.id and "csl-8" in g.councils
+
+    def test_a_chain_resolves_to_the_end(self, lg):
+        a, b = self._pair(lg)
+        c, _ = lg.record("third", "a wholly unrelated claim about awk",
+                         paths=["awk.ts:5"])
+        lg.merge(b.id, c.id, "dup", by="user")
+        lg.merge(c.id, a.id, "dup", by="user")
+        assert lg.resolve(b.id) == a.id
+
+    @pytest.mark.parametrize("by,reason,msg", [
+        ("council", "dup", "only user or assistant"),
+        ("user", " ", "needs a reason"),
+    ])
+    def test_refused(self, lg, by, reason, msg):
+        a, b = self._pair(lg)
+        with pytest.raises(ValueError, match=msg):
+            lg.merge(b.id, a.id, reason, by=by)
+        with pytest.raises(ValueError, match="into itself"):
+            lg.merge(a.id, a.id, "x", by="user")
+        assert {f.id for f in lg.list()} == {a.id, b.id}
+
+    def test_the_tool_and_the_cli(self, tmp_path, lg):
+        a, b = self._pair(lg)
+        ft = FindingTools(lambda: lg)
+        assert "Not done: only user or assistant" in ft.call(
+            "finding-merge", {"id": b.id, "into": a.id, "reason": "x",
+                              "by": "council"})
+        r = subprocess.run([sys.executable, "-m", "consultants.cli", "findings",
+                            "merge", b.id, "--into", a.id, "--reason", "dup",
+                            "--by", "assistant", "--cwd", str(tmp_path)],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.startswith(f"merged {b.id} into {a.id}")
+        assert "was merged into" in ft.call("finding-show", {"id": b.id})

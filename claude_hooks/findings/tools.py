@@ -1,7 +1,7 @@
 """The ``finding-*`` MCP tools, served by both memory servers.
 
 They work on the project's ledger files alone, so a host with no SQL
-store has them too. ``finding-settle`` and ``finding-reopen`` take a
+store has them too. ``finding-settle``, ``finding-reopen`` and ``finding-merge`` take a
 ``by`` of ``user`` or ``assistant``: a council records candidates and
 never settles (docs/PLAN-council-memory.md).
 """
@@ -72,6 +72,19 @@ def tool_catalog() -> list[dict]:
              "id": {"type": "string"}, "reason": {"type": "string"},
              "by": {"type": "string", "enum": list(DECIDERS)}},
              "required": ["id", "reason", "by"]}},
+        {"name": "finding-merge",
+         "description": (
+             "Fold a finding that restates another into it: the target "
+             "keeps its status and decision and gains the duplicate's "
+             "evidence, councils and paths; the duplicate leaves the list "
+             "(kept under merged/, its id never reused). Only the user or "
+             "the assistant merges, with the reason."),
+         "inputSchema": {"type": "object", "properties": {
+             "id": {"type": "string", "description": "the duplicate"},
+             "into": {"type": "string", "description": "the finding it restates"},
+             "reason": {"type": "string"},
+             "by": {"type": "string", "enum": list(DECIDERS)}},
+             "required": ["id", "into", "reason", "by"]}},
         {"name": "finding-note",
          "description": "Append a line to a finding's log.",
          "inputSchema": {"type": "object", "properties": {
@@ -151,6 +164,10 @@ class FindingTools:
         if name == "finding-reopen":
             f = lg.reopen(str(a["id"]), a.get("reason", ""), by=a.get("by", ""))
             return f"reopened {row(f)}"
+        if name == "finding-merge":
+            f = lg.merge(str(a["id"]), str(a.get("into") or ""),
+                         a.get("reason", ""), by=a.get("by", ""))
+            return f"merged {a['id']} into {row(f)}"
         if name == "finding-note":
             f = lg.note(str(a["id"]), a.get("text", ""))
             return f"noted on {f.id}"

@@ -22,7 +22,7 @@ from typing import Iterable, Iterator, Optional, Sequence
 
 from claude_hooks._atomic import write_text_atomic
 from claude_hooks.findings.model import (
-    CANDIDATE, CLAIM, DECIDERS, DECISION, FIXED, REPRODUCE, SETTLED,
+    CANDIDATE, CLAIM, DECIDERS, DECISION, EVIDENCE, FIXED, REPRODUCE, SETTLED,
     SEVERITIES, Finding, normalise_status,
 )
 from claude_hooks.tasks.files import (
@@ -32,6 +32,11 @@ from claude_hooks.tasks.model import TaskFormatError, stamp
 
 FINDINGS_DIR = Path(".claude-hooks") / "findings"
 CONFIG = "config.toml"
+#: Where a merged finding goes: out of the listing, its id kept so it is
+#: never reused and a later tag of it still finds where it went.
+MERGED_DIR = "merged"
+MERGED_INTO = "merged_into"
+_MERGE_HOPS = 20
 _FILE = re.compile(r"^([a-z][a-z0-9]*)-(\d+)\.md$")
 _ALLOCATE_ATTEMPTS = 50
 
@@ -192,9 +197,35 @@ class Ledger:
     def path_for(self, fid: str) -> Path:
         return self.dir / f"{fid.strip().lower()}.md"
 
+    def merged_path(self, fid: str) -> Path:
+        return self.dir / MERGED_DIR / f"{fid.strip().lower()}.md"
+
+    def resolve(self, fid: str) -> Optional[str]:
+        """The id a finding lives under now: ``fid`` itself, or the
+        finding it was merged into (followed through chains); None when
+        neither exists."""
+        cur = (fid or "").strip().lower()
+        for _ in range(_MERGE_HOPS):
+            if not cur:
+                return None
+            if self.path_for(cur).is_file():
+                return cur
+            m = self.merged_path(cur)
+            if not m.is_file():
+                return None
+            try:
+                cur = str(Finding.from_markdown(m.read_text(encoding="utf-8"))
+                          .extra.get(MERGED_INTO) or "").strip().lower()
+            except (OSError, UnicodeDecodeError, TaskFormatError):
+                return None
+        return None
+
     def read(self, fid: str) -> Finding:
         p = self.path_for(fid)
         if not p.is_file():
+            to = self.resolve(fid)
+            if to and to != fid.strip().lower():
+                raise FindingNotFound(f"{fid} was merged into {to}")
             raise FindingNotFound(f"no finding {fid} in {self.dir}")
         return Finding.from_markdown(p.read_text(encoding="utf-8"), source=str(p))
 
@@ -222,10 +253,12 @@ class Ledger:
     def _next_number(self) -> int:
         n = 0
         pre = self.prefix
-        try:
-            names = os.listdir(self.dir)
-        except FileNotFoundError:
-            names = []
+        names = []
+        for d in (self.dir, self.dir / MERGED_DIR):
+            try:
+                names += os.listdir(d)
+            except FileNotFoundError:
+                pass
         for name in names:
             m = _FILE.match(name.lower())
             if m and m.group(1) == pre:
@@ -281,7 +314,8 @@ class Ledger:
         if not (title or "").strip() or not (claim or "").strip():
             raise ValueError("a finding needs a title and a claim")
         hit = None
-        if known and self.path_for(known).exists():
+        known = self.resolve(known) if known else None
+        if known:
             try:
                 hit = self.read(known)
             except (OSError, ValueError):
@@ -361,6 +395,46 @@ class Ledger:
         f.touch()
         self.write(f)
         return f
+
+    def merge(self, fid: str, into: str, reason: str, *, by: str) -> Finding:
+        """Fold ``fid``, a finding that restates ``into``, into it. Only
+        ``user`` / ``assistant``, with a reason. ``into`` keeps its own
+        status and decision and gains ``fid``'s evidence, councils, paths,
+        symbols and (when it has none) reproduction; ``fid`` moves to
+        ``merged/`` with ``merged_into`` set, so its id is never reused
+        and a later tag of it lands on ``into``. Returns ``into``."""
+        self._check_decider(by, reason)
+        a, b = fid.strip().lower(), into.strip().lower()
+        if a == b:
+            raise ValueError("a finding cannot be merged into itself")
+        dup = self.read(a)
+        tgt = self.read(b)
+        for line in reversed(dup.evidence_lines):
+            if line not in tgt.evidence_lines:
+                tgt._prepend(EVIDENCE, line)
+        for c in dup.councils:
+            if c not in tgt.councils:
+                tgt.councils.append(c)
+        for p in dup.paths:
+            if p not in tgt.paths and place_score(tgt.paths, [p]) < 1.0:
+                tgt.paths.append(p)
+        for sym in dup.symbols:
+            if sym not in tgt.symbols:
+                tgt.symbols.append(sym)
+        if dup.reproduce and not tgt.reproduce:
+            tgt.set_section(REPRODUCE, dup.reproduce)
+        tgt.add_log(f"merged {dup.id} ({dup.title}, was {dup.status}) by "
+                    f"{by}: {reason}")
+        tgt.touch()
+        self.write(tgt)
+        dup.extra[MERGED_INTO] = tgt.id
+        dup.add_log(f"merged into {tgt.id} by {by}: {reason}")
+        dup.touch()
+        dest = self.merged_path(dup.id)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        write_text_atomic(dest, dup.to_markdown())
+        self.path_for(dup.id).unlink()
+        return tgt
 
     def note(self, fid: str, text: str) -> Finding:
         if not (text or "").strip():

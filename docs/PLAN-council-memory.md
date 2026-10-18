@@ -122,9 +122,15 @@ when a ledger outgrows that.
 
 - `claude_hooks/findings/` — model, ledger, matching (no engine import).
 - MCP tools on both memory servers (`finding-list`, `-show`, `-record`,
-  `-settle`, `-reopen`, `-note`), off with `hooks.findings.enabled:
+  `-settle`, `-reopen`, `-merge`, `-note`), off with `hooks.findings.enabled:
   false`.
-- `claude-consultants findings list|show|settle|reopen|note`.
+- `claude-consultants findings list|show|settle|reopen|merge|note`.
+- `merge <dup> --into <id>` (user / assistant, with a reason) folds a
+  duplicate into the finding it restates: the target keeps its status
+  and decision and gains the duplicate's evidence, councils and paths;
+  the duplicate moves to `findings/merged/` with `merged_into`, its id
+  never reused, and `resolve()` follows it (an answer tagging the old
+  id lands on the target).
 
 ## M2 — the council reads and writes the ledger
 

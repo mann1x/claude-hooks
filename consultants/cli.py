@@ -472,6 +472,10 @@ def cmd_findings(args, base: str) -> int:
             f = lg.reopen(_need(args.id, "id"), _need(args.reason, "--reason"),
                           by=args.by)
             print(f"reopened {row(f)}")
+        elif args.action == "merge":
+            f = lg.merge(_need(args.id, "id"), _need(args.into, "--into"),
+                         _need(args.reason, "--reason"), by=args.by)
+            print(f"merged {args.id} into {row(f)}")
         elif args.action == "note":
             f = lg.note(_need(args.id, "id"), _need(args.reason, "--reason"))
             print(f"noted on {f.id}")
@@ -2556,15 +2560,16 @@ def build_parser() -> argparse.ArgumentParser:
     # findings ledger (docs/PLAN-council-memory.md)
     fd_ = sub.add_parser(
         "findings", help="The project's council findings ledger: list, "
-                         "show, settle, reopen, note (local).")
+                         "show, settle, reopen, merge, note (local).")
     fd_.add_argument("action", choices=("list", "show", "settle", "reopen",
-                                        "note"))
+                                        "merge", "note"))
+    fd_.add_argument("--into", help="merge: the finding the duplicate restates")
     fd_.add_argument("id", nargs="?")
     fd_.add_argument("--cwd", help="Project root (default: cwd).")
     fd_.add_argument("--status", help="list: filter (a status or 'settled'); "
                                       "settle: confirmed | refuted | "
                                       "by_design | fixed")
-    fd_.add_argument("--reason", help="settle / reopen: why; note: the text")
+    fd_.add_argument("--reason", help="settle / reopen / merge: why; note: the text")
     fd_.add_argument("--by", choices=("user", "assistant"), default="user",
                      help="who decides (default user)")
     fd_.add_argument("--commit", help="settle fixed: the commit")
