@@ -168,7 +168,12 @@ def record_answer(cwd: str, sid: str, answer: str,
             return []
         lg = Ledger(findings_root(cwd))
         out = []
+        rows_seen: set[int] = set()
         for it in items:
+            if it.get("kind") == "cell":      # audited per cell, kept per row
+                if it["start"] in rows_seen:
+                    continue
+                rows_seen.add(it["start"])
             text = " ".join(it["text"].split())
             title = evidence._label(it["text"])[:160]
             f, created = lg.record(

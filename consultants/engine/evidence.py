@@ -488,7 +488,7 @@ DEFECT_SECTION = re.compile(
 #: Sections that hold what is not ranked.
 UNRANKED_SECTION = re.compile(
     r"unverified|dropped|read,? not run|not run|fixed|usefulness|"
-    r"improvement|recommend|reducer|invariant|sandbox", re.I)
+    r"improvement|recommend|reducer|invariant|sandbox|held", re.I)
 _TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{3,}")
 _ITEM = re.compile(r"^(\s{0,3})(?:[-*+]|\d{1,3}[.)])\s+\S")
 READ_NOT_RUN_HEADING = re.compile(
@@ -577,6 +577,57 @@ def _label(item_text: str) -> str:
     return s if len(s) <= 220 else s[:220] + "…"
 
 
+#: A reason for dropping a run that says what happened to it.
+DROPPED_REASON_OK = re.compile(
+    r"\bre-?run|\bduplicate|\bsame (?:command|run|test)|\bharness error|"
+    r"\bsetup\b|did not load|never reached|failed to load|cannot find|"
+    r"not found|\bno tests?\b|timed? ?out|\bkilled\b", re.I)
+#: Thin reasons (run 6, mail #1647: "General test run", "Not needed for
+#: final result" for ~25 runs) asked to be revised from this many on.
+THIN_DROPPED_MIN = 3
+#: One reason given verbatim to this many runs says nothing about each
+#: (run 6: "Superseded by C387" for 12 runs, most not about C387's file).
+REPEATED_REASON_MIN = 5
+THIN_DROPPED_NOTE = ("harness: this reason does not say what the run "
+                     "showed or why that does not change the answer")
+_DROPPED_LINE = re.compile(
+    r"^\s*[-*+]\s+\**\s*(C\d{1,4}(?:\s*[,–-]\s*C?\d{1,4})*)\s*\**"
+    r"\s*(?:[:—–]|-\s)\s*(.+?)\s*$")
+
+
+def thin_dropped(text: str) -> list[dict]:
+    """The ``## Dropped`` entries whose reason is thin: ``{line, ids,
+    reason}``. A reason is thin when it names no other run, is not a
+    stated rerun / setup / harness reason, and has fewer than 8 words,
+    or when it is given verbatim to :data:`REPEATED_REASON_MIN` runs or
+    more."""
+    lines = (text or "").split("\n")
+    entries = []
+    for heading, a, b in _sections(lines):
+        if not re.match(r"dropped\b", heading, re.I) or "omission" in heading.lower():
+            continue
+        for i in range(a, b):
+            m = _DROPPED_LINE.match(lines[i])
+            if m:
+                entries.append({"line": i, "ids": m.group(1),
+                                "reason": m.group(2).strip()})
+    counts: dict[str, int] = {}
+    for e in entries:
+        k = " ".join(e["reason"].lower().strip(" .").split())
+        counts[k] = counts.get(k, 0) + 1
+    out = []
+    for e in entries:
+        r = e["reason"]
+        k = " ".join(r.lower().strip(" .").split())
+        if THIN_DROPPED_NOTE in r:
+            continue
+        stock = not CMD_REF.search(r) and not DROPPED_REASON_OK.search(r) \
+            and len(re.findall(r"\w+", r)) < 8
+        if stock or counts[k] >= REPEATED_REASON_MIN:
+            out.append(e)
+    return out
+
+
 @dataclass
 class Audit:
     missing_unverified: bool = False
@@ -584,10 +635,13 @@ class Audit:
     unbacked: list = field(default_factory=list)
     #: Probe groups the answer does not mention.
     uncited: list = field(default_factory=list)
+    #: ``## Dropped`` entries with a thin reason (:func:`thin_dropped`).
+    thin: list = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return not (self.missing_unverified or self.unbacked or self.uncited)
+        return not (self.missing_unverified or self.unbacked or self.uncited
+                    or len(self.thin) >= THIN_DROPPED_MIN)
 
 
 def audit_answer(text: str, rows: Optional[list[dict]]) -> Audit:
@@ -602,6 +656,7 @@ def audit_answer(text: str, rows: Optional[list[dict]]) -> Audit:
                   if not (cited(it["text"]) & probe_ns)]
     refs = cited(text)
     a.uncited = [g for g in groups if not any(r["n"] in refs for r in g)]
+    a.thin = thin_dropped(text)
     return a
 
 
@@ -642,6 +697,17 @@ def revision_note(a: Audit) -> str:
                 f"  - {_run_line(g)}" for g in a.uncited[:MAX_LISTED])
             + (f"\n  - … and {len(a.uncited) - MAX_LISTED} more"
                if len(a.uncited) > MAX_LISTED else ""))
+    if len(a.thin) >= THIN_DROPPED_MIN:
+        parts.append(
+            "- These `## Dropped` reasons do not say what the run showed. "
+            "For each, say what it printed and why that does not change the "
+            "answer, or name the run that supersedes it and what that run "
+            "shows of the same code; one reason copied to many runs says "
+            "nothing about each:\n" + "\n".join(
+                f"  - {e['ids']}: {e['reason'][:120]}"
+                for e in a.thin[:MAX_LISTED])
+            + (f"\n  - … and {len(a.thin) - MAX_LISTED} more"
+               if len(a.thin) > MAX_LISTED else ""))
     return "\n".join(parts)
 
 
@@ -676,6 +742,10 @@ def enforce(text: str, a: Audit) -> str:
     if a.ok:
         return text
     lines = text.split("\n")
+    if len(a.thin) >= THIN_DROPPED_MIN:      # in place, before lines move
+        for e in a.thin:
+            lines[e["line"]] = lines[e["line"]].rstrip() + \
+                f" _({THIN_DROPPED_NOTE})_"
     moved = []
     for it in sorted(a.unbacked, key=lambda x: -x["start"]):
         moved.insert(0, f"- {_label(it['text'])}: {MOVED_NOTE}.")
@@ -711,18 +781,28 @@ CLAIM_AUDIT_SYSTEM = (
     "a test ran or passed, or shows a setup failure. A passing test does "
     "not show a defect unless what it printed does.\n"
     "- CONTRADICTED: the output shows the opposite of the claim.\n"
+    "- PARTLY: the claim makes several assertions (clauses joined by "
+    "\"and\", \"also\", a semicolon, a second consequence) and the output "
+    "shows some of them but not all. Name the clauses it does not show.\n"
+    "Judge every clause of a claim, not only its first: a claim is SHOWN "
+    "only when the output shows all of it. "
     "Use only the output given; never what the claim says it shows. "
     "Answer one line per claim and nothing else:\n"
-    "`A<k>: SHOWN|NOT SHOWN|CONTRADICTED — <the printed line you relied "
-    "on, or what is missing>`")
+    "`A<k>: SHOWN|NOT SHOWN|CONTRADICTED|PARTLY — <the printed line you "
+    "relied on, or what is missing>`")
 CLAIM_AUDIT_MAX_ITEMS = 12
 CLAIM_AUDIT_RUNS_PER_ITEM = 3
 CLAIM_AUDIT_OUTPUT_CHARS = 1500
 _VERDICT_LINE = re.compile(
-    r"^\W*A(\d{1,3})\W*[:.)\]-]\s*\**\s*(NOT\s+SHOWN|CONTRADICTED|SHOWN)\b"
-    r"\**\s*(?:[—–:-]+\s*)?(.*)$", re.I | re.M)
+    r"^\W*A(\d{1,3})\W*[:.)\]-]\s*\**\s*(NOT\s+SHOWN|CONTRADICTED|PARTLY|"
+    r"SHOWN)\b\**\s*(?:[—–:-]+\s*)?(.*)$", re.I | re.M)
 NOT_SHOWN_NOTE = ("moved here by the harness's audit: {verdict} by its cited "
                   "run(s) {ids} ({why})")
+#: Council run 6 (mail #1647): ranked #2 said "launders and clobbers
+#: concurrent writers"; its run showed only the first.
+PARTLY_NOTE = ("only part of this is shown by {ids}; not shown: {why} "
+               "(harness's audit)")
+PARTLY_UNVERIFIED = "{label} — the part its runs {ids} do not show: {why}."
 
 
 def _shown_output(r: dict) -> str:
@@ -736,15 +816,37 @@ def _shown_output(r: dict) -> str:
 
 
 #: A case mark in a table cell (run 5's edge-case matrix).
-CASE_MARK = re.compile(r"[✓✔⚠✗✘❌](?:\ufe0f)?")
+CASE_MARK = re.compile(r"[✓✔⚠✗✘❌](?:️)?")
 _CODE_CITE = re.compile(r"[\w./-]+\.\w{1,6}:\d+")
-MATRIX_MAX_ITEMS = 16
+#: Marked cells audited, over all matrix rows.
+MATRIX_MAX_ITEMS = 40
+
+
+def _cells(row: str) -> list[str]:
+    s = row.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return s.split("|")
+
+
+def _header(lines: list[str], i: int) -> list[str]:
+    """The header cells of the table row ``lines[i]`` is in."""
+    j = i
+    while j > 0 and lines[j - 1].strip().startswith("|"):
+        j -= 1
+    if j + 1 < len(lines) and _TABLE_SEP.match(lines[j + 1].strip()):
+        return [c.strip() for c in _cells(lines[j])]
+    return []
 
 
 def matrix_rows(text: str) -> list[dict]:
     """Table rows outside the ranked and unranked sections that mark a
     case ✓ / ⚠ / ✗ (council run 5, mail #1641: "Multibyte ✓" was wrong
-    and cited a line read, not a run). ``{start, end, text, kind}``."""
+    and cited a line read, not a run). ``{start, end, text, kind,
+    cols}``: ``cols`` is ``[(column, header, cell)]`` of every marked
+    cell (run 6, mail #1647: a row has a mark per tool)."""
     lines = (text or "").split("\n")
     ranked = {it["start"] for it in ranked_items(text)}
     out = []
@@ -757,22 +859,48 @@ def matrix_rows(text: str) -> list[dict]:
                 continue
             if i + 1 < b and _TABLE_SEP.match(lines[i + 1].strip()):
                 continue                       # the header row
-            if CASE_MARK.search(lines[i]):
-                out.append({"start": i, "end": i + 1, "text": lines[i],
-                            "kind": "cell"})
+            if not CASE_MARK.search(lines[i]):
+                continue
+            head = _header(lines, i)
+            cols = [(k, head[k] if k < len(head) else f"column {k + 1}",
+                     c.strip()) for k, c in enumerate(_cells(lines[i]))
+                    if CASE_MARK.search(c)]
+            out.append({"start": i, "end": i + 1, "text": lines[i],
+                        "kind": "cell", "cols": cols})
     return out
 
 
-def not_tested(row: str, why: str) -> str:
-    """``row`` with every case mark replaced by ``not tested (why)``."""
-    return CASE_MARK.sub(lambda _m: f"not tested ({why})", row, count=1) \
-        if CASE_MARK.search(row) else row
+def not_tested(row: str, why: str, cols: Optional[list[int]] = None) -> str:
+    """``row`` with the case marks of ``cols`` (every column when None)
+    replaced: the first by ``not tested (why)``, the rest by ``not
+    tested``. Run 6 (mail #1647): replacing only the first mark left the
+    other tools' ✓ standing on the same missing run."""
+    if not CASE_MARK.search(row):
+        return row
+    lead = row[:len(row) - len(row.lstrip())]
+    s = row.strip()
+    opened, closed = s.startswith("|"), s.endswith("|") and len(s) > 1
+    cells = _cells(row)
+    said = False
+    for k, c in enumerate(cells):
+        if (cols is not None and k not in cols) or not CASE_MARK.search(c):
+            continue
+
+        def sub(_m):
+            nonlocal said
+            if said:
+                return "not tested"
+            said = True
+            return f"not tested ({why})"
+        cells[k] = CASE_MARK.sub(sub, c)
+    return lead + ("|" if opened else "") + "|".join(cells) + (
+        "|" if closed else "")
 
 
 def mark_untested_cells(text: str, rows: Optional[list[dict]]) -> tuple[str, int]:
-    """Matrix rows that cite no run that reached the code get
-    ``not tested``; ``(text, changed)``. ``rows=None`` (no shell) changes
-    nothing."""
+    """Matrix rows that cite no run that reached the code get ``not
+    tested`` in every marked cell; ``(text, changed)``. ``rows=None``
+    (no shell) changes nothing."""
     if rows is None:
         return text, 0
     ran = {r["n"] for r in rows if r.get("ran")}
@@ -789,23 +917,32 @@ def mark_untested_cells(text: str, rows: Optional[list[dict]]) -> tuple[str, int
 
 
 def claim_audit_items(text: str, rows: Optional[list[dict]]) -> list[dict]:
-    """Ranked items, then matrix rows, citing runs that reached the
+    """Ranked items, then matrix cells, citing runs that reached the
     code, each with those runs (``runs``): at most
     :data:`CLAIM_AUDIT_MAX_ITEMS` ranked and :data:`MATRIX_MAX_ITEMS`
-    rows."""
+    cells. A cell is audited on its own (``col``, ``header``,
+    ``cell``) against the runs it cites, else the runs its row cites."""
     if not rows:
         return []
     by_n = {r["n"]: r for r in rows if r.get("ran")}
 
-    def with_runs(items, cap):
-        out = []
-        for it in items:
-            runs = [by_n[n] for n in sorted(cited(it["text"])) if n in by_n]
-            if runs:
-                out.append(dict(it, runs=runs[:CLAIM_AUDIT_RUNS_PER_ITEM]))
-        return out[:cap]
-    return (with_runs(ranked_items(text), CLAIM_AUDIT_MAX_ITEMS)
-            + with_runs(matrix_rows(text), MATRIX_MAX_ITEMS))
+    def runs_of(t):
+        return [by_n[n] for n in sorted(cited(t)) if n in by_n][
+            :CLAIM_AUDIT_RUNS_PER_ITEM]
+    ranked = []
+    for it in ranked_items(text):
+        runs = runs_of(it["text"])
+        if runs:
+            ranked.append(dict(it, runs=runs))
+    cells = []
+    for it in matrix_rows(text):
+        row_runs = runs_of(it["text"])
+        if not row_runs:
+            continue
+        for col, header, cell in it["cols"]:
+            cells.append(dict(it, col=col, header=header, cell=cell,
+                              runs=runs_of(cell) or row_runs))
+    return ranked[:CLAIM_AUDIT_MAX_ITEMS] + cells[:MATRIX_MAX_ITEMS]
 
 
 def claim_audit_prompt(items: list[dict]) -> str:
@@ -813,6 +950,11 @@ def claim_audit_prompt(items: list[dict]) -> str:
     for k, it in enumerate(items, start=1):
         claim = re.sub(r"\s+", " ", it["text"]).strip()
         claim = claim if len(claim) <= 600 else claim[:600] + "…"
+        if it.get("kind") == "cell":
+            case = _cells(it["text"])[0].strip() or "this row"
+            claim = (f"in the row for {case!r}, the column "
+                     f"{it['header']!r} says {it['cell']!r} (the whole "
+                     f"row: {claim})")
         runs = "\n".join(
             f"[{r['id']}] `{_norm(r['command'])[:200]}` → {r['exit']}\n"
             f"{_shown_output(r)}" for r in it["runs"])
@@ -831,12 +973,26 @@ def parse_claim_audit(reply: str, n: int) -> dict[int, tuple[str, str]]:
     return out
 
 
+def _with_note(lines: list[str], it: dict, note: str) -> None:
+    """``note`` on a ranked item: in its last cell for a table row (a
+    line after a row would break the table), else on a line after it."""
+    last = it["end"] - 1
+    if lines[it["start"]].strip().startswith("|"):
+        row = lines[it["start"]].rstrip()
+        cut = row[:-1].rstrip() if row.endswith("|") else row
+        lines[it["start"]] = f"{cut} _({note})_ |"
+        return
+    indent = "   " if _ITEM.match(lines[it["start"]]) else ""
+    lines.insert(last + 1, f"{indent}_({note})_")
+
+
 def apply_claim_audit(text: str, items: list[dict],
                       verdicts: dict[int, tuple[str, str]]) -> tuple[str, int]:
     """The answer with every ranked item found ``not shown`` or
-    ``contradicted`` moved to ``Unverified``, and every such matrix row
-    marked ``not tested``; ``(text, changed)``. An item with no verdict
-    stays as it is."""
+    ``contradicted`` moved to ``Unverified``, every ``partly`` one kept
+    with what is not shown noted on it and listed under ``Unverified``,
+    and every such matrix cell marked ``not tested``; ``(text,
+    changed)``. An item with no verdict stays as it is."""
     lines = text.split("\n")
     moved = []
     cells = 0
@@ -845,16 +1001,23 @@ def apply_claim_audit(text: str, items: list[dict],
         if it.get("kind") == "cell" and v and v[0] != "shown":
             ids = ", ".join(r["id"] for r in it["runs"])
             lines[it["start"]] = not_tested(
-                lines[it["start"]], f"audit: {v[0]} by {ids}")
+                lines[it["start"]], f"audit: {v[0]} by {ids}",
+                cols=[it["col"]] if "col" in it else None)
             cells += 1
     for k, it in sorted(enumerate(items, start=1), key=lambda x: -x[1]["start"]):
         v = verdicts.get(k)
         if it.get("kind") == "cell" or not v or v[0] == "shown":
             continue
         ids = ", ".join(r["id"] for r in it["runs"])
+        why = v[1] or "no reason given"
+        if v[0] == "partly":
+            _with_note(lines, it, PARTLY_NOTE.format(ids=ids, why=why))
+            moved.insert(0, "- " + PARTLY_UNVERIFIED.format(
+                label=_label(it["text"]), ids=ids, why=why.rstrip(".")))
+            continue
         moved.insert(0, f"- {_label(it['text'])}: " + NOT_SHOWN_NOTE.format(
             verdict="not shown" if v[0] == "not shown" else "contradicted",
-            ids=ids, why=v[1] or "no reason given") + ".")
+            ids=ids, why=why) + ".")
         del lines[it["start"]:it["end"]]
     if not moved:
         return ("\n".join(lines), cells) if cells else (text, 0)
@@ -925,7 +1088,7 @@ def held_test_notes(db_path, lane: str, paths: list[str]) -> dict[str, str]:
 
 __all__ = ["hold_to_evidence_bar", "claim_audit_items", "claim_audit_prompt",
            "parse_claim_audit", "apply_claim_audit", "CLAIM_AUDIT_SYSTEM",
-           "matrix_rows", "mark_untested_cells", "no_run_report_check", "lane_runs", "commands_block", "commands_ran",
+           "matrix_rows", "mark_untested_cells", "thin_dropped", "no_run_report_check", "lane_runs", "commands_block", "commands_ran",
            "needs_unverified_revision", "with_unverified_stub",
            "audit_answer", "revision_note", "enforce", "Audit",
            "ranked_items", "probe_groups", "is_probe", "cited",

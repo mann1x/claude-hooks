@@ -3757,27 +3757,35 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
 
 def _unverified_revision(chat_client, model, msgs, text, *, state, think,
                          recorder, tool_specs, tool_executor, cwd,
-                         rows: Optional[list] = None
+                         rows: Optional[list] = None,
+                         held: Optional[tuple] = None
                          ) -> tuple[str, int, int]:
     """One re-ask of an answer that fails the evidence bar (council runs
     2 and 3): no ``Unverified`` section, and on a shell run (``rows``,
     the commands the lanes ran) a ranked defect citing no run that shows
     it, or a run that reached the code that the answer never mentions.
     What the revision still owes is enforced in code
-    (:func:`consultants.engine.evidence.enforce`). Returns ``(text,
-    prompt_tokens, completion_tokens)`` of the re-ask."""
-    from consultants.engine import evidence
+    (:func:`consultants.engine.evidence.enforce`). ``held`` is ``(patches,
+    overlaps)`` from :mod:`consultants.engine.held_patches` in write mode:
+    the answer also owes a ``## Held patches`` entry per source patch.
+    Returns ``(text, prompt_tokens, completion_tokens)`` of the re-ask."""
+    from consultants.engine import evidence, held_patches
+    patches, ovl = held or ([], [])
     audit = evidence.audit_answer(text, rows)
-    if audit.ok:
-        return _claim_audit(chat_client, model, text, rows, state=state,
-                            recorder=recorder)
+    haudit = held_patches.audit(text, patches, ovl, rows)
+    if audit.ok and haudit.ok:
+        return _after_audits(chat_client, model, text, rows, patches,
+                             state=state, recorder=recorder)
+    note = (evidence.REVISION_NOTE if rows is None
+            else evidence.revision_note(audit))
+    if not haudit.ok:
+        note += "\n" + held_patches.revision_note(haudit)
     rpt = rct = 0
     try:
         revised, rpt, rct = _role_turn(
             chat_client, model, list(msgs) + [
                 {"role": "assistant", "content": text},
-                harness_note(evidence.REVISION_NOTE if rows is None
-                             else evidence.revision_note(audit))],
+                harness_note(note)],
             think=_think_for(state, "synthesizer", model, think),
             recorder=recorder, role="synthesizer", round=1,
             tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
@@ -3789,12 +3797,58 @@ def _unverified_revision(chat_client, model, msgs, text, *, state, think,
     except Exception:
         log.exception("synthesizer evidence revision failed; keeping "
                       "the first answer")
+    if patches:
+        text = held_patches.enforce(
+            text, held_patches.audit(text, patches, ovl, rows))
     if rows is None:
         return evidence.with_unverified_stub(text), rpt, rct
     text = evidence.enforce(text, evidence.audit_answer(text, rows))
-    text, apt, act = _claim_audit(chat_client, model, text, rows, state=state,
-                                  recorder=recorder)
+    text, apt, act = _after_audits(chat_client, model, text, rows, patches,
+                                   state=state, recorder=recorder)
     return text, rpt + apt, rct + act
+
+
+def _after_audits(chat_client, model, text, rows, patches, *, state,
+                  recorder) -> tuple[str, int, int]:
+    """The claim audit, then the patch-comment audit."""
+    text, pt, ct = _claim_audit(chat_client, model, text, rows, state=state,
+                                recorder=recorder)
+    if patches:
+        text, ppt, pct = _patch_comment_audit(chat_client, model, text,
+                                              patches, state=state,
+                                              recorder=recorder)
+        pt, ct = pt + ppt, ct + pct
+    return text, pt, ct
+
+
+def _patch_comment_audit(chat_client, model, text, patches, *, state,
+                         recorder) -> tuple[str, int, int]:
+    """One auditor call (council run 6, mail #1648): every comment a held
+    patch adds, beside the code its hunk adds. A comment claiming code
+    the diff does not contain is noted under ``## Held patches``. A failed
+    audit leaves the answer as it is. Recorded as
+    ``synthesizer:patch-audit``."""
+    from consultants.engine import evidence, held_patches
+    items = held_patches.comment_items(patches)
+    if not items:
+        return text, 0, 0
+    try:
+        reply, pt, ct = _single_shot(
+            chat_client, model, [
+                {"role": "system", "content": held_patches.COMMENT_AUDIT_SYSTEM},
+                {"role": "user",
+                 "content": held_patches.comment_audit_prompt(items)}],
+            think=False, recorder=recorder, role="synthesizer:patch-audit",
+            round=1, knobs=_budget_knobs(state, "synthesizer", model),
+            sampling=_instance_sampling(state, "synthesizer", model, chat_client))
+    except Exception:
+        log.exception("synthesizer patch-comment audit failed; answer kept")
+        return text, 0, 0
+    text, n = held_patches.apply_comment_audit(
+        text, items, evidence.parse_claim_audit(reply, len(items)))
+    if n:
+        log.info("patch audit flagged %d of %d added comment(s)", n, len(items))
+    return text, pt, ct
 
 
 def _claim_audit(chat_client, model, text, rows, *, state, recorder
@@ -3925,6 +3979,7 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
     evidence_mode = shell or bool(_additional_context_for(state,
                                                           "synthesizer"))
     _rows = None
+    _held = None
     if shell:
         _db = getattr(recorder, "db_path", None)
         ledger = evidence.commands_block(_db)
@@ -3932,6 +3987,20 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
         if ledger and msgs and msgs[-1].get("role") == "user":
             msgs = msgs[:-1] + [{**msgs[-1], "content": (
                 str(msgs[-1].get("content") or "") + "\n\n" + ledger)}]
+        # Council run 6 (mail #1648): the lanes' patches, before they are
+        # held, so the answer says what each fixes and picks between two
+        # that change the same lines.
+        from consultants.engine import held_patches
+        _patches = held_patches.held_changes(
+            cwd or state.get("cwd") or "",
+            getattr(getattr(recorder, "_meta", None), "sid", "") or "")
+        if _patches:
+            _ovl = held_patches.overlaps(_patches)
+            _held = (_patches, _ovl)
+            if msgs and msgs[-1].get("role") == "user":
+                msgs = msgs[:-1] + [{**msgs[-1], "content": (
+                    str(msgs[-1].get("content") or "") + "\n\n"
+                    + held_patches.held_block(_patches, _ovl))}]
     models_to_try: list[str] = [model] + list(fallback_models or [])
     t0 = time.monotonic()
     text: Optional[str] = None
@@ -3950,7 +4019,8 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                 text, rpt, rct = _unverified_revision(
                     chat_client, try_model, msgs, text, state=state,
                     think=think, recorder=recorder, tool_specs=tool_specs,
-                    tool_executor=tool_executor, cwd=cwd, rows=_rows)
+                    tool_executor=tool_executor, cwd=cwd, rows=_rows,
+                    held=_held)
                 pt, ct = pt + rpt, ct + rct
             if attempt_idx > 0:
                 log.warning(

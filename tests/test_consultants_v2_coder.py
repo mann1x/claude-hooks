@@ -794,20 +794,18 @@ class TestBuildCoderArtifactsBlock(unittest.TestCase):
         self.assertIn("FAILED", block)
         self.assertIn("boom", block)
 
-    def test_long_summary_truncated(self):
+    def test_long_summary_never_cut(self):
+        # Council run 6 (mail #1648): coder-0's finding sat at character
+        # 875 of its report; a 600-character cut lost it.
+        finding = "showTaskWithId:2200 never clears the read receipts"
         a = CoderArtifact(
-            task="x", summary="Y" * 800,
+            task="x", summary="Y" * 875 + finding + "Z" * 4000,
             files=[{"path": "a.py", "bytes": 1, "sha256": "..."}],
         )
         block = build_coder_artifacts_block([a])
-        self.assertIn("[truncated]", block)
-
-
-# ============================================================== #
-# Channel reducer sanity
-# ============================================================== #
-
-class TestCoderArtifactsReducer(unittest.TestCase):
+        self.assertIn(finding, block)
+        self.assertNotIn("[truncated]", block)
+        self.assertIn("Z" * 4000, block)
 
     def test_additive_merge(self):
         l1 = [CoderArtifact(task="a", lane_idx=0)]

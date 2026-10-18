@@ -365,6 +365,27 @@ class SessionViews:
         return ([ln.replace("\t", " ", 1) for ln in diff if ln.strip()]
                 + [f"A {p} (untracked)" for p in new if p.strip()])
 
+    def preview(self, lane: str) -> str:
+        """The lane's changes against the base as a unified diff, untracked
+        files included, read while the view is live (the synthesizer weighs
+        the patches before they are held). Writes nothing."""
+        d = self._load()
+        rec = d["lanes"].get(lane) or {}
+        if rec.get("state") != "active" or not d.get("base") \
+                or not os.path.isdir(rec.get("wt", "")):
+            return ""
+        env = self._host_env(rec)
+        wt = rec["wt"]
+        out = _git(["diff", "--no-color", "--no-ext-diff", d["base"]], wt,
+                   env=env, check=False).stdout
+        new = _git(["ls-files", "--others", "--exclude-standard"], wt,
+                   env=env, check=False).stdout.splitlines()
+        for p in new:
+            if p.strip():
+                out += _git(["diff", "--no-index", "--no-color", "/dev/null",
+                             p], wt, env=env, check=False).stdout
+        return out
+
     @staticmethod
     def _host_env(rec: dict, index: Optional[str] = None) -> dict:
         env = {"GIT_DIR": rec["admin"], "GIT_WORK_TREE": rec["wt"],

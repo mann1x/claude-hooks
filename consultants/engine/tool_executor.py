@@ -163,6 +163,8 @@ def _emit_tool_call(role: str, *, round: int, lane_idx: Optional[int],
 #: runs one planned call; it neither surveys nor recalls. Dropping them
 #: saves their schema on every request. Re-measure before adding one back.
 UNUSED_TOOLS = frozenset({"survey_project", "recall_memory"})
+#: One prior result as the researcher's report prompt carries it.
+PRIOR_RESULT_MAX_CHARS = 32_000
 
 
 def tool_executor_node(state: dict,
@@ -684,11 +686,12 @@ def build_tool_plan_user_appendix(prior_results: list[ToolResult]) -> str:
                 f"\n{i}. (intent: {r.intent!r} FAILED: {r.error})"
             )
             continue
-        # Truncate content to keep round-2 prompt bounded; the
-        # full text is in the recorder for post-mortems.
+        # Bounded as the history bounds one tool result
+        # (``history.tidy``'s tool_result_max_chars), not tighter: a
+        # cut result is evidence the researcher must re-fetch.
         snippet = (r.content or "").strip()
-        if len(snippet) > 2000:
-            snippet = snippet[:2000] + "... [truncated]"
+        if len(snippet) > PRIOR_RESULT_MAX_CHARS:
+            snippet = snippet[:PRIOR_RESULT_MAX_CHARS] + "... [truncated]"
         lines.append(
             f"\n{i}. INTENT: {r.intent}\n"
             f"   TOOLS: {r.transcript_summary or '(none)'}\n"

@@ -1100,12 +1100,53 @@ enough, so on a run with the shell:
   that marks a case ✓ / ⚠ / ✗ (`matrix_rows()`) must cite a run that
   reached the code, or its mark becomes `not tested (read, not run)` /
   `not tested (no run cited)` (`mark_untested_cells()`, in code, before
-  and whatever the audit call does). A row that cites one goes through
-  the same audit (up to 16), and a `not shown` / `contradicted` verdict
-  becomes `not tested (audit: … by C<n>)`. The synthesizer is told the
+  and whatever the audit call does) — every mark in the row, not only
+  the first (run 6: the Restore / Scan / Bash columns kept their ✓ on
+  the same missing run). A row that cites one is audited cell by cell
+  (up to 40 cells), each against the runs it cites or else its row's,
+  and a `not shown` / `contradicted` verdict becomes `not tested
+  (audit: … by C<n>)` in that cell only. The synthesizer is told the
   rule in `EVIDENCE_RULES`. The critic is told to check the label a
   report gives each case (BLIND, refused, ✓ …) against what the run
   printed.
+
+  **Every clause** (run 6: ranked #2 said apply_patch launders *and*
+  clobbers concurrent writers; C372 showed the first). The auditor
+  answers `PARTLY` for a claim its runs show only part of; the item
+  stays ranked with what is not shown noted on it, and that part is
+  listed under `Unverified`.
+
+  **Dropped needs a reason** (run 6: "General test run", "Not needed for
+  final result" for ~25 runs). A reason that names no other run and no
+  rerun / setup / harness cause in under 8 words, or one reason copied
+  to 5 runs or more, is thin (`thin_dropped()`); with 3 or more the
+  re-ask lists them, and what is still thin afterwards is marked on its
+  line.
+
+  **Held patches** (write mode; run 6, mail #1648). Patches are frozen
+  only after the answer, so the synthesizer used to write without
+  seeing them: a comment claimed a lock its hunk did not add, nobody
+  said which ranked defects a patch fixed, and two lanes rewrote one
+  function differently with nobody choosing. Now, before it writes,
+  `held_patches.held_changes()` reads every live view's diff
+  (`preview()` on both view kinds, writing nothing) and the synthesizer
+  gets HELD CHANGES: each lane's source hunks, and OVERLAPS computed in
+  code. The answer owes `## Held patches`, one entry per lane that
+  changed source (test-only lanes owe none): `fixes #n (C<k>)` only
+  when C<k> is a green run of that lane, else `addresses #n, not
+  verified`; `does not fix #m` for what it leaves; an overlap chosen
+  with a reason or written `conflict: <lane> vs <lane>`. The same
+  re-ask carries what is missing, and `held_patches.enforce()` writes
+  in what is still owed (a lane not assessed, an overlap not
+  adjudicated, a fix with no green run). Then one more auditor call
+  (`synthesizer:patch-audit`, thinking off) puts every comment a patch
+  adds (8 words or more, every patched file reached before any gets a
+  second, up to 24) beside the code its hunk adds; a comment claiming
+  code the diff does not contain is noted under `## Held patches`.
+
+  A coder lane's report reaches the synthesizer whole: run 6 cut it at
+  600 characters and lost coder-0's `showTaskWithId` finding at
+  character 875.
 
   A claim taken from a checkpoint brief must be marked `(from the
   checkpoint brief, not re-verified)` unless a report checks it.

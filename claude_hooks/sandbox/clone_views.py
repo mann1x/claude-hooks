@@ -41,6 +41,7 @@ import errno
 import json
 import logging
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -501,6 +502,24 @@ class CloneViews:
                 lines.append(f"{c['status']} {p}" + ("/" if c["kind"] == "d"
                                                      else ""))
         return lines
+
+    def preview(self, lane: str) -> str:
+        """The lane's changes as a unified diff against the user's tree,
+        read while the clone is live. Writes nothing."""
+        rec = self.lanes().get(lane) or {}
+        if rec.get("state") != "active":
+            return ""
+        parts = []
+        for scope, clone, man in self._scope_items(rec):
+            if not os.path.isdir(clone):
+                continue
+            rel_scope = os.path.relpath(scope, self.repo)
+            diff = review_patch(changes(clone, man), scope, clone)
+            if rel_scope != ".":
+                diff = re.sub(r"^(---|\+\+\+) ([ab])/", lambda m: (
+                    f"{m.group(1)} {m.group(2)}/{rel_scope}/"), diff, flags=re.M)
+            parts.append(diff)
+        return "".join(parts)
 
     # ----------------------------------------------------------- freeze
     def freeze(self, lane: str) -> dict:

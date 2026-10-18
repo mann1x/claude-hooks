@@ -1170,9 +1170,10 @@ def build_coder_artifacts_block(artifacts: list[CoderArtifact]) -> str:
             ", ".join(f"{f['path']} ({f['bytes']} B)" for f in a.files)
             if a.files else "(no files written)"
         )
+        # Never cut (council run 6, mail #1648): coder-0's finding sat at
+        # character 875 of its report and a 600-character cut dropped it.
+        # The report is the lane's only handoff, as a researcher's is.
         summary = (a.summary or "").strip()
-        if len(summary) > 600:
-            summary = summary[:600] + "... [truncated]"
         entry = (f"\n{i}. TASK: {a.task}\n"
                  f"   FILES: {files_summary}\n")
         if getattr(a, "workspace", "") == "view":
