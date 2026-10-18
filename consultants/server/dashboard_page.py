@@ -44,7 +44,7 @@ main{display:grid;grid-template-columns:minmax(300px,32%) 1fr;height:calc(100vh 
 .tabs button.on{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
 table{border-collapse:collapse;width:100%;font-size:13px}
 th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top}
-th{color:var(--muted);font-weight:600;background:var(--panel)}td.n{text-align:right;font-variant-numeric:tabular-nums}
+th{color:var(--muted);font-weight:600;background:var(--panel)}th.n,td.n{text-align:right;font-variant-numeric:tabular-nums}
 .tablewrap{overflow:auto;max-width:100%;background:var(--panel);border:1px solid var(--line);border-radius:8px}
 .chips{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}
 .chip{background:var(--chip);border-radius:6px;padding:1px 8px;font-size:12px;white-space:nowrap}

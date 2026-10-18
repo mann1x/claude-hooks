@@ -1015,9 +1015,12 @@ brief was in 0 of 226 prompts.)
 **The evidence bar** (`consultants/engine/evidence.py`). Prompts were not
 enough, so on a run with the shell:
 
-- A critic or meta-critic `ready` that says the tests were not run is
-  held at `needs_more_research`, with a `[harness]` note. The round caps
-  still bound the loop.
+- A critic or meta-critic `ready` is held at `needs_more_research`, with
+  a `[harness]` note, when it says the tests were not run, **or** when
+  the record shows no command the lanes ran that reached the code (run
+  4: ready was read off reports none of whose runs had loaded). An
+  unreadable `transcript.db` decides nothing. The round caps still
+  bound the loop.
 - The synthesizer, the critic and the meta-critic get **COMMANDS THE
   LANES RAN**, built from `transcript.db`. Only these were executed,
   whatever the reports say. Each command has an id (`C1`, `C2`, …).
@@ -1049,6 +1052,17 @@ enough, so on a run with the shell:
     omission`;
   - an answer with no section gets the stub.
 
+  Then **the claim audit** (`_claim_audit()`, one call recorded as
+  `synthesizer:audit`, thinking off). Citing a run is not the run
+  showing it: run 4's #2 cited a run that reached the code and passed
+  the audit above, but its output did not show the defect. The auditor
+  gets a fresh conversation with only `CLAIM_AUDIT_SYSTEM`, each ranked
+  item (up to 12) and what its cited runs printed, side by side, and
+  answers `A<k>: SHOWN | NOT SHOWN | CONTRADICTED — <line>`. Code moves
+  every `NOT SHOWN` / `CONTRADICTED` item to `Unverified` with the
+  auditor's reason (`apply_claim_audit()`). An item with no verdict, an
+  unreadable reply or a failed call leaves the answer as it is.
+
   A claim taken from a checkpoint brief must be marked `(from the
   checkpoint brief, not re-verified)` unless a report checks it.
 - A lane that is about to report with a test file it wrote that never
@@ -1056,7 +1070,16 @@ enough, so on a run with the shell:
   `unrun_tests()` over its own `write_file` / `run_command` calls; a
   `guard` event `unrun_tests`). The lane is told to fix the test, not
   the code under test, when the test does not load. Only loops that have
-  `run_command` are asked.
+  `run_command` are asked. The test-file match follows a file copied
+  into place (`cp` / `mv` / `install`), and a run whose own output shows
+  failing tests counts as failed even when a pipe (`| tail`) made it
+  exit 0.
+- A researcher on a shell run that is about to report when **none of
+  its own runs reached the code** (or it ran nothing) is asked once to
+  run the test or probe for its top finding, or to say why it cannot
+  (`LoopConfig.report_check` = `evidence.no_run_report_check`; a
+  `guard` event `report_check`). The loop owns "once"; the engine owns
+  the rule.
 - In write mode, **Sandbox changes** flags a held test file that was
   never run after its last write, or whose last run failed
   (`held_test_notes()`), so a held patch of broken tests is not mistaken
@@ -1819,9 +1842,13 @@ is never written. (`claude_hooks/sandbox/views.py`.)
   is told which commands ran (`RUN: …`) or that nothing did — then the
   code is unverified. Without `--shell write` it writes to `coder-out/`
   as before.
-- **Room.** A lane with `run_command` gets `max(6, iters // 2)` more
-  loop iterations than its effort's cap (xhigh: 16, tools stripped at
-  14) — writing, running and fixing takes turns of its own.
+- **Room.** Researcher loop caps (iterations / tools stripped after) are
+  low 6/4, medium 8/6, high and xhigh 30/24, max 60/54. A lane with
+  `run_command` gets `max(10, iters // 2)` more of both (xhigh: 45 / 39)
+  — writing, running and fixing takes turns of its own. Runs 3 and 4
+  (xhigh, 16 turns with the shell) had most lanes cut by the cap while
+  still reading. The coder's own loop is 12 turns, 40 with its write-mode
+  workspace.
 
 #### Write scopes (`--write-scope PATH`): a reflink clone per lane
 

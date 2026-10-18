@@ -240,15 +240,18 @@ class TestSynthesizer:
                                recorder=_rec(db), shell=True)
         assert out["final_answer"].strip() == good
 
-    def test_an_answer_that_meets_the_bar_is_one_call(self, tmp_path):
+    def test_an_answer_that_meets_the_bar_is_not_re_asked(self, tmp_path):
+        """No revision; the only other call is the claim audit (run 4)."""
         from consultants.engine.council import synthesizer_node
         db = _run3_like(tmp_path)
         good = ("## Defects\n1. x (C3)\n\n## Dropped\n- C5-C6: stock\n\n"
                 "## Unverified\n(none)")
-        c = _Seq(good)
-        synthesizer_node(_state(), chat_client=c, model="m",
-                         recorder=_rec(db), shell=True)
-        assert len(c.calls) == 1
+        c = _Seq(good, "A1: SHOWN — it printed it")
+        out = synthesizer_node(_state(), chat_client=c, model="m",
+                               recorder=_rec(db), shell=True)
+        assert len(c.calls) == 2
+        assert c.calls[1]["messages"][0]["content"].startswith(E.CLAIM_AUDIT_SYSTEM)
+        assert out["final_answer"].strip() == good
 
 
 class TestCritic:

@@ -62,10 +62,49 @@ def exit_of(output: str) -> str:
     return "?"
 
 
+#: A test run that reports failures, whatever its exit code says (run 4:
+#: lane 102 piped vitest through ``| tail``, exit 0, 11 tests failing).
+TEST_FAILED = re.compile(r"\b[1-9]\d*\s+(?:tests?\s+)?(?:failed|failing)\b|"
+                         r"^\s*(?:FAIL|✗|×)\s", re.M)
+_SEGMENT = re.compile(r"&&|\|\||[;|\n]")
+
+
+def _copied_to(command: str) -> list[str]:
+    """Targets of ``cp`` / ``mv`` / ``install`` that are test files (run 4:
+    lane 102 wrote its test in /scratch, then copied it into place)."""
+    out = []
+    for seg in _SEGMENT.split(command or ""):
+        words = [w.strip("'\"") for w in seg.split()]
+        if not words or words[0] not in ("cp", "mv", "install"):
+            continue
+        args = [w for w in words[1:] if not w.startswith("-")]
+        if len(args) < 2:
+            continue
+        target = args[-1]
+        if TEST_FILE.search(target):
+            out.append(target)
+        else:          # copied into a directory under its own name
+            for src in args[:-1]:
+                name = PurePosixPath(src).name
+                if TEST_FILE.search(name):
+                    out.append(target.rstrip("/") + "/" + name)
+    return out
+
+
 def written_by(command: str) -> list[str]:
     """Test files a shell command writes (``cat > a.test.ts <<EOF``,
-    ``tee``)."""
-    return [t for t in _WRITE_TARGET.findall(command or "") if TEST_FILE.search(t)]
+    ``tee``, ``cp`` / ``mv`` / ``install`` into place)."""
+    return ([t for t in _WRITE_TARGET.findall(command or "") if TEST_FILE.search(t)]
+            + _copied_to(command))
+
+
+def run_result(output: str) -> str:
+    """:func:`exit_of`, except that a run whose own report shows failing
+    tests is a failure even when a pipe made it exit 0."""
+    code = exit_of(output)
+    if code.startswith("exit 0") and TEST_FAILED.search(output or ""):
+        return "tests failed (exit 0 through a pipe)"
+    return code
 
 
 def _args(call: dict) -> dict:
@@ -106,7 +145,7 @@ def classify(events: Iterable[tuple[str, str, str]]) -> dict[str, str]:
             name = PurePosixPath(p).name
             if re.search(r"(?<![\w.-])" + re.escape(name) + r"(?![\w.-])", cmd) \
                     or p in cmd:
-                last[p].append(exit_of(result))
+                last[p].append(run_result(result))
     out = {}
     for p, runs in last.items():
         if not runs:
@@ -147,5 +186,5 @@ def nudge(found: dict[str, str]) -> str:
                                         for p, why in sorted(found.items())))
 
 
-__all__ = ["TEST_FILE", "TEST_LIKE", "classify", "unrun_tests", "nudge",
-           "exit_of", "written_by", "NUDGE"]
+__all__ = ["TEST_FILE", "TEST_LIKE", "TEST_FAILED", "classify", "unrun_tests",
+           "nudge", "exit_of", "run_result", "written_by", "NUDGE"]

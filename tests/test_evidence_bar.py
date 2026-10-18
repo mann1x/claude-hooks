@@ -244,3 +244,30 @@ def test_the_graph_gives_the_roles_the_bar_when_lanes_have_the_shell():
                                                "parameters": {}}}]
     assert run([]) == (1, 1)          # off: ready stands, one answer
     assert run(shell) == (2, 2)       # held -> another round; revised
+
+
+class TestCriticHoldFromTheRecord:
+    """Council run 4 (mail #1636): ready read off reports whose runs
+    never loaded. The record decides, not the critique's wording."""
+
+    READY = "DECISION: ready\n\nThe findings are well supported.\nCONFIDENCE: 0.8"
+
+    def test_no_run_reached_the_code(self):
+        rows = [{"command": "bun x vitest run a.test.ts", "ran": False},
+                {"command": "cat src/a.ts", "ran": False}]
+        d, text, held = E.hold_to_evidence_bar("ready", self.READY, rows)
+        assert (d, held) == ("needs_more_research", True)
+        assert "2 command(s), 1 of them tests or probes" in text
+
+    def test_no_command_at_all(self):
+        d, text, held = E.hold_to_evidence_bar("ready", self.READY, [])
+        assert held and "shows no commands" in text
+
+    def test_one_run_that_reached_the_code_lets_ready_stand(self):
+        rows = [{"command": "bun x vitest run a.test.ts", "ran": False},
+                {"command": "bun x vitest run b.test.ts", "ran": True}]
+        assert E.hold_to_evidence_bar("ready", self.READY, rows) == (
+            "ready", self.READY, False)
+
+    def test_an_unreadable_record_decides_nothing(self):
+        assert E.hold_to_evidence_bar("ready", self.READY, None)[2] is False

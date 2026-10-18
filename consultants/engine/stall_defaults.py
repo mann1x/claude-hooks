@@ -274,6 +274,16 @@ PRODUCTION_HARD_CAPS_BY_MODEL: dict[str, float] = {
 HARD_CAP_REFERENCE_OUTPUT_TOKENS: int = 32_768
 
 
+#: Models that use another model's thresholds, never measured themselves
+#: (operator decision). Unlike ``coder_defaults.MODEL_SUCCESSIONS`` this
+#: reroutes nothing: it only says which row a model's calls are timed by.
+#: Recalibrate from its own ``llm_call`` rows to earn a measured one.
+#: 2026-10-18: glm-5.3-flash replaced glm-5.2 in the council's extra lanes.
+THRESHOLD_INHERITANCE: dict[str, str] = {
+    "glm-5.3-flash:cloud": "glm-5.2:cloud",
+}
+
+
 def runtime_stall_thresholds(model: Optional[str]) -> StallThresholds:
     """The thresholds the engine applies to one chat call on ``model``.
 
@@ -282,6 +292,7 @@ def runtime_stall_thresholds(model: Optional[str]) -> StallThresholds:
     for a model the bench did not measure. Hard cap: production latency
     (:data:`PRODUCTION_HARD_CAPS_BY_MODEL`), else the global default.
     """
+    model = THRESHOLD_INHERITANCE.get(model or "", model)
     bench = RECOMMENDED_STALL_THRESHOLDS_BY_MODEL.get(model or "")
     stall = (max(bench.stall_threshold_s, PRODUCTION_STALL_FLOOR_S)
              if bench is not None else PRODUCTION_STALL_DEFAULT_S)
@@ -293,6 +304,7 @@ def runtime_stall_thresholds(model: Optional[str]) -> StallThresholds:
 __all__ = [
     "PRODUCTION_HARD_CAPS_BY_MODEL",
     "PRODUCTION_STALL_FLOOR_S",
+    "THRESHOLD_INHERITANCE",
     "runtime_stall_thresholds",
     "HARD_CAP_REFERENCE_OUTPUT_TOKENS",
     "StallThresholds",

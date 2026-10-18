@@ -130,3 +130,78 @@ class TestTheLoopNudges:
             _turn("REPORT"),
         ], specs=specs)
         assert len(sent) == 2
+
+
+PIPED_FAIL = ("exit=0 wall=2s killed_by=none\n--- stdout ---\n"
+              " FAIL  src/edge-matrix.test.ts > x\n Tests  11 failed | 3 passed (14)")
+
+
+class TestRun4Shapes:
+    """Council run 4, lane 102: written in /scratch, copied into place,
+    run through ``| tail`` (exit 0, 11 failing)."""
+
+    def test_copied_into_place(self):
+        assert tr.written_by("cp /scratch/a.test.ts src/a.test.ts") == ["src/a.test.ts"]
+        assert tr.written_by("mv -f /scratch/a.test.ts src/") == ["src/a.test.ts"]
+        assert tr.written_by("cp a.ts src/b.ts") == []
+
+    def test_a_pipe_does_not_hide_failures(self):
+        assert tr.run_result(PIPED_FAIL) == "tests failed (exit 0 through a pipe)"
+        assert tr.run_result(OK) == "exit 0"
+        msgs = _conv((_call("a", "run_command", command=(
+            "cp /scratch/edge-matrix.test.ts src/ && "
+            "bun x vitest run src/edge-matrix.test.ts | tail -20")), PIPED_FAIL))
+        assert tr.unrun_tests(msgs) == {
+            "src/edge-matrix.test.ts": "its last run failed (tests failed (exit 0 through a pipe))"}
+
+
+class TestReportCheck:
+    """``LoopConfig.report_check``: asked once before the report."""
+
+    def _run(self, script, check):
+        sent, events = [], []
+
+        def chat_fn(payload):
+            sent.append(dict(payload, messages=list(payload["messages"])))
+            return script.pop(0)
+
+        runner.run_loop(
+            {"model": "m", "messages": [{"role": "user", "content": "q"}]}, "/tmp",
+            config=runner.LoopConfig(force_first_tool_call=False, force_answer_after=0,
+                                     on_guard=events.append, report_check=check),
+            tool_specs=SPEC, chat_fn=chat_fn, tool_executor=lambda *a: "ok")
+        return sent, events
+
+    def test_once_with_the_callers_note(self):
+        asked = []
+        sent, events = self._run([_turn("REPORT one"), _turn("REPORT two")],
+                                 lambda m: asked.append(len(m)) or "run something")
+        assert len(sent) == 2 and asked == [1]
+        assert sent[1]["messages"][-1]["content"].endswith("run something")
+        assert sent[1]["messages"][-1].get("_harness")
+        assert [e["guard"] for e in events] == ["report_check"]
+
+    def test_none_or_a_raise_lets_the_report_stand(self):
+        assert len(self._run([_turn("R")], lambda m: None)[0]) == 1
+
+        def boom(m):
+            raise RuntimeError("x")
+        assert len(self._run([_turn("R")], boom)[0]) == 1
+
+
+class TestNoRunReportCheck:
+    """The council's rule (consultants/engine/evidence.py), run 4 #1636."""
+
+    def test_runs_that_never_loaded(self):
+        from consultants.engine.evidence import no_run_report_check
+        msgs = _conv((_call("a", "run_command", command="bun x vitest run a.test.ts"),
+                      "exit=1 wall=1s killed_by=none\n--- stdout ---\n"
+                      "Error: Cannot find module 'vitest/config'"))
+        note = no_run_report_check(msgs)
+        assert note and "1 command(s), 1 of them tests or probes" in note
+        assert "you ran none" in no_run_report_check(_conv())
+
+    def test_one_run_that_reached_the_code(self):
+        from consultants.engine.evidence import no_run_report_check
+        msgs = _conv((_call("a", "run_command", command="bun x vitest run a.test.ts"), OK))
+        assert no_run_report_check(msgs) is None

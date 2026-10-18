@@ -254,14 +254,21 @@ EFFORT_CAPS: dict[str, EffortCaps] = {
     # parallel so per-lane iter budget multiplies effective
     # exploration.
     #
-    # low: planner -> ≤4 researcher iters -> synthesizer (no critic)
-    "low":    EffortCaps(1, 0,  4, 3),
-    # medium: 3 fan-out lanes × 4 iters each, 1 round, ≤1 reroute
-    "medium": EffortCaps(1, 1,  4, 3),
-    # high: full council, ≤3 rounds, ≤2 reroutes, ≤10 iters
-    "high":   EffortCaps(3, 2, 10,  8),
+    #
+    # 2026-10-18 (runs csl-...-1257-42d3 / -1358-a02b, xhigh + shell):
+    # five of eight round-1 lanes and the coder ended on the iteration
+    # cap at 16, and round 1 of run 4 ran no test at all — reading the
+    # code, writing a test, running it and fixing it does not fit. The
+    # caps were raised about 3x; the forced report comes 6 turns before.
+    #
+    # low: planner -> ≤6 researcher iters -> synthesizer (no critic)
+    "low":    EffortCaps(1, 0,  6,  4),
+    # medium: 3 fan-out lanes × 8 iters each, 1 round, ≤1 reroute
+    "medium": EffortCaps(1, 1,  8,  6),
+    # high: full council, ≤3 rounds, ≤2 reroutes, ≤30 iters
+    "high":   EffortCaps(3, 2, 30, 24),
     # max: large but bounded — token spend caps in practice
-    "max":    EffortCaps(8, 5, 25, 18),
+    "max":    EffortCaps(8, 5, 60, 54),
 }
 
 
@@ -270,15 +277,24 @@ EFFORT_CAPS: dict[str, EffortCaps] = {
 SHELL_TOOLS = frozenset({"run_command"})
 
 
+def _offers_shell(tool_specs) -> bool:
+    return bool({(t.get("function") or {}).get("name")
+                 for t in tool_specs or ()} & SHELL_TOOLS)
+
+
+def _no_run_check():
+    from consultants.engine.evidence import no_run_report_check
+    return no_run_report_check
+
+
 def researcher_iters(caps: EffortCaps, tool_specs) -> tuple[int, int]:
     """``(max_iterations, force_answer_after)`` for a researcher lane.
-    A lane with the shell gets ``max(6, iters // 2)`` more of both:
+    A lane with the shell gets ``max(10, iters // 2)`` more of both:
     csl-2026-10-18-1033-5a67 (xhigh, ``--shell write``) had five of
     eight lanes cut at 10 while still reading. Without it, the caps."""
-    names = {(t.get("function") or {}).get("name") for t in tool_specs or ()}
-    if not names & SHELL_TOOLS:
+    if not _offers_shell(tool_specs):
         return caps.researcher_loop_iters, caps.researcher_force_answer_after
-    bonus = max(6, caps.researcher_loop_iters // 2)
+    bonus = max(10, caps.researcher_loop_iters // 2)
     return (caps.researcher_loop_iters + bonus,
             caps.researcher_force_answer_after + bonus)
 
@@ -3131,6 +3147,9 @@ def researcher_node(state: dict, *,
             on_guard=guard_sink(recorder, role="researcher",
                                  round=this_round, lane_idx=lane_idx),
             wrap_up_check=wrap_up_check,
+            # Council run 4: on a shell run, a report none of whose runs
+            # reached the code is asked once to run one.
+            report_check=(_no_run_check() if _offers_shell(tool_specs) else None),
         )
 
     # Bind recorder callbacks to the loop_runner so per-iteration LLM
@@ -3513,8 +3532,9 @@ def critic_node(state: dict, *, chat_client, model: str,
     dt = time.monotonic() - t0
     decision = parse_critic_decision(text)
     if shell:
-        from consultants.engine.evidence import hold_to_evidence_bar
-        decision, text, _held = hold_to_evidence_bar(decision, text)
+        from consultants.engine.evidence import commands_ran, hold_to_evidence_bar
+        decision, text, _held = hold_to_evidence_bar(
+            decision, text, commands_ran(getattr(recorder, "db_path", None)))
     # M0: strip the critic's CONFIDENCE line out of ``text`` so it's
     # absent from the critique the synthesizer reads + the turn
     # transcript. Emit + append only on the single-critic path below;
@@ -3673,8 +3693,9 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
     dt = time.monotonic() - t0
     decision = parse_critic_decision(text)
     if shell:
-        from consultants.engine.evidence import hold_to_evidence_bar
-        decision, text, _held = hold_to_evidence_bar(decision, text)
+        from consultants.engine.evidence import commands_ran, hold_to_evidence_bar
+        decision, text, _held = hold_to_evidence_bar(
+            decision, text, commands_ran(getattr(recorder, "db_path", None)))
     # M0: strip + emit the consolidated confidence (fanned-critic path).
     text, _meta_conf = _extract_confidence(text)
     _emit_confidence(_meta_conf, source="critic", state=state)
@@ -3732,7 +3753,8 @@ def _unverified_revision(chat_client, model, msgs, text, *, state, think,
     from consultants.engine import evidence
     audit = evidence.audit_answer(text, rows)
     if audit.ok:
-        return text, 0, 0
+        return _claim_audit(chat_client, model, text, rows, state=state,
+                            recorder=recorder)
     rpt = rct = 0
     try:
         revised, rpt, rct = _role_turn(
@@ -3753,7 +3775,39 @@ def _unverified_revision(chat_client, model, msgs, text, *, state, think,
                       "the first answer")
     if rows is None:
         return evidence.with_unverified_stub(text), rpt, rct
-    return evidence.enforce(text, evidence.audit_answer(text, rows)), rpt, rct
+    text = evidence.enforce(text, evidence.audit_answer(text, rows))
+    text, apt, act = _claim_audit(chat_client, model, text, rows, state=state,
+                                  recorder=recorder)
+    return text, rpt + apt, rct + act
+
+
+def _claim_audit(chat_client, model, text, rows, *, state, recorder
+                 ) -> tuple[str, int, int]:
+    """One auditor call (council run 4, mail #1636): each ranked defect
+    beside what its cited runs printed. What it finds not shown or
+    contradicted moves to ``Unverified``. A failed or unreadable audit
+    leaves the answer as it is. Recorded as ``synthesizer:audit``."""
+    from consultants.engine import evidence
+    items = evidence.claim_audit_items(text, rows)
+    if not items:
+        return text, 0, 0
+    try:
+        reply, pt, ct = _single_shot(
+            chat_client, model, [
+                {"role": "system", "content": evidence.CLAIM_AUDIT_SYSTEM},
+                {"role": "user", "content": evidence.claim_audit_prompt(items)}],
+            think=False, recorder=recorder, role="synthesizer:audit", round=1,
+            knobs=_budget_knobs(state, "synthesizer", model),
+            sampling=_instance_sampling(state, "synthesizer", model, chat_client))
+    except Exception:
+        log.exception("synthesizer claim audit failed; answer kept")
+        return text, 0, 0
+    verdicts = evidence.parse_claim_audit(reply, len(items))
+    text, moved = evidence.apply_claim_audit(text, items, verdicts)
+    if moved:
+        log.info("claim audit moved %d of %d ranked item(s) to Unverified",
+                 moved, len(items))
+    return text, pt, ct
 
 
 def synthesizer_node(state: dict, *, chat_client, model: str,

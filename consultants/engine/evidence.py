@@ -90,17 +90,39 @@ BRIEF_ATTRIBUTION = (
     "findings it did not make.")
 
 
-def hold_to_evidence_bar(decision: str, text: str) -> tuple[str, str, bool]:
-    """``(decision, text, held)``: ``ready`` with an admission that the
-    tests were not run becomes ``needs_more_research`` with a note."""
+NO_RUN_NOTE = (
+    "[harness] Held at needs_more_research by the evidence bar: this "
+    "critique answered ready, but no command the lanes ran on this run "
+    "reached the code (COMMANDS THE LANES RAN shows {what}). A ready "
+    "verdict on a run with the shell needs at least one test or probe "
+    "that ran. Name the command that would settle each ranked finding.")
+
+
+def hold_to_evidence_bar(decision: str, text: str,
+                         rows: Optional[list[dict]] = None,
+                         ) -> tuple[str, str, bool]:
+    """``(decision, text, held)``: ``ready`` becomes
+    ``needs_more_research`` with a note when the critique admits the
+    tests were not run, or when the record (``rows``, from
+    :func:`commands_ran`) shows no run that reached the code (council
+    run 4, mail #1636: a critic read ready off reports, none of whose
+    runs had loaded). ``rows=None`` means the record could not be read
+    and decides nothing."""
     if decision != "ready" or not text:
         return decision, text, False
     m = TESTS_NOT_RUN.search(text)
-    if not m:
-        return decision, text, False
-    quote = " ".join(m.group(0).split())[:160]
-    return ("needs_more_research",
-            text.rstrip() + "\n\n" + HELD_NOTE.format(quote=quote), True)
+    if m:
+        quote = " ".join(m.group(0).split())[:160]
+        return ("needs_more_research",
+                text.rstrip() + "\n\n" + HELD_NOTE.format(quote=quote), True)
+    if rows is not None and not any(r.get("ran") for r in rows):
+        probes = sum(1 for r in rows if is_probe(r.get("command") or ""))
+        what = ("no commands" if not rows else
+                f"{len(rows)} command(s), {probes} of them tests or probes, "
+                "none of which reached the code")
+        return ("needs_more_research",
+                text.rstrip() + "\n\n" + NO_RUN_NOTE.format(what=what), True)
+    return decision, text, False
 
 
 def needs_unverified_revision(text: str) -> bool:
@@ -286,6 +308,51 @@ def _reached_the_code(cmd: str, output: str) -> bool:
         return bool(TEST_RESULTS.search(body)) or (
             bool(ANY_COUNT.search(body)) and not SETUP_FAILED.search(body))
     return bool(body) and not SETUP_FAILED.search(body)
+
+
+NO_RUN_REPORT_NOTE = (
+    "Before you report: none of the commands you ran on this run reached "
+    "the code ({what}). On a run with the shell a report whose runs never "
+    "reached the code is not evidence, however carefully it reads the "
+    "source. Run the test or probe that would show your top finding, and "
+    "fix its setup (a config, an import path, a `cd`) if it fails to "
+    "load. If it cannot run here, say so in your report and why.")
+
+
+def lane_runs(messages: list) -> list[tuple[str, str]]:
+    """``(command, output)`` of every ``run_command`` call in a lane's
+    conversation, in order."""
+    calls: dict = {}
+    order: list = []
+    out: dict = {}
+    for m in messages or []:
+        if m.get("role") == "assistant":
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                if fn.get("name") != SHELL_TOOL:
+                    continue
+                a = fn.get("arguments")
+                cid = tc.get("id") or f"_{len(order)}"
+                calls[cid] = _command_of(a if isinstance(a, str) else json.dumps(a or {}))
+                order.append(cid)
+        elif m.get("role") == "tool" and m.get("tool_call_id") in calls:
+            c = m.get("content")
+            out[m["tool_call_id"]] = c if isinstance(c, str) else json.dumps(c)
+    return [(calls[c], out.get(c, "")) for c in order]
+
+
+def no_run_report_check(messages: list) -> Optional[str]:
+    """A researcher's ``LoopConfig.report_check`` on a shell run: a note
+    when none of its runs reached the code (council run 4, mail #1636),
+    else None. A lane that ran nothing gets it as well."""
+    runs = lane_runs(messages)
+    if any(_reached_the_code(c, o) for c, o in runs):
+        return None
+    probes = sum(1 for c, _ in runs if is_probe(c))
+    what = ("you ran none" if not runs else
+            f"{len(runs)} command(s), {probes} of them tests or probes, none "
+            "of which reached the code")
+    return NO_RUN_REPORT_NOTE.format(what=what)
 
 
 def is_probe(command: str) -> bool:
@@ -623,6 +690,108 @@ def enforce(text: str, a: Audit) -> str:
     return out + "\n"
 
 
+# ------------------------------------------- does the cited run show it
+# Council run 4 (mail #1636): ranked #2 cited a run that reached the code,
+# so the audit above passed it, but the run's output did not show the
+# defect. Citing a run is not the run showing it. An auditor that sees
+# only the claim and what the cited runs printed, side by side, decides;
+# the code moves what it finds not shown.
+
+CLAIM_AUDIT_SYSTEM = (
+    "You check claims against command output, and nothing else. Each "
+    "claim below cites runs; under it is what those runs printed. Decide, "
+    "for each claim, whether that output shows it:\n"
+    "- SHOWN: a printed line states the defect or demonstrates it (a "
+    "failing assertion, a wrong value printed, an error the claim "
+    "predicts).\n"
+    "- NOT SHOWN: the output is about something else, only shows that "
+    "a test ran or passed, or shows a setup failure. A passing test does "
+    "not show a defect unless what it printed does.\n"
+    "- CONTRADICTED: the output shows the opposite of the claim.\n"
+    "Use only the output given; never what the claim says it shows. "
+    "Answer one line per claim and nothing else:\n"
+    "`A<k>: SHOWN|NOT SHOWN|CONTRADICTED — <the printed line you relied "
+    "on, or what is missing>`")
+CLAIM_AUDIT_MAX_ITEMS = 12
+CLAIM_AUDIT_RUNS_PER_ITEM = 3
+CLAIM_AUDIT_OUTPUT_CHARS = 1500
+_VERDICT_LINE = re.compile(
+    r"^\W*A(\d{1,3})\W*[:.)\]-]\s*\**\s*(NOT\s+SHOWN|CONTRADICTED|SHOWN)\b"
+    r"\**\s*(?:[—–:-]+\s*)?(.*)$", re.I | re.M)
+NOT_SHOWN_NOTE = ("moved here by the harness's audit: {verdict} by its cited "
+                  "run(s) {ids} ({why})")
+
+
+def _shown_output(r: dict) -> str:
+    out = (r.get("printed") or "").strip()
+    tail = (r.get("tail") or "").strip()
+    if tail and tail not in out:
+        out = (out + "\n" + tail).strip()
+    out = out or "(printed nothing)"
+    return out if len(out) <= CLAIM_AUDIT_OUTPUT_CHARS else (
+        out[:CLAIM_AUDIT_OUTPUT_CHARS] + "\n… (cut)")
+
+
+def claim_audit_items(text: str, rows: Optional[list[dict]]) -> list[dict]:
+    """Ranked items citing runs that reached the code, each with those
+    runs (``runs``), at most :data:`CLAIM_AUDIT_MAX_ITEMS`."""
+    if not rows:
+        return []
+    by_n = {r["n"]: r for r in rows if r.get("ran")}
+    out = []
+    for it in ranked_items(text):
+        runs = [by_n[n] for n in sorted(cited(it["text"])) if n in by_n]
+        if runs:
+            out.append(dict(it, runs=runs[:CLAIM_AUDIT_RUNS_PER_ITEM]))
+    return out[:CLAIM_AUDIT_MAX_ITEMS]
+
+
+def claim_audit_prompt(items: list[dict]) -> str:
+    parts = []
+    for k, it in enumerate(items, start=1):
+        claim = re.sub(r"\s+", " ", it["text"]).strip()
+        claim = claim if len(claim) <= 600 else claim[:600] + "…"
+        runs = "\n".join(
+            f"[{r['id']}] `{_norm(r['command'])[:200]}` → {r['exit']}\n"
+            f"{_shown_output(r)}" for r in it["runs"])
+        parts.append(f"A{k}. CLAIM: {claim}\nOUTPUT OF THE CITED RUNS:\n{runs}")
+    return "\n\n---\n\n".join(parts)
+
+
+def parse_claim_audit(reply: str, n: int) -> dict[int, tuple[str, str]]:
+    """``{k: (verdict, why)}`` for the lines that parse; ``k`` from 1."""
+    out: dict[int, tuple[str, str]] = {}
+    for m in _VERDICT_LINE.finditer(reply or ""):
+        k = int(m.group(1))
+        if 1 <= k <= n and k not in out:
+            out[k] = (" ".join(m.group(2).lower().split()),
+                      m.group(3).strip().strip("`")[:240])
+    return out
+
+
+def apply_claim_audit(text: str, items: list[dict],
+                      verdicts: dict[int, tuple[str, str]]) -> tuple[str, int]:
+    """The answer with every item found ``not shown`` or ``contradicted``
+    moved to ``Unverified``; ``(text, moved)``. An item with no verdict
+    stays as it is."""
+    lines = text.split("\n")
+    moved = []
+    for k, it in sorted(enumerate(items, start=1), key=lambda x: -x[1]["start"]):
+        v = verdicts.get(k)
+        if not v or v[0] == "shown":
+            continue
+        ids = ", ".join(r["id"] for r in it["runs"])
+        moved.insert(0, f"- {_label(it['text'])}: " + NOT_SHOWN_NOTE.format(
+            verdict="not shown" if v[0] == "not shown" else "contradicted",
+            ids=ids, why=v[1] or "no reason given") + ".")
+        del lines[it["start"]:it["end"]]
+    if not moved:
+        return text, 0
+    if not _insert_under(lines, UNVERIFIED_HEADING, moved):
+        lines += ["", "## Unverified", ""] + moved
+    return "\n".join(lines).rstrip() + "\n", len(moved)
+
+
 # ------------------------------------------------- the critic and the ledger
 CRITIC_LEDGER_NOTE = (
     "Check every claim a report marks verified, confirmed or reproduced "
@@ -679,7 +848,8 @@ def held_test_notes(db_path, lane: str, paths: list[str]) -> dict[str, str]:
     return {p: f"⚠ {why}" for p, why in found.items() if p in tests}
 
 
-__all__ = ["hold_to_evidence_bar", "commands_block", "commands_ran",
+__all__ = ["hold_to_evidence_bar", "claim_audit_items", "claim_audit_prompt",
+           "parse_claim_audit", "apply_claim_audit", "CLAIM_AUDIT_SYSTEM", "no_run_report_check", "lane_runs", "commands_block", "commands_ran",
            "needs_unverified_revision", "with_unverified_stub",
            "audit_answer", "revision_note", "enforce", "Audit",
            "ranked_items", "probe_groups", "is_probe", "cited",

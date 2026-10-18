@@ -713,7 +713,8 @@ def coder_node(state: dict,
             # potentially revise after reading an error), but not as
             # exploratory as researcher. Writing and running tests
             # takes more turns than writing alone.
-            max_iterations=16 if ws is not None else 8,
+            # Write a test, run it, fix it, run it again (runs 3/4 capped at 16).
+            max_iterations=40 if ws is not None else 12,
             force_answer_after=14 if ws is not None else 6,
             tools_available=True,
             think=think,

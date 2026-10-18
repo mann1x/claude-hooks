@@ -155,6 +155,11 @@ class LoopConfig:
     # True the loop sends no further work and ends on one tool-less
     # report (``_stop_reason`` = ``wrap_up``). ``None`` never asks.
     wrap_up_check: Optional[Callable[[], bool]] = None
+    # Asked once, when the loop is about to end on a report: given the
+    # conversation, a note to re-ask with, or None to let the report
+    # stand. The caller owns the rule (council run 4: a lane on a shell
+    # run whose runs never reached the code). Exceptions are ignored.
+    report_check: Optional[Callable[[list], Optional[str]]] = None
 
 
 #: Plan D13: every message the harness writes into a conversation opens
@@ -1002,6 +1007,7 @@ def run_loop(
     strict = getattr(config, "guard_profile", "standard") == "strict"
     silent = _SilentTurns(strict=strict)
     tests_nudged = False
+    report_checked = False
 
     if config.tools_available and preseed_builder is not None:
         preseed = preseed_builder(cwd)
@@ -1227,6 +1233,24 @@ def run_loop(
                                         "content": msg["content"]})
                     payload["messages"] = history + [
                         harness_note(test_reruns.nudge(unrun))]
+                    continue
+            if (config.report_check is not None and not report_checked
+                    and truncation.classify(final) is None):
+                report_checked = True
+                try:
+                    note = config.report_check(payload.get("messages") or [])
+                except Exception:  # noqa: BLE001 — the caller's rule
+                    log.exception("report_check raised; report stands")
+                    note = None
+                if note:
+                    _emit_guard(config, {"guard": "report_check",
+                                         "action": "nudge", "iteration": i})
+                    payload = dict(payload)
+                    history = list(payload["messages"])
+                    if (msg.get("content") or "").strip():
+                        history.append({"role": "assistant",
+                                        "content": msg["content"]})
+                    payload["messages"] = history + [harness_note(note)]
                     continue
             final = _continue_truncated_answer(
                 final, payload, chat_fn, config, on_iter, i)
