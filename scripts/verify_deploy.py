@@ -560,6 +560,48 @@ def check_shell(r: Results) -> None:
         r.add(PASS, "sandbox views", f"{held} held patch(es), no orphans")
 
 
+def check_sandbox(r: Results) -> None:
+    """The council-sandbox launcher (plan E2) and a real escape smoke.
+
+    An installed launcher must be the pinned one — a copy that no longer
+    matches (a pin moved and the deploy did not follow, or someone
+    swapped it) is a FAIL, since ``auto`` would then quietly fall back
+    to bwrap. Then :func:`launcher.escape_smoke` runs escape attempts
+    (root, ``/root``, writes outside scratch, network, host pids, new
+    namespaces, capabilities) through the backend councils will actually
+    use, and any attempt that is not refused is a FAIL."""
+    print("council sandbox")
+    if not sys.platform.startswith("linux"):
+        r.add(PASS, "council-sandbox", f"no launcher on {sys.platform} (plan E7)")
+        return
+    try:
+        from claude_hooks.sandbox import backend_for, launcher
+        from consultants import config as cc
+        backend = cc.load_config(cwd=REPO).tools.shell.backend
+    except Exception as e:
+        r.add(WARN, "council-sandbox", f"unavailable: {type(e).__name__}: {e}")
+        return
+    chk = launcher.verify()
+    if chk.ok:
+        r.add(PASS, "council-sandbox", f"{chk.reason}, sha256 {chk.sha256[:12]}… "
+              f"({chk.path})")
+    elif chk.reason == "not installed" or chk.reason.startswith("no "):
+        r.add(FAIL if backend == "launcher" else WARN, "council-sandbox",
+              f"{chk.reason} — council shells use the bwrap chain")
+    else:
+        r.add(FAIL, "council-sandbox", f"{chk.path}: {chk.reason}")
+    be = backend_for(backend)
+    if not be.preflight().ok:
+        return  # check_shell already reported why there is no shell
+    failed = launcher.escape_smoke(be)
+    if failed:
+        r.add(FAIL, f"escape smoke ({be.name})",
+              "NOT refused: " + "; ".join(failed))
+    else:
+        r.add(PASS, f"escape smoke ({be.name})",
+              f"{len(launcher.SMOKE)} escape attempts refused")
+
+
 # --------------------------------------------------------------------- #
 # Skills
 # --------------------------------------------------------------------- #
@@ -745,6 +787,7 @@ def main() -> int:
         check_version(r)
         check_ollama_upstream(r)
         check_shell(r)
+        check_sandbox(r)
         check_providers(r)
         check_embedder(r)
         check_lsp_daemons(r)

@@ -85,6 +85,19 @@ CODER_SYSTEM = (
 )
 
 
+#: Replaces rules 1-2 of :data:`CODER_SYSTEM` when the lane writes in
+#: its own worktree view (``--shell write``).
+CODER_WORKSPACE_NOTE = (
+    "\n\nWORKSPACE (this run overrides rules 1 and 2): you work in a "
+    "private git worktree of the repository — the user's tree is never "
+    "touched. ``write_file`` paths are relative to the repository root "
+    "and land in that worktree. ``run_command`` runs a command there (no "
+    "network): run the tests you write, and fix what fails. In your "
+    "final message say which commands you ran and what passed or failed; "
+    "a test you did not run must be called not run. Your files reach the "
+    "user as a held patch to review.")
+
+
 # Inserted into the planner's system prompt when ``cfg.roles.coder.enabled``.
 # Placed after the existing planner job description; the planner
 # emits its plan as usual, then appends a fenced ``json`` block when
@@ -264,8 +277,13 @@ class CoderSandbox:
     def __init__(self, *, root: Path,
                  max_file_bytes: int,
                  max_total_bytes: int,
-                 max_files: int):
+                 max_files: int,
+                 owner: Optional[int] = None):
         self.root = root
+        #: The uid the lane's commands run as, given each file written
+        #: (a worktree view is theirs; files the engine makes as root
+        #: would be read-only to them).
+        self.owner = owner
         self.max_file_bytes = int(max_file_bytes)
         self.max_total_bytes = int(max_total_bytes)
         self.max_files = int(max_files)
@@ -328,6 +346,8 @@ class CoderSandbox:
             raise ValueError(msg) from None
         # Create parents + write atomically (temp file + rename) so a
         # partial write never lands on disk.
+        made = [d for d in reversed(target.parents)
+                if d.is_relative_to(self.root) and not d.exists()]
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(target.suffix + ".tmp")
         try:
@@ -342,6 +362,12 @@ class CoderSandbox:
             except OSError:  # pragma: no cover
                 pass
             raise ValueError(f"filesystem error writing {clean}: {e}") from e
+        if self.owner is not None:
+            for d in [*made, target]:
+                try:
+                    os.chown(d, self.owner, self.owner)
+                except OSError:  # pragma: no cover — not ours to give
+                    log.warning("could not chown %s", d)
         sha = hashlib.sha256(body_bytes).hexdigest()
         entry = {"path": clean, "bytes": n, "sha256": sha}
         self.writes.append(entry)
@@ -365,6 +391,28 @@ def make_coder_sandbox(*, cwd: str, sid: str,
         max_total_bytes=max_total_bytes,
         max_files=max_files,
     )
+
+
+def make_workspace_tool_executor(sandbox: CoderSandbox, shell_executor,
+                                 commands: list):
+    """``write_file`` into the view, ``run_command`` through the shell
+    under the coder's lane; each command and its exit code is kept in
+    ``commands`` for the artifact."""
+    write = make_sandbox_tool_executor(sandbox)
+
+    def _exec(name: str, args: str, cwd: str = "", **kw) -> str:
+        if name != "run_command":
+            return write(name, args, cwd, **kw)
+        out = shell_executor(name, args, cwd)
+        try:
+            cmd = json.loads(args).get("command") or json.loads(args).get("argv")
+        except (TypeError, ValueError, AttributeError):
+            cmd = args
+        m = re.match(r"exit=(\S+)", out or "")
+        commands.append({"command": str(cmd)[:200],
+                         "exit": m.group(1) if m else "?"})
+        return out
+    return _exec
 
 
 def make_sandbox_tool_executor(sandbox: CoderSandbox):
@@ -492,8 +540,19 @@ def coder_node(state: dict,
                model_chain_resolver: Optional[Callable[
                    [Optional[str]], list[tuple[Any, str]]]] = None,
                wrap_up_check: Optional[Callable[[], bool]] = None,
+               workspace: Optional[Callable[[], Optional[tuple]]] = None,
+               shell_executor: Optional[Callable[..., str]] = None,
+               shell_spec: Optional[dict] = None,
                ) -> dict:
     """Execute one ``CoderTaskItem`` from the per-lane state slice.
+
+    ``workspace`` (``--shell write``) returns ``(host view dir, owner
+    uid)`` for this lane's own worktree view, or None: the lane then
+    writes there instead of ``coder-out/`` and runs ``run_command``
+    through ``shell_executor`` (advertised as ``shell_spec``), so the
+    tests it writes are run and its files reach the user as a held
+    patch (csl-2026-10-18-1033-5a67: a coder's test file was never run
+    and was missing from the held changes).
 
     Returns a state delta merging into ``coder_artifacts``. Never
     raises — failures land as a tombstone ``CoderArtifact`` with the
@@ -626,6 +685,14 @@ def coder_node(state: dict,
     except Exception:  # pragma: no cover
         LoopConfig = None  # type: ignore[assignment]
 
+    ws = None
+    if workspace is not None and shell_executor is not None and shell_spec:
+        try:
+            ws = workspace()
+        except Exception:
+            log.exception("coder lane %s: no worktree view; writing to "
+                          "coder-out/", lane_idx)
+            ws = None
     msgs = build_coder_messages(
         item, grounding_msgs,
         question=state.get("question") or "",
@@ -636,14 +703,18 @@ def coder_node(state: dict,
         max_files=max_files,
     )
 
+    if ws is not None and msgs and msgs[0].get("role") == "system":
+        msgs = [dict(msgs[0], content=msgs[0]["content"] + CODER_WORKSPACE_NOTE),
+                *msgs[1:]]
     loop_cfg = None
     if LoopConfig is not None:
         loop_cfg = LoopConfig(
             # Coder is more iterative than tool_executor (write,
             # potentially revise after reading an error), but not as
-            # exploratory as researcher.
-            max_iterations=8,
-            force_answer_after=6,
+            # exploratory as researcher. Writing and running tests
+            # takes more turns than writing alone.
+            max_iterations=16 if ws is not None else 8,
+            force_answer_after=14 if ws is not None else 6,
             tools_available=True,
             think=think,
             # Plan §0.7: strict lanes open with a tool call.
@@ -678,13 +749,26 @@ def coder_node(state: dict,
 
         # Fresh sandbox per attempt — a partial write from a failed
         # primary must not leak into the fallback's view of the world.
-        sandbox = make_coder_sandbox(
-            cwd=cwd, sid=sid,
-            max_file_bytes=max_file_bytes,
-            max_total_bytes=max_total_bytes,
-            max_files=max_files,
-        )
-        tool_executor = make_sandbox_tool_executor(sandbox)
+        commands: list[dict] = []
+        if ws is not None:
+            # A view persists across attempts (a fallback sees what the
+            # failed attempt wrote); the audit is per attempt.
+            sandbox = CoderSandbox(
+                root=Path(ws[0]), max_file_bytes=max_file_bytes,
+                max_total_bytes=max_total_bytes, max_files=max_files,
+                owner=ws[1])
+            tool_executor = make_workspace_tool_executor(
+                sandbox, shell_executor, commands)
+            specs = [CODER_WRITE_FILE_TOOL_SPEC, shell_spec]
+        else:
+            sandbox = make_coder_sandbox(
+                cwd=cwd, sid=sid,
+                max_file_bytes=max_file_bytes,
+                max_total_bytes=max_total_bytes,
+                max_files=max_files,
+            )
+            tool_executor = make_sandbox_tool_executor(sandbox)
+            specs = [CODER_WRITE_FILE_TOOL_SPEC]
 
         payload = {
             "model": model_name, "messages": list(msgs), "stream": False,
@@ -751,7 +835,7 @@ def coder_node(state: dict,
                 payload,
                 cwd,
                 config=loop_cfg,
-                tool_specs=[CODER_WRITE_FILE_TOOL_SPEC],
+                tool_specs=specs,
                 chat_fn=_chat_fn,
                 tool_executor=tool_executor,
                 on_iter=on_iter_cb,
@@ -830,6 +914,8 @@ def coder_node(state: dict,
                     lane_idx=lane_idx, parent_round=parent_round,
                     duration_ms=dt_lane_ms,
                     error=None,
+                    workspace="view" if ws is not None else "",
+                    commands=list(commands),
                 )],
             }
 
@@ -1078,16 +1164,28 @@ def build_coder_artifacts_block(artifacts: list[CoderArtifact]) -> str:
         summary = (a.summary or "").strip()
         if len(summary) > 600:
             summary = summary[:600] + "... [truncated]"
-        lines.append(
-            f"\n{i}. TASK: {a.task}\n"
-            f"   FILES: {files_summary}\n"
-            f"   SUMMARY: {summary}"
-        )
+        entry = (f"\n{i}. TASK: {a.task}\n"
+                 f"   FILES: {files_summary}\n")
+        if getattr(a, "workspace", "") == "view":
+            ran = getattr(a, "commands", None) or []
+            entry += ("   WHERE: the coder's worktree view (paths from the "
+                      "repo root; a held patch, listed under Sandbox "
+                      "changes)\n"
+                      "   RUN: " + ("; ".join(f"`{c['command']}` -> exit "
+                                            f"{c['exit']}" for c in ran[-6:])
+                                  if ran else "nothing — its code and tests "
+                                  "are NOT verified") + "\n")
+        else:
+            entry += ("   RUN: nothing (no shell) — its code and tests are "
+                      "NOT verified\n")
+        lines.append(entry + f"   SUMMARY: {summary}")
     return "\n".join(lines)
 
 
 __all__ = [
     "CODER_SYSTEM",
+    "CODER_WORKSPACE_NOTE",
+    "make_workspace_tool_executor",
     "CODER_WRITE_FILE_TOOL_SPEC",
     "CoderSandbox",
     "PLANNER_CODER_GATE_BLOCK",

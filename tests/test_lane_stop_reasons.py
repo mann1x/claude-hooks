@@ -201,3 +201,49 @@ def test_each_coder_attempt_carries_how_it_ended(tmp_path, monkeypatch):
             ("coder", "model_missing"), ("coder", "no_artifacts")]
     finally:
         rec.close()
+
+
+#: csl-2026-10-18-1033-5a67 lane 2's last turn, verbatim.
+LANE2 = ("]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"read_file\">]<]minimax[>["
+         "<path>sdk/x.ts]<]minimax[>[</path>]<]minimax[>[</invoke>\n]<]minimax[>[</tool_call>")
+
+
+def _markup_loop(payload, cwd, **kw):
+    return {"choices": [{"message": {"role": "assistant", "content": LANE2},
+                         "finish_reason": "stop"}],
+            "_stop_reason": "no_report", "_failure_class": "tool_call_unparsable",
+            "_loop_messages": list(payload["messages"])}
+
+
+def _client_saying(text):
+    return SimpleNamespace(chat=lambda payload: {
+        "choices": [{"message": {"role": "assistant", "content": text},
+                     "finish_reason": "stop"}], "done_reason": "stop"})
+
+
+def test_a_lane_ending_on_markup_is_a_failure_not_a_report(monkeypatch):
+    """Two minimax lanes ended "completed" with markup as their report; a
+    quarter of the audit was silently not done."""
+    _finished(monkeypatch)
+    update = council.researcher_node(
+        _state(), chat_client=_client_saying(LANE2), tool_executor=lambda *a, **k: "",
+        tool_specs=[], grounding_msgs=[], model="m", cwd="/proj",
+        loop_runner=_markup_loop)
+    turn = update["turns"][0]
+    assert "<tool_call>" not in turn.content
+    assert turn.content.startswith("(researcher lane produced no")
+    assert (turn.stop_reason, turn.failure_class) == ("no_report",
+                                                      "tool_call_unparsable")
+    from consultants.engine.retry_lanes import ESCALATE_CLASSES
+    assert turn.failure_class in ESCALATE_CLASSES
+
+
+def test_a_summary_that_reports_clears_the_mark(monkeypatch):
+    _finished(monkeypatch)
+    update = council.researcher_node(
+        _state(), chat_client=_client_saying("- `sdk/x.ts:4` drops the receipt."),
+        tool_executor=lambda *a, **k: "", tool_specs=[], grounding_msgs=[],
+        model="m", cwd="/proj", loop_runner=_markup_loop)
+    turn = update["turns"][0]
+    assert "sdk/x.ts:4" in turn.content
+    assert turn.stop_reason == "completed" and turn.failure_class is None

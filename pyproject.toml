@@ -70,6 +70,9 @@ include = ["claude_hooks*", "consultants*"]
 # by install.py and scripts/deploy.py, so they must ship with the package.
 [tool.setuptools.package-data]
 "claude_hooks.mailbox" = ["cloud/*.md"]
+# The council-sandbox launcher pin (plan E2): the engine checks the
+# installed binary against it before running it as root.
+"claude_hooks.sandbox" = ["launcher_pin.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

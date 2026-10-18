@@ -297,6 +297,10 @@ class GraphDeps:
     cwd: str
     tool_executor: Optional[Callable[..., str]] = None
     tool_specs: list[dict] = field(default_factory=list)
+    # Plan E (``--shell write``): ``lane id -> (host view dir, owner uid)``
+    # for a lane's own worktree view, or None. Set by the runner only in
+    # write mode; the coder then writes and runs its tests there.
+    lane_workspace: Optional[Callable[[str], Optional[tuple]]] = None
     # M-B: roles that receive ``tool_specs`` + ``tool_executor``.
     # ``researcher`` is not listed because its tool loop is wired
     # directly rather than through this gate. Empty (the default)
@@ -791,9 +795,21 @@ def _wrap_coder(deps: GraphDeps, *, max_file_bytes: int,
     # body is a fast dict lookup, not a config-walk.
     resolver = _build_coder_chain_resolver(deps)
 
+    shell_spec = next((t for t in deps.tool_specs or []
+                       if (t.get("function") or {}).get("name")
+                       in LANE_ONLY_TOOLS), None)
+
     def _node(state: dict) -> dict:
+        ws_kw = {}
+        if deps.lane_workspace is not None and shell_spec is not None:
+            lane = f"coder:{state.get('lane_idx') or 0}"
+            ws_kw = {"workspace": lambda: deps.lane_workspace(lane),
+                     "shell_executor": bind_lane(deps.tool_executor, lane,
+                                                 deps.sid),
+                     "shell_spec": shell_spec}
         return coder_node(
             state,
+            **ws_kw,
             chat_client=deps.chat_clients.get(role),
             grounding_msgs=deps.grounding_msgs,
             model=deps.models.get(role, ""),

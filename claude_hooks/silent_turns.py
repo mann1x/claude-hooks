@@ -116,6 +116,32 @@ def unparsed_tool_call(text: str) -> Optional[UnparsedCall]:
     return UnparsedCall(blocks, restarts, names[-1] if names else None)
 
 
+#: MiniMax's native separators between the tags of a call written as text.
+_MINIMAX_SEP = re.compile(r"\]<\]minimax\[>\[")
+_CALL_BLOCK = re.compile(r"<tool_call>.*?(?:</tool_call>|\Z)", re.S)
+#: Prose a report keeps around a stray call; less than this is no report.
+ONLY_CALL_MAX_PROSE = 40
+
+
+def only_tool_call(text: str) -> bool:
+    """Whether ``text`` is a tool call written as text and (almost)
+    nothing else — never a report, whatever the loop's state.
+    csl-2026-10-18-1033-5a67: minimax-m3 wrote its next ``read_file`` as
+    text after the tools were stripped, and two lanes' "reports" were
+    that markup alone."""
+    if unparsed_tool_call(text or "") is None:
+        return False
+    rest = _CALL_BLOCK.sub("", _MINIMAX_SEP.sub("", text))
+    return len(rest.strip()) < ONLY_CALL_MAX_PROSE
+
+
+NO_TOOLS_REPORT_REMINDER = (
+    "[SYSTEM MESSAGE] Your last message was a tool call written as text, "
+    "and no tools are available any more in this turn, so nothing ran. "
+    "Do not call tools. Write your report now from what you have already "
+    "read: your findings with `path:line`, and what you did not get to.")
+
+
 def unparsed_reminder(found: UnparsedCall) -> str:
     called = f"`{found.name}`" if found.name else "a tool"
     if found.restarts > 0:
@@ -221,7 +247,7 @@ def non_convergence_note(turns: int, reasoning_chars: int) -> str:
             "sentence and stop.")
 
 
-__all__ = ["thinking_only", "unparsed_tool_call", "unparsed_reminder",
+__all__ = ["only_tool_call", "NO_TOOLS_REPORT_REMINDER", "thinking_only", "unparsed_tool_call", "unparsed_reminder",
            "announced_intent", "announced_intent_reminder",
            "non_convergence_note", "UnparsedCall",
            "rejected_call_reminder", "truncated_arguments_answer",

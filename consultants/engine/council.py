@@ -265,6 +265,24 @@ EFFORT_CAPS: dict[str, EffortCaps] = {
 }
 
 
+#: Tools whose calls take turns of their own: write, run, read the
+#: output, fix, run again.
+SHELL_TOOLS = frozenset({"run_command"})
+
+
+def researcher_iters(caps: EffortCaps, tool_specs) -> tuple[int, int]:
+    """``(max_iterations, force_answer_after)`` for a researcher lane.
+    A lane with the shell gets ``max(6, iters // 2)`` more of both:
+    csl-2026-10-18-1033-5a67 (xhigh, ``--shell write``) had five of
+    eight lanes cut at 10 while still reading. Without it, the caps."""
+    names = {(t.get("function") or {}).get("name") for t in tool_specs or ()}
+    if not names & SHELL_TOOLS:
+        return caps.researcher_loop_iters, caps.researcher_force_answer_after
+    bonus = max(6, caps.researcher_loop_iters // 2)
+    return (caps.researcher_loop_iters + bonus,
+            caps.researcher_force_answer_after + bonus)
+
+
 def caps_for(effort: str) -> EffortCaps:
     """Return the budget caps for an effort tier. Phase 9 x-prefixed
     tiers (xmedium / xhigh / xmax) inherit caps from their base tier
@@ -367,6 +385,16 @@ CRITIC_SYSTEM = _role_prompt(
     "Default to ready unless you can name a concrete missing fact. "
     "Do not request research for theoretical completeness — each "
     "extra round costs another full agent loop.\n\n"
+    "EVIDENCE BAR. A finding is established only when a report shows "
+    "how it was checked: a test or command that was run, with its "
+    "result, or the cited line read together with the comments around "
+    "it (a comment may say the behaviour is deliberate, which refutes "
+    "a defect). An unchecked load-bearing finding IS a concrete missing "
+    "fact: when you can name where to check it, answer "
+    "needs_more_research; when you answer ready anyway, list each one "
+    "as `UNVERIFIED: <claim> — <what would check it>`. Never answer "
+    "ready while saying tests were not run or the question's focus "
+    "items were not found, without listing them that way.\n\n"
     "FINAL LINE (load-bearing). End your output with a line "
     "`CONFIDENCE: <0.0-1.0>` — your confidence that the assembled "
     "evidence is sufficient AND correct for the synthesizer (1.0 = "
@@ -396,6 +424,8 @@ META_CRITIC_SYSTEM = _role_prompt(
     "for the synthesizer's answer. A critic raising a theoretical "
     "concern that another critic credibly dismisses is NOT grounds "
     "for more research.\n\n"
+    "Carry every critic's `UNVERIFIED:` line into your critique "
+    "unchanged unless another critic shows the check was done.\n\n"
     "FINAL LINE (load-bearing). End your output with a line "
     "`CONFIDENCE: <0.0-1.0>` — the consolidated confidence that the "
     "evidence is sufficient AND correct (factor in critic "
@@ -544,6 +574,14 @@ SYNTHESIZER_SYSTEM = _role_prompt(
     "line number — relay the exact cite or omit the line. If "
     "researchers disagree, name both as `path:lineA / lineB "
     "(researchers disagree)`.\n\n"
+    "VERIFIED vs UNVERIFIED (load-bearing). Rank a defect, or mark a "
+    "case as passing / ✓, only when a report shows it was checked: a "
+    "test or command run with its result, or the cited line read with "
+    "its surrounding comments (a comment saying the behaviour is "
+    "deliberate refutes the defect). Everything else goes under an "
+    "`Unverified` heading or is marked `not tested` — never ranked, "
+    "never ✓. The critic's `UNVERIFIED:` lines and coder output whose "
+    "RUN line says nothing ran are unverified.\n\n"
     "FINAL LINE (load-bearing). After the answer, output a line "
     "`CONFIDENCE: <0.0-1.0>` — your own confidence that the answer is "
     "correct and complete (1.0 = certain; lower it for thin evidence, "
@@ -3040,6 +3078,7 @@ def researcher_node(state: dict, *,
     # ---------- end M6 branch ------------------------------------ #
 
     caps = caps_for(state.get("effort") or "medium")
+    lane_iters, lane_force_after = researcher_iters(caps, tool_specs)
 
     # Typed protocol (plan G): the report is a ``council_report`` record.
     result_name = _typed_result_name(state, "researcher")
@@ -3075,8 +3114,8 @@ def researcher_node(state: dict, *,
             lane_idx=lane_idx)
         cfg = LoopConfig(
             **result_kw,
-            max_iterations=caps.researcher_loop_iters,
-            force_answer_after=caps.researcher_force_answer_after,
+            max_iterations=lane_iters,
+            force_answer_after=lane_force_after,
             tools_available=True,
             think=_think_for(state, "researcher", model, think),
             # Plan §0.7: strict lanes open with a tool call, and a report
@@ -3256,7 +3295,11 @@ def researcher_node(state: dict, *,
     # audit run (all 6 fan-out lanes returned ""). Force one more
     # tool-stripped call asking for an explicit summary so the
     # synthesizer always sees a real report.
-    if not text.strip():
+    from claude_hooks.silent_turns import only_tool_call
+    if not text.strip() or only_tool_call(text):
+        # A tool call written as text is no report either (two minimax
+        # lanes of csl-2026-10-18-1033-5a67 ended on one, counted done).
+        text = ""
         log.warning(
             "researcher: empty final text after %d iters — forcing "
             "summary call (lane=%s)",
@@ -3297,9 +3340,18 @@ def researcher_node(state: dict, *,
             )
             pt += pt2
             ct += ct2
-            if text2.strip():
+            if text2.strip() and not only_tool_call(text2):
                 text = text2
+                # The report came after all: the lane did not end on a
+                # call written as text.
+                if final.get("_stop_reason") == "no_report":
+                    final = {k: v for k, v in final.items()
+                             if k not in ("_stop_reason", "_failure_class")}
             else:
+                if text2.strip():
+                    # The summary call was a call written as text too.
+                    final = {**final, "_stop_reason": "no_report",
+                             "_failure_class": "tool_call_unparsable"}
                 # Both attempts empty — emit a stub so the synthesizer
                 # at least sees that this lane found nothing concrete.
                 text = (

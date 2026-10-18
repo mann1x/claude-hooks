@@ -145,9 +145,9 @@ def bwrap_args(spec: RunSpec, seccomp_fd: Optional[int]) -> list[str]:
     return a + ["--", *spec.argv]
 
 
-def chain(spec: RunSpec, seccomp_fd: Optional[int], *, unit: str,
-          root: Optional[bool] = None) -> list[str]:
-    """The full command line, outermost layer first."""
+def scope_args(spec: RunSpec, *, unit: str,
+               root: Optional[bool] = None) -> list[str]:
+    """Layer 1: the transient systemd scope holding the cgroup limits."""
     root = is_root() if root is None else root
     lim: Limits = spec.limits
     scope = ["systemd-run", "--scope", "--quiet", "--collect",
@@ -156,7 +156,29 @@ def chain(spec: RunSpec, seccomp_fd: Optional[int], *, unit: str,
              "-p", f"TasksMax={lim.pids}", "-p", f"CPUQuota={lim.cpu_pct}%"]
     if not root:
         scope.insert(1, "--user")
+    return scope
+
+
+def chain(spec: RunSpec, seccomp_fd: Optional[int], *, unit: str,
+          root: Optional[bool] = None,
+          launcher: Optional[str] = None) -> list[str]:
+    """The full command line, outermost layer first.
+
+    With ``launcher`` (the static ``council-sandbox``) that one binary
+    replaces ``prlimit → setpriv → bwrap``, reading the same mount plan.
+    """
+    root = is_root() if root is None else root
+    lim: Limits = spec.limits
+    scope = scope_args(spec, unit=unit, root=root)
     fsize = lim.fsize_mib * 1024 * 1024
+    if launcher:
+        own = [launcher]
+        if root:
+            own += ["--drop-to", f"{NOBODY}:{NOBODY}"]
+        own += ["--rlimit", "core=0:0",
+                "--rlimit", f"nofile={lim.nofile}:{lim.nofile}",
+                "--rlimit", f"fsize={fsize}:{fsize}"]
+        return scope + own + bwrap_args(spec, seccomp_fd)[1:]
     rl = ["prlimit", "--core=0", f"--nofile={lim.nofile}:{lim.nofile}",
           f"--fsize={fsize}:{fsize}", "--"]
     priv = ["setpriv"]
@@ -198,11 +220,26 @@ class _Capture(threading.Thread):
 
 class BwrapBackend:
     name = NAME
+    #: The programs the chain needs on PATH (beyond the launcher itself).
+    tools = ("bwrap", "systemd-run", "prlimit", "setpriv")
+    #: How this backend's own setup failure starts on stderr.
+    setup_prefix = "bwrap: "
 
     def __init__(self, *, required: tuple[str, ...] = REQUIRED):
         self.required = tuple(required)
         self._pre: Optional[tuple[float, Preflight]] = None
         self._lock = threading.Lock()
+
+    def _chain(self, spec: RunSpec, fd: Optional[int], unit: str) -> list[str]:
+        return chain(spec, fd, unit=unit)
+
+    def sandbox_uid(self) -> Optional[int]:
+        """The host uid commands run as when it differs from ours."""
+        return NOBODY if is_root() else None
+
+    def _extra_layers(self, layers: dict[str, str]) -> bool:
+        """Backend-specific layers; False stops the probe there."""
+        return True
 
     # ------------------------------------------------------------------ #
     def preflight(self, *, refresh: bool = False) -> Preflight:
@@ -216,11 +253,12 @@ class BwrapBackend:
 
     def _probe(self) -> Preflight:
         layers: dict[str, str] = {}
-        tools = {t: shutil.which(t) for t in
-                 ("bwrap", "systemd-run", "prlimit", "setpriv")}
+        tools = {t: shutil.which(t) for t in self.tools}
         for t, p in tools.items():
             if not p:
                 layers[f"tool:{t}"] = "absent"
+        if not self._extra_layers(layers):
+            tools["launcher"] = None
         try:
             seccomp.build_filter()
             layers["seccomp"] = "ok"
@@ -284,9 +322,9 @@ class BwrapBackend:
             os.write(wfd, seccomp.build_filter())
         finally:
             os.close(wfd)
-        argv = chain(spec, rfd, unit=unit)
+        argv = self._chain(spec, rfd, unit)
         if not use_scope:
-            argv = argv[argv.index("prlimit"):]
+            argv = argv[len(scope_args(spec, unit=unit)):]
         t0 = time.monotonic()
         try:
             proc = subprocess.Popen(
@@ -308,8 +346,8 @@ class BwrapBackend:
         if killed_by == "none" and rc is not None and rc < 0:
             killed_by = f"signal:{-rc}"
         stderr = err.text()
-        if killed_by == "none" and rc == 1 and stderr.startswith("bwrap: "):
-            # bwrap's own failure (a bind source nobody can reach, say):
+        if killed_by == "none" and rc == 1 and stderr.startswith(self.setup_prefix):
+            # The sandbox's own failure (a bind source nobody can reach, say):
             # the command never started, so this is not its exit code.
             return RunResult(exit_code=None, killed_by="setup",
                              wall_s=round(time.monotonic() - t0, 3),
@@ -338,5 +376,40 @@ class BwrapBackend:
             log.error("sandboxed command %s survived SIGKILL", proc.pid)
 
 
-__all__ = ["BwrapBackend", "REQUIRED", "chain", "bwrap_args", "sandbox_env",
-           "NAME", "NOBODY"]
+class LauncherBackend(BwrapBackend):
+    """The static ``council-sandbox`` launcher (plan E2) behind the same
+    scope and mount plan: one pinned binary instead of three host tools
+    whose versions vary. Used only when :func:`launcher.verify` passes —
+    a binary that is not the pinned one, or that anyone but us could
+    swap, is never run as root."""
+    name = "launcher"
+    tools = ("systemd-run",)
+    setup_prefix = "council-sandbox: "
+
+    def __init__(self, path: Optional[str] = None, **kw):
+        super().__init__(**kw)
+        self._path = path
+
+    def path(self) -> str:
+        from claude_hooks.sandbox import launcher
+        return str(self._path or launcher.installed_path())
+
+    def _chain(self, spec: RunSpec, fd: Optional[int], unit: str) -> list[str]:
+        return chain(spec, fd, unit=unit, launcher=self.path())
+
+    def _extra_layers(self, layers: dict[str, str]) -> bool:
+        from claude_hooks.sandbox import launcher
+        chk = launcher.verify(self.path())
+        layers["launcher"] = "ok" if chk.ok else f"failed: {chk.reason}"
+        return chk.ok
+
+    def _probe(self) -> Preflight:
+        pre = super()._probe()
+        if pre.layers.get("launcher") != "ok" and "launcher" not in pre.missing:
+            pre.missing.insert(0, "launcher")
+            pre.ok = False
+        return pre
+
+
+__all__ = ["BwrapBackend", "LauncherBackend", "REQUIRED", "chain",
+           "bwrap_args", "sandbox_env", "scope_args", "NAME", "NOBODY"]

@@ -980,9 +980,24 @@ poll never hangs the run.
 
 The runner is the **sole resumer** (a deadline-bounded park-poll), so
 there's no double-resume race with `POST /resume`. The assistant reacts
-by subscribing to `events`, `inject`-ing the brief at the `critic` (re-run
-the fanned critics) or `synthesizer` (just sharpen) role, and
+by subscribing to `events`, reading `state` (each lane's
+`research_previews` and the `critique`), `inject`-ing the brief, and
 `adversary-ack`-ing — see the SKILL's **Dynamic adversary** subsection.
+
+Where a checkpoint brief goes (the inject reply's `routed`):
+
+| brief for | round left | routed | what runs |
+|---|---|---|---|
+| researcher / critic | yes | `rewound_to_researcher` | one more research pass, the critic after it |
+| researcher / critic | no, first such brief | `rewound_extra_round` | the cap is raised by exactly one, once per council, and the run rewinds |
+| researcher / critic | no | `best_effort_cap_reached` | nothing re-runs; the synthesizer reads it |
+| synthesizer / any | — | `in_place` | the synthesizer reads it |
+
+Every brief also reaches the synthesizer, labelled with the role it
+named — the synthesizer is the only node certain to run from the
+checkpoint. (Until 2026-10-18 a critic brief there said `in_place` and
+reached no prompt, and a researcher brief with the cap spent reached
+none either.)
 Toggle + timeout:
 
 ```
@@ -1618,8 +1633,9 @@ ask up to 600 s), 4 GiB memory, 256 processes, 400% CPU, 4096 open
 files, 1 GiB per file. Output is capped at 20,000 characters, head and
 tail kept, with the harness's truncation marker.
 
-**How it is built** (Linux, `claude_hooks/sandbox/linux_bwrap.py`) —
-programs that each set one layer and `exec` the next:
+**How it is built** (Linux, `claude_hooks/sandbox/linux_bwrap.py`; the
+static launcher below replaces the middle three) — programs that each
+set one layer and `exec` the next:
 
 ```
 systemd-run --scope -p MemoryMax= -p TasksMax= -p CPUQuota=   cgroup
@@ -1730,9 +1746,35 @@ is never written. (`claude_hooks/sandbox/views.py`.)
   the middle of a command leaves no process, unit, mount or worktree
   behind (`tests/test_council_shell_escape.py`).
 
-Not yet: views of non-git trees (reflink / overlay), the static
-`council-sandbox` launcher, Windows and macOS (`docs/PLAN-council-cerebriline.md`
-§5).
+- **The coder** (when the role is on) gets a view of its own, lane
+  `coder:<n>`: `write_file` lands in it (paths from the repo root) and
+  it has `run_command` there, so it runs the tests it writes; its files
+  are in the "Sandbox changes" patch like a lane's, and the synthesizer
+  is told which commands ran (`RUN: …`) or that nothing did — then the
+  code is unverified. Without `--shell write` it writes to `coder-out/`
+  as before.
+- **Room.** A lane with `run_command` gets `max(6, iters // 2)` more
+  loop iterations than its effort's cap (xhigh: 16, tools stripped at
+  14) — writing, running and fixing takes turns of its own.
+
+**The launcher.** Where the static `council-sandbox` binary is installed
+and verifies, the default `backend = "auto"` runs commands through it
+instead of `prlimit → setpriv → bwrap`: one binary, no dependencies,
+built from `native/council-sandbox` (Rust, musl, static — the fork's
+launcher needed glibc 2.34 and never started on bullseye). It reads the
+same mount plan as bwrap, with `--drop-to` and `--rlimit`; the escape
+suite runs every test through both. `scripts/deploy.py` installs it to
+`~/.claude/claude-hooks-sandbox/council-sandbox` only as the pinned
+build (`claude_hooks/sandbox/launcher_pin.json`: the host's own
+reproducible build when it hashes to the pin, else the release asset
+`council-sandbox-v<version>`, checked against the same hash), and the
+engine refuses a copy that does not match, is not static, or that
+anyone but its owner could replace. `verify_deploy.py` runs escape
+attempts through the backend councils will use. Rebuild and re-pin
+after a source change with `scripts/build_council_sandbox.py --pin`.
+
+Not yet: views of non-git trees (reflink / overlay), Windows and macOS
+(`docs/PLAN-council-cerebriline.md` §5).
 
 ### CLI
 

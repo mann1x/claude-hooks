@@ -841,8 +841,8 @@ class _SilentTurns:
         rejection = getattr(fault, "rejection", None) or {}
         return silent_turns.rejected_call_reminder(rejection), rejection
 
-    def reask(self, response: dict, msg: dict, *, tools_offered: bool
-              ) -> Optional[tuple[str, str]]:
+    def reask(self, response: dict, msg: dict, *, tools_offered: bool,
+              had_tools: bool = False) -> Optional[tuple[str, str]]:
         """``(kind, reminder)`` for a silent turn to ask again, or ``None``
         to let it stand as the answer. A truncated answer is never taken:
         the continuation owns it."""
@@ -866,6 +866,15 @@ class _SilentTurns:
                 self.parse += 1
                 found = ("unparsed_tool_call",
                          silent_turns.unparsed_reminder(call))
+        elif (had_tools and not tools_offered
+              and silent_turns.only_tool_call(content)):
+            # Tools stripped (force-answer) and the model wrote its next
+            # call as text: that is not a report. A loop that never had
+            # tools is not re-asked.
+            if self.parse < silent_turns.TOOL_CALL_PARSE_RETRY_BUDGET:
+                self.parse += 1
+                found = ("tool_call_without_tools",
+                         silent_turns.NO_TOOLS_REPORT_REMINDER)
         elif tools_offered and (said := silent_turns.announced_intent(content)):
             if self.intent < silent_turns.ANNOUNCED_INTENT_BUDGET:
                 self.intent += 1
@@ -1182,7 +1191,7 @@ def run_loop(
                 ]
                 continue
             reminder = silent.reask(final, msg, tools_offered=bool(
-                payload.get("tools")))
+                payload.get("tools")), had_tools=config.tools_available)
             if reminder is not None:
                 kind, text = reminder
                 _emit_guard(config, {"guard": "silent_turn", "action": "reask",
@@ -1366,4 +1375,12 @@ def run_loop(
     # Existing callers (caliber, advisor) ignore the extra key.
     final = dict(final or {})
     final.setdefault("_loop_messages", list(payload.get("messages") or []))
+    # A loop whose last word is a tool call written as text has no
+    # answer, whatever else ended it: say so, so a caller never takes
+    # the markup for one (plan D7's stop / failure class).
+    last = ((final.get("choices") or [{}])[0].get("message") or {})
+    if (not final.get("_stop_reason") and not last.get("tool_calls")
+            and silent_turns.only_tool_call(last.get("content") or "")):
+        final["_stop_reason"] = "no_report"
+        final["_failure_class"] = "tool_call_unparsable"
     return final

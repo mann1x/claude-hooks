@@ -16,7 +16,7 @@ import sys
 from claude_hooks.sandbox.spec import (HOME, SCRATCH, Limits, Preflight,
                                        RunResult, RunSpec)
 
-BACKENDS = ("auto", "bwrap")
+BACKENDS = ("auto", "launcher", "bwrap")
 
 
 class UnavailableBackend:
@@ -39,8 +39,15 @@ def backend_for(name: str = "auto"):
         return UnavailableBackend(name, f"unknown sandbox backend {name!r}; "
                                   f"choose one of {', '.join(BACKENDS)}")
     if sys.platform.startswith("linux"):
-        from claude_hooks.sandbox.linux_bwrap import BwrapBackend
-        return BwrapBackend()
+        from claude_hooks.sandbox.linux_bwrap import BwrapBackend, LauncherBackend
+        if name == "bwrap":
+            return BwrapBackend()
+        if name == "launcher":
+            return LauncherBackend()
+        # auto: the pinned static launcher when it is installed and
+        # verifies, else the bwrap chain (plan E2's interim backend).
+        from claude_hooks.sandbox import launcher
+        return LauncherBackend() if launcher.verify().ok else BwrapBackend()
     if sys.platform == "win32":
         return UnavailableBackend(
             "appcontainer", "the Windows sandbox (AppContainer + Job Object, "

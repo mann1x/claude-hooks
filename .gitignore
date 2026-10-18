@@ -146,3 +146,6 @@ tests/.env.local
 # has no bash/lua/zig server, pandorum has all three. Tracking it would
 # push one host's hardware reality onto the other on the next pull.
 cclsp.json
+
+# council-sandbox release assets (scripts/build_council_sandbox.py --out)
+/dist/council-sandbox/

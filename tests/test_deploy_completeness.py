@@ -251,6 +251,42 @@ class TestEveryArtifactClassIsDeployed(unittest.TestCase):
         self.assertIn("linked_root", src)
 
 
+class TestCouncilSandboxLauncher(unittest.TestCase):
+    """``council-sandbox`` (plan E2) is a native binary no pip install
+    touches, and the engine runs it as root. The fork's launcher was
+    linked against a glibc newer than this host's and never started; a
+    stale or swapped binary here is either the same failure or a root
+    compromise. So deploy installs it from a sha256 pin (or a verified
+    static local build), before the engine restarts onto it, and the
+    verifier runs escape attempts through it."""
+
+    def test_deploy_installs_the_launcher_before_services(self):
+        src = _src(DEPLOY)
+        self.assertIn("def step_sandbox", src)
+        steps = src[src.index("steps = ["):]
+        self.assertLess(steps.index("step_sandbox("),
+                        steps.index("step_services("))
+
+    def test_deploy_checks_the_pin_and_static_linking(self):
+        src = _src(DEPLOY)
+        body = src[src.index("def step_sandbox"):]
+        body = body[:body.index("\ndef ", 1)]
+        self.assertIn("launcher.install", body)
+        lib = (REPO / "claude_hooks" / "sandbox" / "launcher.py").read_text(
+            encoding="utf-8")
+        self.assertIn("sha256", lib)
+        self.assertIn("def assert_static", lib)
+
+    def test_the_verifier_smoke_tests_the_launcher(self):
+        src = _src(VERIFY)
+        self.assertIn("def check_sandbox", src)
+        main = src[src.index("def main"):]
+        self.assertIn("check_sandbox(r)", main)
+        body = src[src.index("def check_sandbox"):]
+        body = body[:body.index("\ndef ", 1)]
+        self.assertIn("escape_smoke", body)
+
+
 class TestEmbedderRespawn(unittest.TestCase):
     """The respawn must be advisory where the embedder isn't ours, and
     blocking where it is."""

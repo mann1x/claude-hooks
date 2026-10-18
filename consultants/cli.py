@@ -3109,7 +3109,7 @@ def build_parser() -> argparse.ArgumentParser:
                           "write: each lane a private git worktree, changes "
                           "handed back as a patch (git roots only)")
     csh.add_argument("--net", choices=("none",))
-    csh.add_argument("--backend", choices=("auto", "bwrap"))
+    csh.add_argument("--backend", choices=("auto", "launcher", "bwrap"))
     csh.add_argument("--ro-bind", action="append", default=[],
                      metavar="DIR", help="Toolchain dir shown read-only, its "
                      "bin/ first on PATH (repeatable; appends)")

@@ -208,6 +208,12 @@ class CoderArtifact:
     parent_round: int = 1
     duration_ms: int = 0
     error: Optional[str] = None
+    #: ``"view"`` when the lane wrote into its own worktree view
+    #: (``--shell write``): ``files`` are then relative to the repo root
+    #: and reach the user as a held patch, not under ``coder-out/``.
+    workspace: str = ""
+    #: Commands the lane ran in that view: ``{"command", "exit"}``.
+    commands: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

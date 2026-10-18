@@ -6,6 +6,9 @@ PID, ``mount``, ``unshare``, ``io_uring`` and writes to ``/dev``.
 
 Linux only, and only where the sandbox is available (``shell-preflight``
 passes): elsewhere every test is skipped with the preflight's reason.
+Every test runs once per backend: the bwrap chain, and the static
+``council-sandbox`` launcher (plan E2) when a copy that verifies against
+the pin is installed or built (``scripts/build_council_sandbox.py``).
 The project lives in a world-traversable directory under ``/tmp``,
 because the command runs as nobody and must reach its bind sources.
 """
@@ -29,10 +32,50 @@ from claude_hooks.sandbox.linux_bwrap import NOBODY, is_root  # noqa: E402
 from claude_hooks.tool_registry.shell_provider import (  # noqa: E402
     ShellSettings, ShellToolProvider)
 
-_PRE = backend_for().preflight()
+_PRE = backend_for("bwrap").preflight()
 pytestmark = pytest.mark.skipif(not _PRE.ok, reason=_PRE.reason())
 
 PY = "python3"
+#: The backend the current test runs on (set by ``sandbox_backend``).
+BACKEND = {"name": "bwrap"}
+
+
+def _launcher_path():
+    from claude_hooks.sandbox import launcher
+    # Mutation checks only: run an unpinned build (never set otherwise).
+    if os.environ.get("COUNCIL_SANDBOX_UNPINNED"):
+        return Path(os.environ["COUNCIL_SANDBOX_UNPINNED"]), ""
+    built = (launcher.SOURCE / "target" / launcher.target(launcher.arch() or "")
+             / "release" / launcher.NAME)
+    for cand in (launcher.installed_path(), built):
+        chk = launcher.verify(cand)
+        if chk.ok:
+            return cand, ""
+    return None, chk.reason
+
+
+@pytest.fixture(autouse=True, params=["bwrap", "launcher"])
+def sandbox_backend(request, monkeypatch):
+    import claude_hooks.sandbox as sb
+    from claude_hooks.sandbox import launcher
+    from claude_hooks.sandbox.linux_bwrap import BwrapBackend, LauncherBackend
+    if request.param == "launcher":
+        path, why = _launcher_path()
+        if path is None:
+            pytest.skip(f"council-sandbox launcher: {why}")
+        monkeypatch.setenv(launcher.ENV_PATH, str(path))
+        be = LauncherBackend(str(path))
+        if os.environ.get("COUNCIL_SANDBOX_UNPINNED"):
+            monkeypatch.setattr(launcher, "verify", lambda *a, **k:
+                                launcher.Check(True, Path(path), "unpinned"))
+        pre = be.preflight()
+        if not pre.ok:
+            pytest.skip(pre.reason())
+    else:
+        be = BwrapBackend()
+    monkeypatch.setattr(sb, "backend_for", lambda name="auto": be)
+    BACKEND["name"] = request.param
+    yield request.param
 
 
 @pytest.fixture
@@ -238,6 +281,32 @@ class TestWriteView:
         assert _git(git_project, "log", "--oneline").count("\n") == 1
         assert (git_project / ".env").read_text() == "TOKEN=x\n"
 
+    def test_the_coder_runs_what_it_wrote_and_it_is_held(self, git_project):
+        """csl-2026-10-18-1033-5a67: the coder's test file was never run
+        and was missing from the held changes."""
+        from claude_hooks.sandbox import views as V
+        from consultants.engine.coder import CoderSandbox
+        p = ShellToolProvider(sid="csl-coder", settings=ShellSettings(
+            mode="write", backend=BACKEND["name"], free_floor_gib=0,
+            free_floor_pct=0))
+        wt, uid = p.workspace(str(git_project), "coder:0")
+        CoderSandbox(root=Path(wt), max_file_bytes=10_000,
+                     max_total_bytes=10_000, max_files=4, owner=uid).write(
+            "tests/test_pin.py",
+            "from calc import add\n\ndef test_pin():\n    assert add(2, 2) == 0\n")
+        out = p.execute("run_command", json.dumps(
+            {"command": f"{PY} -m pytest -q -p no:cacheprovider tests/test_pin.py; "
+                        "echo more >> tests/test_pin.py && echo EDITABLE"}),
+            str(git_project), lane="coder:0")
+        if "No module named pytest" in out:
+            pytest.skip("no pytest on the host's system python")
+        assert "1 passed" in out and "EDITABLE" in out, out
+        assert not (git_project / "tests").exists()          # user's tree
+        v = V.session_views(sid="csl-coder", cwd=str(git_project))
+        v.freeze_all()
+        assert "tests/test_pin.py" in V.summary(v)
+        assert "coder-0" in V.summary(v)
+
     def test_lanes_do_not_see_each_other(self, git_project):
         _write_run(git_project, "echo one > lane0.txt; echo s > /scratch/s0")
         out = _write_run(git_project, "ls; cat lane0.txt; "
@@ -263,7 +332,8 @@ class TestWriteView:
                 "from claude_hooks.tool_registry.shell_provider import "
                 "ShellToolProvider, ShellSettings;"
                 "p = ShellToolProvider(sid='csl-kill', settings=ShellSettings("
-                "mode='write', free_floor_gib=0, free_floor_pct=0));"
+                f"mode='write', backend={BACKEND['name']!r}, "
+                "free_floor_gib=0, free_floor_pct=0));"
                 "p.execute('run_command', json.dumps({'command': "
                 "'echo partial > made.txt; sleep 300'}), "
                 f"{str(git_project)!r}, lane='researcher:0')")

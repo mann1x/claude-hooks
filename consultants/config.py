@@ -723,7 +723,7 @@ SHELL_KEYS = {
     "default": _shell_choice("off", "always"),
     "mode": _shell_choice("read", "write"),
     "net": _shell_net,
-    "backend": _shell_choice("auto", "bwrap"),
+    "backend": _shell_choice("auto", "launcher", "bwrap"),
     "ro_binds": _shell_paths,
     "timeout_s": _shell_num(1, 3600),
     "max_timeout_s": _shell_num(1, 3600),

@@ -345,6 +345,80 @@ class TestInjectContract(unittest.TestCase):
         self.assertEqual(b["routed"], ROUTED_BEST_EFFORT_CAP_REACHED)
         self.assertFalse(s.take_revalidation())  # no rewind requested
 
+    def _checkpoint_graph(self):
+        return _FakeGraph(next_nodes=["synthesizer"], values={
+            "runtime_control": {"max_rounds": 1},
+            "research_rounds_used": 1, "critic_reroutes_used": 0,
+            "effort": "xhigh", "additional_context": [], "confidence": [],
+            "final_answer": "", "error": None,
+        })
+
+    @staticmethod
+    def _docs(g):
+        return [d for c in g.update_state_calls
+                for d in c["delta"].get("additional_context") or []]
+
+    def test_a_critic_brief_rewinds_and_reaches_the_synthesizer(self):
+        """csl-2026-10-18-1033-5a67: a critic brief at the checkpoint
+        said ``applied / in_place`` and reached no prompt — the critic
+        never ran again and the synthesizer reads only its own docs."""
+        from consultants.server.control import ROUTED_REWOUND_TO_RESEARCHER
+        c, app = _client()
+        g = _FakeGraph(next_nodes=["synthesizer"])      # budget left
+        s = _install(app, "csl-crit", graph=g)
+        b = c.post("/v1/consult/csl-crit/inject",
+                   json={"role": "critic", "text": "tests were not run"}).json()
+        self.assertEqual(b["routed"], ROUTED_REWOUND_TO_RESEARCHER)
+        self.assertTrue(s.take_revalidation())
+        roles = sorted(d.role for d in self._docs(g))
+        self.assertEqual(roles, ["critic", "synthesizer"])
+        syn = [d for d in self._docs(g) if d.role == "synthesizer"][0]
+        self.assertIn("addressed to the critic", syn.text)
+        self.assertIn("tests were not run", syn.text)
+
+    def test_a_checkpoint_brief_buys_one_extra_round_once(self):
+        from consultants.server.control import (ROUTED_BEST_EFFORT_CAP_REACHED,
+                                                ROUTED_REWOUND_EXTRA_ROUND)
+        c, app = _client()
+        g = self._checkpoint_graph()                    # cap spent
+        s = _install(app, "csl-ck", graph=g)
+        s._adversary_checkpoint_active = True
+        b = c.post("/v1/consult/csl-ck/inject",
+                   json={"role": "researcher", "text": "go look at apply-patch"}).json()
+        self.assertEqual(b["routed"], ROUTED_REWOUND_EXTRA_ROUND)
+        self.assertEqual(g.update_state_calls[0]["delta"]["runtime_control"],
+                         {"max_rounds": 2})
+        self.assertTrue(s.take_revalidation())
+        b2 = c.post("/v1/consult/csl-ck/inject",
+                    json={"role": "critic", "text": "and the locks"}).json()
+        self.assertEqual(b2["routed"], ROUTED_BEST_EFFORT_CAP_REACHED)
+        self.assertNotIn("runtime_control", g.update_state_calls[1]["delta"])
+        self.assertFalse(s.take_revalidation())
+        # the second brief still reaches the synthesizer
+        self.assertIn("synthesizer", [d.role for d in
+                                      g.update_state_calls[1]["delta"]["additional_context"]])
+
+    def test_no_extra_round_outside_the_checkpoint(self):
+        from consultants.server.control import ROUTED_BEST_EFFORT_CAP_REACHED
+        c, app = _client()
+        g = self._checkpoint_graph()
+        s = _install(app, "csl-nock", graph=g)
+        b = c.post("/v1/consult/csl-nock/inject",
+                   json={"role": "researcher", "text": "late"}).json()
+        self.assertEqual(b["routed"], ROUTED_BEST_EFFORT_CAP_REACHED)
+        self.assertFalse(s.take_revalidation())
+        self.assertEqual(sorted(d.role for d in self._docs(g)),
+                         ["researcher", "synthesizer"])
+
+    def test_a_synthesizer_brief_is_not_copied(self):
+        c, app = _client()
+        g = _FakeGraph(next_nodes=["synthesizer"])
+        _install(app, "csl-syn", graph=g)
+        b = c.post("/v1/consult/csl-syn/inject",
+                   json={"role": "synthesizer", "text": "lead with it"}).json()
+        self.assertEqual(b["routed"], ROUTED_IN_PLACE)
+        self.assertEqual([d.role for d in self._docs(g)], ["synthesizer"])
+
     def test_explicit_role_override(self):
         c, app = _client()
         g = _FakeGraph(next_nodes=["researcher"])
@@ -475,6 +549,76 @@ class TestSSEComplete(unittest.IsolatedAsyncioTestCase):
         self.assertIn("event: complete", joined)
         self.assertIn('"status": "completed"', joined)
         self.assertIn('"final_answer_present": true', joined)
+
+
+class TestSSEReplay(unittest.IsolatedAsyncioTestCase):
+    """csl-2026-10-18-1033-5a67: ``events --milestones`` showed no role on
+    any line, and a finished council replayed nothing but ``complete``."""
+
+    async def _frames(self, s, rec):
+        from consultants.server import control_routes as cr
+        out = []
+        async for chunk in cr._sse_stream_for_session(
+                s, rec, _Req(), start_event_id=0,
+                poll_interval_s=0.0, heartbeat_s=999.0):
+            out.append(chunk.decode("utf-8"))
+        return "".join(out)
+
+    def _session(self, cwd):
+        from consultants.server.app import SessionState
+        return SessionState(sid="csl-rp", cwd=str(cwd), question="Q",
+                            effort="medium", topology="council",
+                            status="completed")
+
+    async def test_events_carry_role_and_lane(self):
+        rec = _RecorderRows([{"event_id": 1, "ts": 1.0, "kind": "node_enter",
+                              "role": "researcher", "round": 1, "lane_idx": 3,
+                              "payload": {"kind": "node_enter"}}])
+        joined = await self._frames(self._session("/x"), rec)
+        self.assertIn('"role": "researcher"', joined)
+        self.assertIn('"lane_idx": 3', joined)
+
+    async def test_a_finished_council_replays_from_its_transcript(self):
+        import sqlite3
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            db = Path(d) / ".claude-hooks/consultants/csl-rp/transcript.db"
+            db.parent.mkdir(parents=True)
+            con = sqlite3.connect(db)
+            con.execute("CREATE TABLE runtime_events (event_id INTEGER PRIMARY KEY, "
+                        "ts REAL, kind TEXT, role TEXT, round INTEGER, "
+                        "lane_idx INTEGER, payload TEXT)")
+            con.execute("INSERT INTO runtime_events VALUES (1, 1.0, 'node_exit', "
+                        "'critic', 1, NULL, '{\"kind\": \"node_exit\"}')")
+            con.commit()
+            con.close()
+
+            class Closed:
+                _closed = True
+
+                def list_runtime_events(self, **kw):
+                    return []
+            joined = await self._frames(self._session(d), Closed())
+        self.assertIn("event: node_exit", joined)
+        self.assertIn('"role": "critic"', joined)
+        self.assertIn("event: complete", joined)
+
+
+class TestStateShowsTheReview(unittest.TestCase):
+    """At the checkpoint ``state`` showed counts only; the reviewer had to
+    read transcript.db to see what they were judging."""
+
+    def test_previews_and_critique(self):
+        from consultants.server.control import summarize_state_for_get
+        body = summarize_state_for_get({"values": {
+            "research": ["short", "x" * 1000], "critique": "DECISION: ready"}},
+            sid="s")
+        self.assertEqual(body["research_previews"][0], "short")
+        self.assertTrue(body["research_previews"][1].endswith("…"))
+        self.assertLess(len(body["research_previews"][1]), 400)
+        self.assertEqual(body["critique"], "DECISION: ready")
+        self.assertEqual(body["research_count"], 2)
 
 
 # ============================================================== #
@@ -623,6 +767,7 @@ class TestCheckpointerSerdeAllowlist(unittest.TestCase):
 # against this module's globals (Annotated / operator / TypedDict).
 class _DriveSt(TypedDict, total=False):
     log: Annotated[list, operator.add]
+    additional_context: Annotated[list, operator.add]
     research_rounds_used: Annotated[int, operator.add]
     critic_decision: Optional[str]
     effort: str
@@ -698,6 +843,36 @@ class TestDriveCouncilStream(unittest.TestCase):
         final, _c, _cfg = self._drive(revalidate=True)
         self.assertEqual(final.get("log"), ["R", "C", "R", "C", "S"])
         self.assertEqual(final.get("research_rounds_used"), 2)
+
+    def test_a_cap_raised_during_the_checkpoint_rewinds(self):
+        """The extra round a checkpoint brief buys must be seen by the
+        runner: it re-reads the state after the pause rather than using
+        the snapshot from before it."""
+        from consultants.server.control_routes import _make_inject_apply_fn
+        from consultants.server.control import Injection
+        from consultants.server.runner import _drive_council_stream
+        compiled = self._graph()
+        s = self._state()
+        cfg = {"configurable": {"thread_id": s.sid}}
+        s._compiled, s._thread_config = compiled, cfg
+        apply_fn = _make_inject_apply_fn(s)
+        sent = []
+
+        def during_pause(_secs):
+            if not sent:
+                inj = Injection(id="i1", role="researcher", text="go look")
+                apply_fn(inj)
+                sent.append(inj)
+                s.ack_adversary()
+        initial = {"log": [], "research_rounds_used": 0, "effort": "medium",
+                   "runtime_control": {"max_rounds": 1}}
+        final = _drive_council_stream(
+            compiled, initial, cfg, state=s, enabled=("researcher", "critic",
+            "synthesizer"), review_before_synthesis=False, recorder=None,
+            log_label="test", adversary_checkpoint=True,
+            adversary_checkpoint_timeout_s=60, sleep_fn=during_pause)
+        self.assertEqual(sent[0].routed, "rewound_extra_round")
+        self.assertEqual(final.get("log"), ["R", "C", "R", "C", "S"])
 
     def test_review_before_synthesis_parks(self):
         # HITL: parks before the synthesizer (synthesizer does NOT run),

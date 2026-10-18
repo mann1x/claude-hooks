@@ -242,6 +242,9 @@ class SessionState:
     # path for the WHOLE time the runner owns the graph. Set + cleared by
     # the runner under ``_inject_lock``.
     _adversary_checkpoint_active: bool = field(default=False, repr=False)
+    # Set once a checkpoint brief bought its one extra research round
+    # (``routed=rewound_extra_round``); a second brief cannot buy another.
+    _checkpoint_round_granted: bool = field(default=False, repr=False)
     # M-A approval channel: parked ``ask_human`` tool calls for this
     # session. Its own lock lives inside the broker — the runner's lane
     # threads open + wait, the POST /tool-ack handler resolves, exactly

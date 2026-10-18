@@ -147,3 +147,59 @@ def test_a_truncated_answer_goes_to_continuation_not_reask():
     assert events == []
     assert out["choices"][0]["message"]["content"] == \
         "The answer is partial and complete."
+
+
+# ---- csl-2026-10-18-1033-5a67: a call written as text after the tools went
+#: Lane 2's last turn, verbatim: its next read_file, written as text after
+#: force-answer had stripped the tools. It was the lane's whole "report".
+LANE2 = ("]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"read_file\">]<]minimax[>["
+         "<path>sdk/packages/core/src/runtime/atomic/base-revision-reads.ts]<]minimax[>["
+         "</path>]<]minimax[>[</invoke>\n]<]minimax[>[</tool_call>")
+
+
+def test_only_tool_call():
+    assert st.only_tool_call(LANE2)
+    assert st.only_tool_call(UNPARSED)
+    assert st.only_tool_call(MINIMAX)           # 16 chars of prose: still no report
+    report = ("## Findings\n- `src/a.py:12` drops the receipt on restore, so the "
+              "next read reports an outside write.\n" + UNPARSED)
+    assert not st.only_tool_call(report)
+    assert not st.only_tool_call("A plain report with no calls in it at all.")
+    assert not st.only_tool_call("")
+
+
+def _run_stripping(script, after=1):
+    sent, events = [], []
+
+    def chat_fn(payload):
+        sent.append(dict(payload, messages=list(payload["messages"])))
+        return script.pop(0)
+
+    out = runner.run_loop(
+        {"model": "m", "messages": [{"role": "user", "content": "q"}]}, "/tmp",
+        config=runner.LoopConfig(force_first_tool_call=False,
+                                 force_answer_after=after, on_guard=events.append),
+        tool_specs=SPEC, chat_fn=chat_fn,
+        tool_executor=lambda n, a, c: "body")
+    return out, sent, events
+
+
+def test_a_call_written_after_the_tools_went_is_reasked_for_a_report():
+    out, sent, events = _run_stripping([_say(tool=True), _say(content=LANE2),
+                                        _say(content="Report: a.py:1 is fine.")])
+    assert "tools" not in sent[1] and "tools" not in sent[2]
+    assert [e["kind"] for e in events if e.get("guard") == "silent_turn"] == \
+        ["tool_call_without_tools"]
+    assert sent[2]["messages"][-1]["content"] == st.NO_TOOLS_REPORT_REMINDER
+    assert out["choices"][0]["message"]["content"] == "Report: a.py:1 is fine."
+    assert "_stop_reason" not in out
+
+
+def test_a_lane_that_never_reports_ends_as_no_report():
+    """Two of eight lanes ended "completed" on markup; a quarter of the
+    audit was silently not done."""
+    from consultants.engine.events import loop_stop
+    out, sent, events = _run_stripping([_say(tool=True), _say(content=LANE2),
+                                        _say(content=LANE2), _say(content=LANE2)])
+    assert len(sent) == 4                       # two re-asks, then it stands
+    assert loop_stop(out) == ("no_report", "tool_call_unparsable")

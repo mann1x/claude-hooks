@@ -217,10 +217,23 @@ class ShellToolProvider(ToolProvider):
             return self._views[key]
 
     def _sandbox_uid(self) -> Optional[int]:
-        from claude_hooks.sandbox.linux_bwrap import NOBODY, is_root
-        if is_root() and getattr(self.backend, "name", "") == "bwrap":
-            return NOBODY
-        return None
+        """The host uid the command runs as when it is not ours (nobody,
+        on a root engine) — the backend's answer, never its name."""
+        fn = getattr(self.backend, "sandbox_uid", None)
+        return fn() if callable(fn) else None
+
+    def workspace(self, cwd: str, lane: str) -> Optional[tuple]:
+        """``(host view dir, owner uid)`` of ``lane``'s worktree view,
+        created on first use — for a role that writes files itself (the
+        coder) and then runs commands on them. None outside write mode."""
+        v = self.views(cwd)
+        if v is None:
+            return None
+        v.ensure(lane_dirname(lane))
+        rec = v.lanes().get(lane_dirname(lane)) or {}
+        if rec.get("state") != "active":
+            return None
+        return rec["wt"], self._sandbox_uid()
 
     def view_root(self, cwd: str, lane: Optional[str]):
         """``(repo, host view dir)`` when ``lane`` has an active write view,
@@ -342,12 +355,12 @@ class ShellToolProvider(ToolProvider):
     def _own(self, ldir: str, scratch: str) -> None:
         """Give the scratch dir to the uid the command runs as (nobody,
         on a root engine). The lane dir stays the engine's."""
-        from claude_hooks.sandbox.linux_bwrap import NOBODY, is_root
-        if is_root() and getattr(self.backend, "name", "") == "bwrap":
+        uid = self._sandbox_uid()
+        if uid is not None:
             try:
                 st = os.stat(scratch)
-                if st.st_uid != NOBODY:
-                    os.chown(scratch, NOBODY, NOBODY)
+                if st.st_uid != uid:
+                    os.chown(scratch, uid, uid)
             except OSError:
                 log.exception("could not chown %s", scratch)
 

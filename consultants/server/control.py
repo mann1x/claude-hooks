@@ -196,13 +196,19 @@ INJECT_STATUS_FAILED = "failed"
 #                            research round before re-synthesizing.
 #                            (Realized by the gated rewind follow-up;
 #                            the safe-layer path does not emit this.)
+#   rewound_extra_round    — a researcher / critic brief at the
+#                            adversary checkpoint with the round cap
+#                            spent: the cap is raised by exactly one
+#                            (once per council) and the run rewinds.
 #   best_effort_cap_reached — synthesis-phase inject but the reroute
-#                            budget was exhausted; applied in place to
-#                            the synthesizer instead of rewinding.
+#                            budget was exhausted: no rewind, and the
+#                            brief reaches the synthesizer only
+#                            (labelled with the role it named).
 #   queued                 — still pending (not yet routed).
 ROUTED_IN_PLACE = "in_place"
 ROUTED_REWOUND_TO_RESEARCHER = "rewound_to_researcher"
 ROUTED_BEST_EFFORT_CAP_REACHED = "best_effort_cap_reached"
+ROUTED_REWOUND_EXTRA_ROUND = "rewound_extra_round"
 ROUTED_QUEUED = "queued"
 
 
@@ -555,6 +561,18 @@ def build_cancel_request(
 # State-snapshot summarizer (for GET /state)
 # ============================================================== #
 
+#: ``GET /state`` keeps reports short: the opening of each, and the critique.
+STATE_PREVIEW_CHARS = 300
+STATE_CRITIQUE_CHARS = 4000
+
+
+def _clip(text, n: int):
+    if text is None:
+        return None
+    text = str(text)
+    return text if len(text) <= n else text[:n] + "…"
+
+
 def summarize_state_for_get(
     raw: dict[str, Any],
     *,
@@ -593,6 +611,14 @@ def summarize_state_for_get(
             if interrupt_state is not None else None
         ),
         "research_count": len(research),
+        # What a reviewer at the adversary checkpoint is judging: each
+        # lane's report opening and the critic's verdict, short. The
+        # counts alone left a reviewer reading transcript.db by hand.
+        "research_previews": [
+            (str(r)[:STATE_PREVIEW_CHARS]
+             + ("…" if len(str(r)) > STATE_PREVIEW_CHARS else ""))
+            for r in research],
+        "critique": _clip(state.get("critique"), STATE_CRITIQUE_CHARS),
         "plan_items_count": len(plan_items),
         "research_rounds_used": int(state.get("research_rounds_used") or 0),
         "critic_reroutes_used": int(state.get("critic_reroutes_used") or 0),

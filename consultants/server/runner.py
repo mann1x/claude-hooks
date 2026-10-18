@@ -318,6 +318,7 @@ def make_runner(*, ollama_base_url: str):
             models=models,
             enabled_roles=enabled,
             cwd=cwd,
+            lane_workspace=_lane_workspace(_tool_registry, cwd),
             tool_executor=traced_tool(
                 _tool_executor, tracer=tracer,
             ),
@@ -868,6 +869,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
             models=models,
             enabled_roles=enabled_t,
             cwd=cwd,
+            lane_workspace=_lane_workspace(_tool_registry, cwd),
             tool_executor=traced_tool(
                 _tool_executor, tracer=tracer,
             ),
@@ -1323,6 +1325,18 @@ def _emit_council_complete(recorder, *, sid: str, status: str,
         )
 
 
+def _lane_workspace(registry, cwd: str):
+    """``lane -> (host view dir, uid)`` from the session's shell provider
+    in write mode (plan E), else None — the coder writes and runs its
+    tests in its own worktree view only when there is one to give."""
+    for p in getattr(registry, "providers", None) or ():
+        fn = getattr(p, "workspace", None)
+        mode = getattr(getattr(p, "settings", None), "mode", "")
+        if callable(fn) and mode == "write":
+            return lambda lane, _fn=fn: _fn(cwd, lane)
+    return None
+
+
 def _rewind_budget_ok(snap) -> bool:
     """#314: is there room for one more researcher round? Delegates to
     the shared pure check in server.control so the inject handler and
@@ -1742,6 +1756,13 @@ def _drive_council_stream(compiled, initial, thread_config, *,
                     # path so the fanned researcher+critics re-run with the
                     # brief (x-tier preserved); else fall through to resume,
                     # where a role=synthesizer brief is read in place.
+                    # Re-read the state: a brief may have raised the round
+                    # cap during the pause (rewound_extra_round), which the
+                    # snapshot taken before it cannot show.
+                    try:
+                        snap = compiled.get_state(thread_config)
+                    except Exception:  # pragma: no cover — defensive
+                        pass
                     if state.take_revalidation() and _rewind_budget_ok(snap):
                         _rewind_to_researcher(
                             compiled, thread_config, state, recorder,

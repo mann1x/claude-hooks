@@ -672,17 +672,26 @@ synthesizer's `self_confidence`. React like this:
 1. **Subscribe** to the stream — `claude-consultants events <sid>` (or
    `--since <id>` to replay across a reconnect / compaction). The
    `awaiting_adversary` block is durable, so a missed SSE is recoverable.
-2. **Author + inject** the brief at the role the critique should re-run
-   through: `inject <sid> --role critic -m "<brief>"` to re-run the
-   fanned critics against it, or `--role synthesizer` to just sharpen the
-   final write-up. These checkpoint/control verbs (`events`, `inject`,
+2. **Read what you are judging** — `state <sid>` carries each lane's
+   `research_previews` and the `critique`; `events <sid> --milestones`
+   names the role and lane of every node.
+3. **Author + inject** the brief at the role the critique should re-run
+   through: `inject <sid> --role researcher|critic -m "<brief>"` rewinds
+   for one more research pass with the critic after it, or
+   `--role synthesizer` just sharpens the final write-up. Every brief
+   also reaches the synthesizer, labelled with the role it named. Read
+   `routed` in the reply: `rewound_to_researcher` (a round was left),
+   `rewound_extra_round` (the cap was spent and your brief bought the one
+   extra round a checkpoint allows), `best_effort_cap_reached` (no round
+   left — only the synthesizer sees it; tell the user the challenge was
+   not researched), `in_place` (synthesizer). These checkpoint/control verbs (`events`, `inject`,
    `adversary-ack`, `resume`) address the run by **`sid`** through the
    engine — they take **no `--cwd`** (unlike `consult` / `follow-up` /
    `config`).
-3. **Ack to resume** — `claude-consultants adversary-ack <sid>` (or
+4. **Ack to resume** — `claude-consultants adversary-ack <sid>` (or
    `resume <sid>` during the checkpoint window, which delegates to the
    ack). The council resumes immediately with your brief in the prompt.
-4. **Or do nothing** — the checkpoint **auto-proceeds at the deadline**
+5. **Or do nothing** — the checkpoint **auto-proceeds at the deadline**
    (default 10 min) so a lost SSE / missed poll never hangs the run. If
    you have no challenge worth making, just let it lapse.
 
