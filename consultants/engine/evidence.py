@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from claude_hooks import test_reruns as _tr
+
 SHELL_TOOL = "run_command"
 #: Commands listed for the synthesizer, newest kept when over.
 COMMANDS_MAX_ROWS = 60
@@ -243,14 +245,9 @@ def commands_ran(db_path) -> Optional[list[dict]]:
     return out
 
 
-#: A command that runs tests or a build: its output is the evidence.
-TEST_LIKE = re.compile(
-    r"\b(?:vitest|jest|pytest|mocha|ava|tap|bun\s+(?:x\s+)?(?:--bun\s+)?"
-    r"(?:test|vitest|jest)|npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|"
-    r"yarn\s+test|cargo\s+(?:test|check|build)|go\s+(?:test|vet|build)|"
-    r"make\s+(?:test|check)|ctest|tsc|unittest|node\s+--test|deno\s+test)"
-    r"(?![.\w/-])",          # not ``vitest.config.ts`` / ``jest/``
-    re.I)
+#: A command that runs tests or a build (one definition, shared with the
+#: agent loop's unrun-tests nudge).
+TEST_LIKE = _tr.TEST_LIKE
 #: A run that reached its tests: a non-zero count of tests (vitest /
 #: jest ``Tests  3 passed``, pytest ``== 3 passed in``), a TAP line, a
 #: go verdict. A ``FAIL`` banner or ``Test Files 1 failed`` alone is not
@@ -635,9 +632,7 @@ CRITIC_LEDGER_NOTE = (
 
 
 # ---------------------------------------------- held tests ("Sandbox changes")
-TEST_FILE = re.compile(r"(?:^|/)(?:test_[^/]+|[^/]+[._-](?:test|spec)s?\.[^/]+"
-                       r"|[^/]+_test\.[^/]+)$")
-_WRITES = r"(?:>>?|\btee(?:\s+-a)?)\s*['\"]?\S*{name}"
+TEST_FILE = _tr.TEST_FILE
 
 
 def held_test_notes(db_path, lane: str, paths: list[str]) -> dict[str, str]:
@@ -663,35 +658,25 @@ def held_test_notes(db_path, lane: str, paths: list[str]) -> dict[str, str]:
             c.close()
     except sqlite3.Error:
         return {}
-    notes = {}
-    for p in tests:
-        name = re.escape(Path(p).name)
-        last_write = None
-        runs = []
-        for eid, tool, args, output in rows:
-            if tool == "write_file":
-                try:
-                    wp = str((json.loads(args or "{}") or {}).get("path") or "")
-                except ValueError:
-                    wp = ""
-                if wp and (wp == p or wp.endswith("/" + p) or p.endswith(wp)):
-                    last_write, runs = eid, []
-                continue
-            cmd = _command_of(args)
-            if not re.search(name, cmd):
-                continue
-            if re.search(_WRITES.format(name=name), cmd) or re.search(
-                    r"<<", cmd):
-                last_write, runs = eid, []
-            if TEST_LIKE.search(cmd):
-                runs.append(_exit_of(output))
-        if last_write is None:
+    events = []
+    for _eid, tool, args, output in rows:
+        if tool == "write_file":
+            try:
+                wp = str((json.loads(args or "{}") or {}).get("path") or "")
+            except ValueError:
+                wp = ""
+            hit = next((p for p in tests if wp and (
+                wp == p or wp.endswith("/" + p) or p.endswith(wp))), None)
+            if hit:
+                events.append(("write", hit, ""))
             continue
-        if not runs:
-            notes[p] = "⚠ never run after it was written"
-        elif not runs[-1].startswith("exit 0"):
-            notes[p] = f"⚠ its last run failed ({runs[-1]})"
-    return notes
+        cmd = _command_of(args)
+        for p in tests:          # a heredoc names the file by its short path
+            if any(p.endswith(t) or t.endswith(p) for t in _tr.written_by(cmd)):
+                events.append(("write", p, ""))
+        events.append(("run", cmd, output or ""))
+    found = _tr.classify(events)
+    return {p: f"⚠ {why}" for p, why in found.items() if p in tests}
 
 
 __all__ = ["hold_to_evidence_bar", "commands_block", "commands_ran",

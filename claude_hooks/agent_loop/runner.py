@@ -29,6 +29,7 @@ from claude_hooks import reasoning_repetition
 from claude_hooks import loop_detection
 from claude_hooks import struggle_supervisor
 from claude_hooks import silent_turns
+from claude_hooks import test_reruns
 
 log = logging.getLogger("claude_hooks.agent_loop")
 
@@ -896,6 +897,11 @@ class _SilentTurns:
         return found
 
 
+def _offered_names(payload: dict) -> set[str]:
+    return {(t.get("function") or {}).get("name") for t in
+            payload.get("tools") or [] if isinstance(t, dict)}
+
+
 def _forced_report(payload: dict, history: list, instruction: str,
                    stop_reason: str, chat_fn: "ChatFn", config: "LoopConfig",
                    on_iter: Optional["OnIter"], iteration: int
@@ -995,6 +1001,7 @@ def run_loop(
     supervisor = struggle_supervisor.StruggleSupervisor(config.max_iterations)
     strict = getattr(config, "guard_profile", "standard") == "strict"
     silent = _SilentTurns(strict=strict)
+    tests_nudged = False
 
     if config.tools_available and preseed_builder is not None:
         preseed = preseed_builder(cwd)
@@ -1204,6 +1211,23 @@ def run_loop(
                 payload["messages"] = history + [
                     harness_note(text)]
                 continue
+            # A lane about to report with test files it wrote that never
+            # ran green is asked once to run them (council run 3).
+            if not tests_nudged and "run_command" in _offered_names(payload):
+                unrun = test_reruns.unrun_tests(payload.get("messages") or [])
+                if unrun and truncation.classify(final) is None:
+                    tests_nudged = True
+                    _emit_guard(config, {"guard": "unrun_tests",
+                                         "action": "nudge", "iteration": i,
+                                         "files": sorted(unrun)})
+                    payload = dict(payload)
+                    history = list(payload["messages"])
+                    if (msg.get("content") or "").strip():
+                        history.append({"role": "assistant",
+                                        "content": msg["content"]})
+                    payload["messages"] = history + [
+                        harness_note(test_reruns.nudge(unrun))]
+                    continue
             final = _continue_truncated_answer(
                 final, payload, chat_fn, config, on_iter, i)
             break
