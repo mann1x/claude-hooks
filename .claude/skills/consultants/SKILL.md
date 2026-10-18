@@ -632,8 +632,9 @@ run that reached the code is recorded in the project's findings ledger
 evidence on the finding it restates. Councils read the ledger: a
 confirmed finding is re-verified instead of rediscovered, a refuted or
 by-design one is not re-raised without a run against the recorded
-decision. A finding is settled **only** by the user or by you — never
-by the council.
+decision. A finding is settled **only** by the user or by you (any
+assistant session, the one driving the council included) — never by
+the council.
 
 After you accept (or the loop stops), list what this consultancy left:
 
@@ -641,8 +642,11 @@ After you accept (or the loop stops), list what this consultancy left:
 claude-consultants findings list --status candidate --cwd "$(pwd)"
 ```
 
-For each candidate, propose a settlement with its reason and ask the
-user to decide (one question, all candidates):
+Settle yourself (`--by assistant`) what a run decides: `confirmed` when
+you have read the cited run's output and it shows the defect, `refuted`
+when a run shows the opposite. Tell the user what you settled and why.
+For the rest, propose a settlement with its reason and ask the user to
+decide (one question, all of them):
 
 - `confirmed` — the cited run shows it and you re-checked the output;
 - `refuted` — a run shows the opposite (name it);
@@ -653,8 +657,8 @@ user to decide (one question, all candidates):
   target keeps its status and gains this one's evidence;
 - leave it `candidate` when nothing settles it yet.
 
-Apply the user's decisions; settle on your own (`--by assistant`) only
-what the user has told you to decide:
+Apply the user's decisions (`--by user`); a `by_design` call or a
+merge is the user's unless they told you to make it:
 
 ```
 claude-consultants findings settle <id> --status confirmed --reason "<run / re-check>" --by user --cwd "$(pwd)"

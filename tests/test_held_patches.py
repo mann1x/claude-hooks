@@ -150,7 +150,7 @@ class TestCommentsAgainstTheDiff:
         assert any("requireRead" in x for x in ap["added"])
         assert not any(x.lstrip().startswith("//") for x in ap["added"])
         p = hp.comment_audit_prompt(items)
-        assert "THE HUNK ADDS:\n+ const requireRead" in p
+        assert "ITS HUNK ADDS:\n+ const requireRead" in p
 
     def test_a_short_comment_is_not_a_claim(self):
         assert hp.comment_items([CODER_1])[0]["path"] == SRC

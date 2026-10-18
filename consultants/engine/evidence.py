@@ -114,7 +114,10 @@ LANES_UNRUN_NOTE = (
     "[harness] Lanes {lanes} of this round ran nothing that reached the "
     "code: their findings rest on reading alone. Treat each as "
     "unverified unless another lane's run shows it. Confidence capped at "
-    "{cap} by the evidence bar.")
+    "{cap} by the evidence bar{said}.")
+#: Run 8: the critique's CONFIDENCE line is stripped downstream, so the
+#: note says what the critic claimed (ollama read the raw 0.95).
+LANES_UNRUN_SAID = " (the critic rated it {said})"
 #: The most a ready critique may claim while some lanes ran nothing.
 UNRUN_CONFIDENCE_CAP = 0.6
 _CONF_LINE = re.compile(
@@ -192,8 +195,12 @@ def hold_to_evidence_bar(decision: str, text: str,
                                                lanes=names), True)
         if unrun:
             capped = _cap_confidence(text, UNRUN_CONFIDENCE_CAP)
+            said = [m.group(2) for m in _CONF_LINE.finditer(text)]
+            higher = said and float(said[-1]) > UNRUN_CONFIDENCE_CAP
             return decision, capped.rstrip() + "\n\n" + LANES_UNRUN_NOTE.format(
-                lanes=names, cap=UNRUN_CONFIDENCE_CAP), False
+                lanes=names, cap=UNRUN_CONFIDENCE_CAP,
+                said=LANES_UNRUN_SAID.format(said=said[-1]) if higher else ""
+            ), False
     return decision, text, False
 
 
@@ -320,17 +327,18 @@ def commands_ran(db_path) -> Optional[list[dict]]:
         c = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
         try:
             rows = c.execute(
-                "SELECT event_id, role, lane_idx, args, output FROM events "
-                "WHERE kind = 'tool_call' AND tool = ? ORDER BY event_id",
+                "SELECT event_id, role, lane_idx, args, output, ts FROM "
+                "events WHERE kind = 'tool_call' AND tool = ? ORDER BY "
+                "event_id",
                 (SHELL_TOOL,)).fetchall()
         finally:
             c.close()
     except sqlite3.Error:
         return None
     out = []
-    for n, (eid, r, lane, a, o) in enumerate(rows, start=1):
+    for n, (eid, r, lane, a, o, ts) in enumerate(rows, start=1):
         cmd = _command_of(a)
-        out.append({"id": f"C{n}", "n": n, "event_id": eid,
+        out.append({"id": f"C{n}", "n": n, "event_id": eid, "ts": ts,
                     "role": (r or "?").split(":")[0], "lane": lane,
                     "command": cmd, "exit": _exit_of(o), "tail": _tail(o),
                     "printed": _printed(o) if is_probe(cmd) else "",
@@ -680,7 +688,7 @@ def thin_dropped(text: str) -> list[dict]:
     reason}``. A reason is thin when it names no other run, is not a
     stated rerun / setup / harness reason, and has fewer than 8 words,
     or when it is given verbatim to :data:`REPEATED_REASON_MIN` runs or
-    more."""
+    more, or when the run it is superseded by is itself dropped."""
     lines = (text or "").split("\n")
     entries = []
     for heading, a, b in _sections(lines):
@@ -705,6 +713,11 @@ def thin_dropped(text: str) -> list[dict]:
         if m and CMD_REF.match(m.group(1)):
             t = int(CMD_REF.match(m.group(1)).group(1))
             by_target[t] = by_target.get(t, 0) + max(1, len(cited(e["ids"])))
+    # Run 8: "C49: Superseded by C49", "C64, C65: Superseded by C64" — a
+    # run dropped in favour of itself, or of another run dropped too.
+    dropped = set()
+    for e in entries:
+        dropped |= cited(e["ids"])
     out = []
     for e in entries:
         r = e["reason"]
@@ -715,9 +728,12 @@ def thin_dropped(text: str) -> list[dict]:
             and len(re.findall(r"\w+", r)) < 8
         sup = SUPERSEDED.search(r)
         not_a_run = bool(sup) and not CMD_REF.match(sup.group(1))
-        many = bool(sup) and not not_a_run and by_target.get(
-            int(CMD_REF.match(sup.group(1)).group(1)), 0) >= REPEATED_REASON_MIN
-        if stock or not_a_run or many or counts[k] >= REPEATED_REASON_MIN:
+        target = (int(CMD_REF.match(sup.group(1)).group(1))
+                  if sup and not not_a_run else None)
+        many = target is not None and by_target.get(target, 0) >= REPEATED_REASON_MIN
+        circular = target is not None and target in dropped
+        if stock or not_a_run or many or circular \
+                or counts[k] >= REPEATED_REASON_MIN:
             out.append(e)
     return out
 
@@ -1146,6 +1162,75 @@ def claim_audit_batches(items: list[dict], budget_chars: int) -> list[list[int]]
     return groups
 
 
+#: A ledger finding id in an answer (``csf-2``, ``(known: csf-2)``).
+FINDING_TAG = re.compile(r"(?<![\w-])([a-z]{1,6}f-\d+)(?![\w-])")
+RECITED_NOTE = "harness: shown by {ids}, not by the cited {old}"
+
+
+def second_look_items(items: list[dict], verdicts: dict[int, tuple[str, str]],
+                      rows: Optional[list[dict]]) -> list[tuple[int, dict]]:
+    """``[(k, item)]`` for each ranked item (1-based ``k``) found ``not
+    shown`` or ``partly`` that names a ledger finding: the same item with
+    ``runs`` = other runs that reached the code and name that finding
+    (tests and probes first, newest first). Council run 8: csf-2 cited
+    C419, which tests grep only, while the coder's C280 ran csf-2 red to
+    green."""
+    ran = [r for r in rows or [] if r.get("ran")]
+    out = []
+    for k, it in enumerate(items, start=1):
+        v = verdicts.get(k)
+        if it.get("kind") == "cell" or not v or v[0] not in ("not shown", "partly"):
+            continue
+        tags = set(FINDING_TAG.findall(it["text"]))
+        if not tags:
+            continue
+        have = {r["id"] for r in it["runs"]}
+        pats = [re.compile(rf"(?<![\w-]){re.escape(t)}(?![\w-])") for t in tags]
+        cands = [r for r in ran if r["id"] not in have and any(
+            p.search(f"{r.get('command') or ''}\n{r.get('output') or ''}")
+            for p in pats)]
+        cands.sort(key=lambda r: (not is_probe(r.get("command") or ""),
+                                  -int(r.get("n") or 0)))
+        if cands:
+            out.append((k, dict(it, runs=cands[:CLAIM_AUDIT_RUNS_PER_ITEM],
+                                recite_from=[r["id"] for r in it["runs"]])))
+    return out
+
+
+BRIEF_OWED_NOTE = ("{id}: the checkpoint brief named it, and no run after "
+                   "the brief that reached the code names it — not "
+                   "re-verified (harness)")
+
+
+def brief_owed(text: str, docs: list, rows: Optional[list[dict]]) -> str:
+    """The answer with every finding an injected brief names, that no run
+    after the brief (one that reached the code) mentions, listed under
+    ``Unverified``. Council run 8: the brief asked for csf-8 on the
+    patched tree; nothing ran it, and the answer did not say so."""
+    if rows is None or not docs:
+        return text
+    owed = []
+    for d in docs:
+        ids = list(dict.fromkeys(FINDING_TAG.findall(getattr(d, "text", "") or "")))
+        after = [r for r in rows if r.get("ran") and (r.get("ts") or 0)
+                 >= (getattr(d, "ts", 0) or 0)]
+        for fid in ids:
+            rx = re.compile(rf"(?<![\w-]){re.escape(fid)}(?![\w-])")
+            if fid in owed or any(rx.search(f"{r.get('command') or ''}\n"
+                                            f"{r.get('output') or ''}")
+                                  for r in after):
+                continue
+            owed.append(fid)
+    lines = text.rstrip().split("\n")
+    new = [f"- {BRIEF_OWED_NOTE.format(id=fid)}." for fid in owed
+           if BRIEF_OWED_NOTE.format(id=fid) not in text]
+    if not new:
+        return text
+    if not _insert_under(lines, UNVERIFIED_HEADING, new):
+        lines += ["", "## Unverified", ""] + new
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def parse_claim_audit(reply: str, n: int) -> dict[int, tuple[str, str]]:
     """``{k: (verdict, why)}`` for the lines that parse; ``k`` from 1."""
     out: dict[int, tuple[str, str]] = {}
@@ -1190,6 +1275,13 @@ def apply_claim_audit(text: str, items: list[dict],
             cells += 1
     for k, it in sorted(enumerate(items, start=1), key=lambda x: -x[1]["start"]):
         v = verdicts.get(k)
+        if it.get("kind") != "cell" and v and v[0] == "shown" \
+                and it.get("recite_from"):
+            _with_note(lines, it, RECITED_NOTE.format(
+                ids=", ".join(r["id"] for r in it["runs"]),
+                old=", ".join(it["recite_from"])))
+            moved.append(None)
+            continue
         if it.get("kind") == "cell" or not v or v[0] == "shown":
             continue
         ids = ", ".join(r["id"] for r in it["runs"])
@@ -1203,11 +1295,15 @@ def apply_claim_audit(text: str, items: list[dict],
             verdict="not shown" if v[0] == "not shown" else "contradicted",
             ids=ids, why=why) + ".")
         del lines[it["start"]:it["end"]]
+    recited = sum(1 for m in moved if m is None)
+    moved = [m for m in moved if m is not None]
     if not moved:
-        return ("\n".join(lines), cells) if cells else (text, 0)
+        if cells or recited:
+            return "\n".join(lines), cells + recited
+        return text, 0
     if not _insert_under(lines, UNVERIFIED_HEADING, moved):
         lines += ["", "## Unverified", ""] + moved
-    return "\n".join(lines).rstrip() + "\n", len(moved) + cells
+    return "\n".join(lines).rstrip() + "\n", len(moved) + cells + recited
 
 
 # ------------------------------------------------- the critic and the ledger

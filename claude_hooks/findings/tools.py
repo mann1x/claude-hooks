@@ -54,8 +54,9 @@ def tool_catalog() -> list[dict]:
          "description": (
              "Decide a finding: confirmed, refuted, by_design or fixed, "
              "with the reason (the run, the commit, where the design says "
-             "so). Only the user or the assistant decides; fixed needs the "
-             "commit."),
+             "so). The user or any assistant session decides (by: "
+             "assistant), the one driving the council included; a council "
+             "itself only records candidates. fixed needs the commit."),
          "inputSchema": {"type": "object", "properties": {
              "id": {"type": "string"},
              "status": {"type": "string", "enum": list(SETTLED)},

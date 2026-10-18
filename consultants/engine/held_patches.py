@@ -26,6 +26,7 @@ no entry (its tests are evidence, cited as runs).
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Optional
@@ -39,6 +40,8 @@ LANE_DIFF_CHARS = 12_000
 TOTAL_DIFF_CHARS = 48_000
 COMMENT_MIN_WORDS = 8
 COMMENT_MAX_ITEMS = 24
+#: A patched file larger than this is audited from its diff alone.
+POST_FILE_MAX_CHARS = 400_000
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _COMMENT = re.compile(r"^\s*(?://|#(?![!\w])|#\s|/\*|\*(?!\*?/?\s*$)|--\s|\"\"\"|''')")
@@ -67,6 +70,21 @@ class LanePatch:
     lane: str
     diff: str
     hunks: list = field(default_factory=list)
+    #: Source path -> the file as the lane left it (run 8: the auditor saw
+    #: one hunk and called a default parameter "unreachable").
+    post: dict = field(default_factory=dict)
+    #: Known findings whose code a hunk changes (run 8: coder-0's MOVE
+    #: change widened csf-8 and the answer counted it as fixing csf-7):
+    #: ``{id, status, title, where}``.
+    touches: list = field(default_factory=list)
+    #: Options a hunk adds that no production file the patch changes
+    #: passes (run 8: ``forgetReads`` on the controller, built without it
+    #: in session-protocol.ts): ``{name, where, mentions}``.
+    unwired: list = field(default_factory=list)
+
+    def file_diff(self, path: str) -> str:
+        """Every hunk this lane's patch makes to ``path``."""
+        return "\n".join(h.text for h in self.hunks if h.path == path)
 
     @property
     def files(self) -> list[str]:
@@ -137,11 +155,138 @@ def held_changes(cwd: str, sid: str) -> list[LanePatch]:
             diff = views.preview(lane)
             lp = LanePatch(lane=lane, diff=diff, hunks=parse_diff(lane, diff))
             if lp.source_files:
+                lp.post = _post_files(views, lane, lp.source_files)
                 out.append(lp)
+        known = _ledger_findings(cwd)
+        for lp in out:
+            lp.touches = touched_findings(lp, known)
+            lp.unwired = unwired_options(lp, views.repo)
         return out
     except Exception:  # noqa: BLE001 — never fail the synthesizer over this
         log.exception("held changes of %s unreadable", sid)
         return []
+
+
+def _post_files(views, lane: str, paths: list[str]) -> dict:
+    out = {}
+    for rel in paths:
+        try:
+            hp = views.host_path(lane, os.path.join(views.repo, rel))
+            if os.path.isfile(hp) and os.path.getsize(hp) <= POST_FILE_MAX_CHARS:
+                with open(hp, encoding="utf-8", errors="replace") as fh:
+                    out[rel] = fh.read()
+        except Exception:  # noqa: BLE001 — the diff alone still audits
+            log.debug("post-patch %s of %s unreadable", rel, lane, exc_info=True)
+    return out
+
+
+def _ledger_findings(cwd: str) -> list:
+    try:
+        from claude_hooks.findings import Ledger, findings_enabled
+        from claude_hooks.findings.ledger import findings_root
+        if not findings_enabled():
+            return []
+        lg = Ledger(findings_root(cwd))
+        return list(lg.iter_findings()) if lg.exists else []
+    except Exception:  # noqa: BLE001 — memory never fails the synthesizer
+        log.exception("ledger unreadable for held patches in %s", cwd)
+        return []
+
+
+def _same_file(a: str, b: str) -> bool:
+    a, b = a.replace("\\", "/"), b.replace("\\", "/")
+    return a == b or a.endswith("/" + b) or b.endswith("/" + a)
+
+
+def touched_findings(lp: LanePatch, findings: list) -> list[dict]:
+    """The findings (any status but refuted) with a ``path:line`` inside
+    one of the lane's source hunks, give or take the ledger's
+    ``LINE_WINDOW``."""
+    from claude_hooks.findings.ledger import LINE_WINDOW
+    out, seen = [], set()
+    for f in findings:
+        if f.status == "refuted" or f.id in seen:
+            continue
+        for p in f.paths:
+            path, _, line = str(p).rpartition(":")
+            if not line.isdigit():
+                continue
+            n = int(line)
+            h = next((h for h in lp.hunks if not _tr.TEST_FILE.search(h.path)
+                      and _same_file(h.path, path)
+                      and h.old_range[0] - LINE_WINDOW <= n
+                      < h.old_range[1] + LINE_WINDOW), None)
+            if h is not None:
+                seen.add(f.id)
+                out.append({"id": f.id, "status": f.status, "title": f.title,
+                            "where": f"{h.path}:{n}"})
+                break
+    return out
+
+
+#: An option a hunk adds: a TypeScript optional member (``name?: T``) or a
+#: Python keyword parameter (``name=…`` / ``name: T = …`` in a ``def``).
+_TS_OPTION = re.compile(r"^\s*(?:readonly\s+)?([A-Za-z_]\w*)\?\s*:")
+_PY_DEF = re.compile(r"^\s*(?:async\s+)?def\s+\w+\s*\((.*)")
+_PY_KW = re.compile(r"(?:^|,)\s*\*?\s*([a-z_]\w*)\s*(?::[^=,]+)?=")
+_SOURCE_EXT = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py")
+MENTIONS_MAX = 6
+
+
+def _git_grep(repo: str, name: str) -> list[str]:
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", repo, "grep", "-n", "-w", "-I",
+                            "--untracked", "-e", name], capture_output=True,
+                           text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [ln for ln in r.stdout.splitlines() if ln.strip()]
+
+
+def unwired_options(lp: LanePatch, repo: str, grep=_git_grep) -> list[dict]:
+    """Options the lane's source hunks add that no other non-test file the
+    patch changes mentions, with where the user's tree already mentions
+    the name outside the declaring file (``mentions``, ``path:line``)."""
+    out, seen = [], set()
+    for h in lp.hunks:
+        if _tr.TEST_FILE.search(h.path) or not h.path.endswith(_SOURCE_EXT):
+            continue
+        names = []
+        for k, ln in enumerate(h.added):
+            m = _TS_OPTION.match(ln)
+            if m:
+                names.append((m.group(1), k))
+            d = _PY_DEF.match(ln)
+            if d:
+                names += [(x, k) for x in _PY_KW.findall(d.group(1))
+                          if x not in ("self", "cls")]
+        for name, k in names:
+            if name in seen or any(re.search(rf"\b{re.escape(name)}\b", r)
+                                   for r in h.removed):
+                continue
+            seen.add(name)
+            rx = re.compile(rf"\b{re.escape(name)}\b")
+            wired = any(rx.search(text) for path, text in lp.post.items()
+                        if not _same_file(path, h.path)
+                        and not _tr.TEST_FILE.search(path))
+            if wired:
+                continue
+            mentions = []
+            for g in grep(repo, name) if repo else []:
+                path, _, rest = g.partition(":")
+                line = rest.partition(":")[0]
+                if (_same_file(path, h.path) or _tr.TEST_FILE.search(path)
+                        or not path.endswith(_SOURCE_EXT)
+                        or path.startswith(".claude-hooks/")):
+                    continue
+                mentions.append(f"{path}:{line}")
+            home = h.path.split("/")
+            mentions.sort(key=lambda m: -len(os.path.commonprefix(
+                [home, m.partition(":")[0].split("/")])))
+            out.append({"name": name, "where": f"{h.path}:{h.new_start + k}",
+                        "mentions": mentions[:MENTIONS_MAX]})
+    return out
 
 
 def overlaps(patches: list[LanePatch]) -> list[dict]:
@@ -183,7 +328,14 @@ HELD_RULES = (
     "one to apply and why, or write `conflict: <lane> vs <lane>` with "
     "what differs. Never present both as fixes.\n"
     "- A comment a patch adds is a claim, like a report's: where it "
-    "describes code the diff does not contain, say so.")
+    "describes code the diff does not contain, say so.\n"
+    "- KNOWN FINDINGS THIS PATCH TOUCHES: for each, say whether the patch "
+    "fixes it, leaves it as it is, or widens it, naming its id. A patch "
+    "that fixes one finding and widens another is not a clean fix.\n"
+    "- NEW OPTIONS NO PRODUCTION CALLER PASSES: a fix that works only "
+    "when that option is passed is not a fix of the product until a "
+    "production caller passes it. Name the caller that does, or say the "
+    "fix is not wired, naming the option.")
 
 
 def _render_diff(p: LanePatch, room: int) -> str:
@@ -199,6 +351,13 @@ def _render_diff(p: LanePatch, room: int) -> str:
         out.append(t)
         used += len(t)
     return "\n".join(out)
+
+
+def _unwired_line(u: dict) -> str:
+    seen = ("; the user's tree mentions the name at "
+            + ", ".join(u["mentions"]) + " (unchanged by this patch)"
+            if u["mentions"] else "; nothing else in the tree mentions it")
+    return f"- `{u['name']}` ({u['where']}){seen}"
 
 
 def held_block(patches: list[LanePatch], ovl: list[dict]) -> str:
@@ -219,6 +378,14 @@ def held_block(patches: list[LanePatch], ovl: list[dict]) -> str:
         room -= len(d)
         out.append("```diff\n" + d + "\n```" if d else "(diff not shown: "
                    "over the block's size)")
+        if p.touches:
+            out.append("KNOWN FINDINGS THIS PATCH TOUCHES:\n" + "\n".join(
+                f"- {t['id']} [{t['status']}] {t['title']} ({t['where']})"
+                for t in p.touches))
+        if p.unwired:
+            out.append("NEW OPTIONS NO PRODUCTION CALLER PASSES (no other "
+                       "source file this patch changes mentions them):\n"
+                       + "\n".join(_unwired_line(u) for u in p.unwired))
     if ovl:
         out.append("\nOVERLAPS (two lanes change the same lines):")
         for o in ovl:
@@ -236,12 +403,31 @@ def _lane_rx(lane: str) -> re.Pattern:
     return re.compile(rf"\b{re.escape(role)}[\s_:-]*(?:lane\s*)?#?{idx}\b", re.I)
 
 
-def _held_section(lines: list[str]) -> Optional[tuple[int, int]]:
+#: A sub-heading naming a lane (run 8: ``**lane `coder-0`**`` under
+#: ``### Held Patches`` was read as a heading of its own).
+_LANE_HEADING = re.compile(r"\blane\b|\b(?:coder|researcher|tool_executor)"
+                           r"[\s_:-]*#?\d+\b", re.I)
+
+
+def _held_spans(lines: list[str]) -> list[tuple[str, int, int]]:
+    """``(heading, a, b)`` of the held section, then of each sub-section
+    after it whose heading names a lane ("" for the section itself)."""
     from consultants.engine.evidence import _sections
-    for h, a, b in _sections(lines):
+    secs = _sections(lines)
+    for k, (h, a, b) in enumerate(secs):
         if HELD_HEADING.match("## " + h):
-            return a, b
-    return None
+            out = [("", a, b)]
+            for h2, a2, b2 in secs[k + 1:]:
+                if not _LANE_HEADING.search(h2) or HELD_HEADING.match("## " + h2):
+                    break
+                out.append((h2, a2, b2))
+            return out
+    return []
+
+
+def _held_section(lines: list[str]) -> Optional[tuple[int, int]]:
+    spans = _held_spans(lines)
+    return (spans[0][1], spans[-1][2]) if spans else None
 
 
 def _blocks(lines: list[str], a: int, b: int) -> list[str]:
@@ -262,7 +448,13 @@ def _blocks(lines: list[str], a: int, b: int) -> list[str]:
 
 _NOT_FIX = re.compile(r"\b(?:does\s+not|doesn['’]t|not|never|no)\s+fix(?:es)?\b"
                       r"[^;.\n]*", re.I)
-_FIX = re.compile(r"\bfix(?:es|ed)?\s+#(\d{1,3})\b([^;\n]*)", re.I)
+_FIX = re.compile(r"\bfix(?:es|ed)?\s+#?(\d{1,3}|[a-z]{1,6}f-\d+)\b([^;\n]*)",
+                  re.I)
+
+
+def _ref(tok: str):
+    """A ranked number as an int, a ledger id (``csf-7``) as it is."""
+    return int(tok) if tok.isdigit() else tok.lower()
 
 
 @dataclass
@@ -270,10 +462,13 @@ class HeldAudit:
     missing: list = field(default_factory=list)     # lanes with no entry
     open: list = field(default_factory=list)        # overlaps not adjudicated
     unbacked: list = field(default_factory=list)    # (lane, n) fixes with no green run
+    touched: list = field(default_factory=list)     # (lane, touch) not assessed
+    unwired: list = field(default_factory=list)     # (lane, option) not named
 
     @property
     def ok(self) -> bool:
-        return not (self.missing or self.open or self.unbacked)
+        return not (self.missing or self.open or self.unbacked
+                    or self.touched or self.unwired)
 
 
 def audit(text: str, patches: list[LanePatch], ovl: list[dict],
@@ -283,8 +478,12 @@ def audit(text: str, patches: list[LanePatch], ovl: list[dict],
     if not patches:
         return a
     lines = (text or "").split("\n")
-    sec = _held_section(lines)
-    blocks = _blocks(lines, *sec) if sec else []
+    blocks: list[str] = []
+    for h, x, y in _held_spans(lines):
+        if h:       # a lane's sub-section is that lane's one entry
+            blocks.append(h + "\n" + "\n".join(lines[x:y]))
+        else:
+            blocks += _blocks(lines, x, y)
     by_n = {r["n"]: r for r in rows or []}
     for p in patches:
         rx = _lane_rx(p.lane)
@@ -292,6 +491,13 @@ def audit(text: str, patches: list[LanePatch], ovl: list[dict],
         if not mine:
             a.missing.append(p)
             continue
+        said = "\n".join(mine)
+        for t in p.touches:
+            if not re.search(rf"(?<![\w-]){re.escape(t['id'])}(?![\w-])", said):
+                a.touched.append((p.lane, t))
+        for u in p.unwired:
+            if not re.search(rf"\b{re.escape(u['name'])}\b", said):
+                a.unwired.append((p.lane, u))
         role, idx = p.role_lane
         for b in mine:
             for m in _FIX.finditer(_NOT_FIX.sub("", b)):
@@ -300,7 +506,7 @@ def audit(text: str, patches: list[LanePatch], ovl: list[dict],
                             and r.get("ran") and str(r.get("exit")) == "exit 0"
                             for r in runs)
                 if not green:
-                    a.unbacked.append((p.lane, int(m.group(1))))
+                    a.unbacked.append((p.lane, _ref(m.group(1))))
     for o in ovl:
         ra, rb = (_lane_rx(x) for x in o["lanes"])
         if not any(ra.search(b) and rb.search(b) for b in blocks):
@@ -322,6 +528,18 @@ def revision_note(h: HeldAudit) -> str:
                      "after its patch. Cite one, or write `addresses #n, not "
                      "verified`:\n" + "\n".join(
                          f"  - `{lane}` fixes #{n}" for lane, n in h.unbacked))
+    if h.touched:
+        parts.append("- These patches change the code of known findings "
+                     "their entries do not mention. Say, naming the id, "
+                     "whether each patch fixes it, leaves it, or widens it:\n"
+                     + "\n".join(f"  - `{lane}` touches {t['id']} ({t['title']}"
+                                 f", {t['where']})" for lane, t in h.touched))
+    if h.unwired:
+        parts.append("- These patches add options no production caller "
+                     "they change passes. Name the caller that passes each, "
+                     "or say the fix through it is not wired:\n"
+                     + "\n".join(f"  - `{lane}`: " + _unwired_line(u)[2:]
+                                 for lane, u in h.unwired))
     if h.open:
         parts.append("- These lanes change the same lines and your answer "
                      "does not choose. Say which one to apply and why, or "
@@ -336,6 +554,12 @@ NOT_ASSESSED = ("not assessed by the answer (harness): which ranked defects "
                 "it fixes is unknown; review it before applying")
 UNBACKED_FIX = ("harness: no green run of this lane after its patch is "
                 "cited for #{n}")
+TOUCHED = ("`{lane}` changes the code of {id} ({title}, {where}); the "
+           "answer does not say whether it fixes, leaves or widens it "
+           "(harness) — check before applying")
+UNWIRED = ("`{lane}` adds `{name}` ({where}), which no production file the "
+           "patch changes passes: a fix through it is not wired into the "
+           "product until a caller passes it (harness)")
 CONFLICT = ("conflict, not adjudicated (harness): `{a}` and `{b}` both "
             "change `{path}` lines {lo}–{hi}; review both before applying "
             "either")
@@ -357,23 +581,31 @@ def enforce(text: str, h: HeldAudit) -> str:
     lines = text.rstrip().split("\n")
     sec = _held_section(lines)
     if sec and h.unbacked:
+        from consultants.engine.evidence import _HEADING
         owed = set(h.unbacked)
-        lane = None
+        lane, by_heading = None, False
         for i in range(*sec):
             ln = lines[i]
             named = [p for p, _ in owed if _lane_rx(p).search(ln)]
+            heading = bool(_HEADING.match(ln))
             if named:
-                lane = named[0]
+                lane, by_heading = named[0], heading
+            elif heading:
+                lane, by_heading = None, False
             elif re.match(r"^\s{0,3}(?:[-*+]|\d{1,3}[.)])\s|^\s*\|", ln) \
-                    and not ln[:1].isspace():
+                    and not ln[:1].isspace() and not by_heading:
                 lane = None              # a new entry for another lane
             for m in _FIX.finditer(_NOT_FIX.sub("", ln)):
-                n = int(m.group(1))
+                n = _ref(m.group(1))
                 note = UNBACKED_FIX.format(n=n)
                 if (lane, n) in owed and note not in ln:
                     lines[i] = lines[i].rstrip() + f" _({note})_"
     new = [f"- `{p.lane}` ({', '.join(p.source_files[:6])}): {NOT_ASSESSED}."
            for p in h.missing]
+    new += ["- " + TOUCHED.format(lane=lane, **t) + "." for lane, t in h.touched
+            if lane not in {p.lane for p in h.missing}]
+    new += ["- " + UNWIRED.format(lane=lane, name=u["name"], where=u["where"])
+            + "." for lane, u in h.unwired]
     new += ["- " + CONFLICT.format(a=o["lanes"][0], b=o["lanes"][1],
                                    path=o["path"], lo=o["lines"][0],
                                    hi=o["lines"][1] - 1) + "."
@@ -386,19 +618,27 @@ def enforce(text: str, h: HeldAudit) -> str:
 # ------------------------------------------------- comments against the diff
 COMMENT_AUDIT_SYSTEM = (
     "You check what a code comment says against the patch that adds it, "
-    "and nothing else. Each item below is a comment a patch adds, and "
-    "under it the lines that hunk adds and removes. Decide, for each, "
-    "whether the hunk contains the code the comment says the patch adds "
-    "or does (a guard, a lock, a check, a call):\n"
-    "- SHOWN: every change the comment claims is in the hunk's added "
-    "lines, or the comment only explains code that is there.\n"
+    "and nothing else. FILES gives, once each, a lane's whole patch to a "
+    "file (every hunk) and the file as that patch leaves it. Each item is "
+    "a comment the patch adds, with the hunk it sits in and the file it "
+    "belongs to. Judge the comment against the WHOLE patch and the patched "
+    "file, not its own hunk alone: a call, a join or a guard added in "
+    "another hunk of the file counts, and so does code the patch left as "
+    "it was. Read the code as code: a parameter's default value is not an "
+    "assignment that runs before the check, so look at what the callers "
+    "pass. Decide, for each, whether the patched file contains the code "
+    "the comment says the patch adds or does (a guard, a lock, a check, a "
+    "call):\n"
+    "- SHOWN: every change the comment claims is in the patched file, or "
+    "the comment only explains code that is there.\n"
     "- NOT SHOWN: the comment claims code (or a fix of a named defect) "
-    "that the hunk does not add.\n"
-    "- CONTRADICTED: the hunk does the opposite of what the comment says.\n"
+    "that the patched file does not have.\n"
+    "- CONTRADICTED: the patched code does the opposite of what the "
+    "comment says.\n"
     "- PARTLY: some of what it claims is there, some is not; name what is "
     "missing.\n"
     "A comment describing the old behaviour implies the patch fixes it: "
-    "judge whether the fix is there. Use only the lines given. Answer one "
+    "judge whether the fix is there. Use only the text given. Answer one "
     "line per item and nothing else:\n"
     "`A<k>: SHOWN|NOT SHOWN|CONTRADICTED|PARTLY — <what is missing, or the "
     "added line you relied on>`")
@@ -437,7 +677,9 @@ def comment_items(patches: list[LanePatch]) -> list[dict]:
                     continue
                 out.append({"lane": p.lane, "path": h.path,
                             "line": h.new_start + at, "comment": text,
-                            "added": code, "removed": h.removed})
+                            "added": code, "removed": h.removed,
+                            "file_diff": p.file_diff(h.path),
+                            "post": p.post.get(h.path, "")})
     per: dict[tuple, list] = {}
     for it in out:
         per.setdefault(it["path"], []).append(it)
@@ -449,34 +691,65 @@ def comment_items(patches: list[LanePatch]) -> list[dict]:
     return fair
 
 
-def _comment_part(k: int, it: dict) -> str:
+def _file_key(it: dict) -> tuple[str, str]:
+    return it["lane"], it["path"]
+
+
+def _file_part(j: int, it: dict) -> str:
+    diff = it.get("file_diff") or ""
+    post = it.get("post") or ""
+    body = "\n".join(f"{n:>5}  {ln}" for n, ln in
+                     enumerate(post.split("\n"), start=1)) if post else ""
+    return (f"F{j}. `{it['lane']}` `{it['path']}`\nTHE PATCH TO THIS FILE "
+            f"(every hunk):\n```diff\n{diff}\n```"
+            + (f"\nTHE FILE AS PATCHED:\n```\n{body}\n```" if body else
+               "\n(the patched file is not available: judge from the patch)"))
+
+
+def _comment_part(k: int, it: dict, j: int = 0) -> str:
     add = "\n".join("+ " + x for x in it["added"]) or "(no code added)"
     rem = "\n".join("- " + x for x in it["removed"])
-    return (f"A{k}. COMMENT ({it['lane']}, {it['path']}:{it['line']}): "
-            f"{it['comment']}\nTHE HUNK ADDS:\n{add}"
-            + (f"\nTHE HUNK REMOVES:\n{rem}" if rem else ""))
+    return (f"A{k}. COMMENT ({it['lane']}, {it['path']}:{it['line']}"
+            + (f", file F{j}" if j else "") + f"): {it['comment']}\n"
+            f"ITS HUNK ADDS:\n{add}"
+            + (f"\nITS HUNK REMOVES:\n{rem}" if rem else ""))
 
 
 def comment_audit_prompt(items: list[dict]) -> str:
-    """Every item whole: the comment, all the code its hunk adds and
-    removes."""
-    return "\n\n---\n\n".join(_comment_part(k, it)
-                                for k, it in enumerate(items, start=1))
+    """FILES (each lane's whole patch to a file and the patched file,
+    once), then every item whole: the comment and its hunk."""
+    files: dict[tuple, int] = {}
+    for it in items:
+        files.setdefault(_file_key(it), len(files) + 1)
+    first = {}
+    for it in items:
+        first.setdefault(_file_key(it), it)
+    head = "FILES:\n\n" + "\n\n".join(_file_part(j, first[k])
+                                        for k, j in files.items())
+    return head + "\n\n===\n\nCOMMENTS:\n\n" + "\n\n---\n\n".join(
+        _comment_part(k, it, files[_file_key(it)])
+        for k, it in enumerate(items, start=1))
 
 
 def comment_audit_batches(items: list[dict], budget_chars: int) -> list[list[int]]:
-    """Item indexes in groups whose prompt fits ``budget_chars``; a hunk
-    is never cut, so one larger than the budget is a group of its own."""
+    """Item indexes in groups whose prompt fits ``budget_chars``, each
+    file counted once per group; nothing is cut, so an item (with its
+    file) larger than the budget is a group of its own."""
     groups: list[list[int]] = []
     used = 0
+    seen: set = set()
     for i, it in enumerate(items):
-        cost = len(_comment_part(i + 1, it)) + 9
+        own = len(_comment_part(i + 1, it, 1)) + 9
+        file_cost = len(_file_part(1, it)) + 4
+        cost = own + (0 if _file_key(it) in seen else file_cost)
         if groups and used + cost <= budget_chars:
             groups[-1].append(i)
             used += cost
+            seen.add(_file_key(it))
         else:
             groups.append([i])
-            used = cost
+            used = own + file_cost
+            seen = {_file_key(it)}
     return groups
 
 

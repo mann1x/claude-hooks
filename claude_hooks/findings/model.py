@@ -30,7 +30,8 @@ FIXED = "fixed"
 STATUSES = (CANDIDATE, CONFIRMED, REFUTED, BY_DESIGN, FIXED)
 SETTLED = (CONFIRMED, REFUTED, BY_DESIGN, FIXED)
 SEVERITIES = ("H", "M", "L")
-#: Who may settle a finding. The council is not one of them.
+#: Who may settle a finding: the user, or any assistant session (``by:
+#: assistant``), including one driving the council. The council is not.
 DECIDERS = ("user", "assistant")
 
 CLAIM = "Claim"
@@ -141,6 +142,11 @@ class Finding:
         body = " ".join(str(text).split())
         sid = f" {council}" if council else ""
         line = f"- {when.astimezone(timezone.utc):%Y-%m-%d}{sid}: {body}"
+        # Council run 8: one run, recorded three times from one answer.
+        same = next((ln for ln in self.evidence_lines
+                     if ln.endswith(f"{sid}: {body}")), None)
+        if same is not None:
+            return same
         self._prepend(EVIDENCE, line)
         if council and council not in self.councils:
             self.councils.append(council)

@@ -44,19 +44,23 @@ _DO = {
                  "evidence — name the run",
         "refuted": "a report that re-raises it needs evidence against the "
                    "recorded decision, not the old claim",
-        "by_design": "intended, for the reason given. You may still "
-                     "challenge it, but only with behaviour that "
-                     "contradicts that reason, shown by a run",
+        "by_design": "intended, for the reason given. A report that lists "
+                     "it as a defect, a risk or an improvement restates "
+                     "the decision; it may still challenge it, but only "
+                     "with behaviour that contradicts that reason, shown "
+                     "by a run",
         "candidate": "unsettled: what would settle it",
     },
     "synthesizer": {
         "confirmed": "tag a ranked item that restates it `(known: <id>)`",
         "fixed": "if a run shows it broken again, rank it as a regression "
                  "`(regressed: <id>)`",
-        "refuted": "do not rank it again without a run against the "
-                   "recorded decision",
-        "by_design": "do not rank it as a defect unless a run contradicts "
-                     "the recorded reason; say so if one does",
+        "refuted": "do not rank it again, or list it as a risk or an "
+                   "improvement, without a run against the recorded "
+                   "decision",
+        "by_design": "do not rank it as a defect, list it as a risk, or "
+                     "propose undoing it as an improvement, unless a run "
+                     "contradicts the recorded reason; say so if one does",
         "candidate": "tag a ranked item that restates it `(known: <id>)`",
     },
 }
@@ -139,6 +143,103 @@ def with_known_findings(msgs: list[dict], state: dict, role: str) -> list[dict]:
         str(msgs[-1].get("content") or "") + "\n\n" + block)}]
 
 
+# -------------------------------------- settled findings restated (run 8)
+#: Statuses an answer must not list again without a run against them.
+SETTLED_AGAINST = ("by_design", "refuted")
+SETTLED_ITEMS_MAX = 80
+_SETTLED_SKIP = re.compile(r"unverified|dropped|held patch|sandbox", re.I)
+_ITEM_LINE = re.compile(r"^\s{0,3}(?:[-*+]|\d{1,3}[.)])\s+\S|^\s*\|")
+_TABLE_RULE = re.compile(r"^\s*\|?\s*:?-{2,}")
+SETTLED_AUDIT_SYSTEM = (
+    "You compare a council's answer with decisions already made about this "
+    "project. SETTLED lists findings decided to be intended (by_design) or "
+    "not real (refuted), each with the reason recorded. ITEMS are entries "
+    "of the answer: defects, risks, improvements, matrix rows. For each "
+    "item that restates a settled finding — names the same behaviour as a "
+    "defect, a risk, or proposes changing it as an improvement — answer "
+    "one line `I<k>: S<j> — <what it restates>`. An item that only "
+    "mentions the same file, or names a different behaviour, is not a "
+    "restatement: say nothing about it. Answer nothing else; no line at "
+    "all when no item restates one.")
+SETTLED_NOTE = ("harness: this restates {id}, settled {status} — {decision} "
+                "Listing it needs a run against that reason")
+_SETTLED_LINE = re.compile(r"^\W*I(\d{1,3})\W*[:.)\]-]\s*\**S(\d{1,3})\b"
+                           r"\**\s*(?:[—–:-]+\s*)?(.*)$", re.M)
+
+
+def settled_findings(cwd: str, question: str) -> list:
+    """The by_design and refuted findings relevant to ``question``."""
+    return [f for f in known_findings(cwd, question)
+            if f.status in SETTLED_AGAINST]
+
+
+def answer_items(text: str) -> list[dict]:
+    """``{start, text}`` of each list item and table row outside the
+    Unverified / Dropped / Held patches / Sandbox sections."""
+    from consultants.engine import evidence
+    lines = (text or "").split("\n")
+    out = []
+    for heading, a, b in evidence._sections(lines):
+        if _SETTLED_SKIP.search(heading):
+            continue
+        for i in range(a, b):
+            ln = lines[i]
+            if not _ITEM_LINE.match(ln) or _TABLE_RULE.match(ln):
+                continue
+            if ln.strip().startswith("|") and i + 1 < b \
+                    and _TABLE_RULE.match(lines[i + 1]):
+                continue                      # a table's header row
+            out.append({"start": i, "text": ln.strip()})
+    return out[:SETTLED_ITEMS_MAX]
+
+
+def settled_audit_prompt(findings: list, items: list[dict]) -> str:
+    sett = "\n".join(
+        f"S{j}. {f.id} [{f.status}] {f.title}\n    reason: "
+        + " ".join((f.decision or "").split())
+        for j, f in enumerate(findings, start=1))
+    its = "\n".join(f"I{k}. {it['text']}" for k, it in enumerate(items, start=1))
+    return f"SETTLED:\n{sett}\n\nITEMS:\n{its}"
+
+
+def parse_settled_audit(reply: str, n_items: int, n_findings: int
+                        ) -> dict[int, int]:
+    out: dict[int, int] = {}
+    for m in _SETTLED_LINE.finditer(reply or ""):
+        k, j = int(m.group(1)), int(m.group(2))
+        if 1 <= k <= n_items and 1 <= j <= n_findings and k not in out:
+            out[k] = j
+    return out
+
+
+def apply_settled_audit(text: str, findings: list, items: list[dict],
+                        hits: dict[int, int]) -> tuple[str, int]:
+    """The answer with a note on every item that restates a settled
+    finding (it is never removed: a run against the reason may be in
+    it); ``(text, notes)``."""
+    if not hits:
+        return text, 0
+    lines = text.split("\n")
+    n = 0
+    for k, j in hits.items():
+        it, f = items[k - 1], findings[j - 1]
+        i = it["start"]
+        if f.id in lines[i] and "harness: this restates" in lines[i]:
+            continue
+        dec = " ".join((f.decision or "").split())
+        dec = (dec if len(dec) <= 220 else dec[:219] + "…").rstrip(".") + "."
+        note = "_(" + SETTLED_NOTE.format(id=f.id, status=f.status,
+                                          decision=dec) + ")_"
+        row = lines[i].rstrip()
+        if row.lstrip().startswith("|"):
+            cut = row[:-1].rstrip() if row.endswith("|") else row
+            lines[i] = f"{cut} {note} |"
+        else:
+            lines[i] = f"{row} {note}"
+        n += 1
+    return "\n".join(lines), n
+
+
 def _evidence(it: dict) -> str:
     parts = []
     for r in it["runs"]:
@@ -176,6 +277,21 @@ def _title(it: dict, lines: list[str]) -> str:
     return pick if len(pick) <= 160 else pick[:159] + "…"
 
 
+#: Marks of a matrix cell that say the case is mishandled.
+_DEFECT_MARK = re.compile(r"[⚠✗✘❌]")
+
+
+def _cell_title(it: dict) -> str:
+    """``<row> — <column>: <what the mark means>`` (run 8: a row of six
+    cells, five of them ``not tested``, was titled by one of those)."""
+    from consultants.engine import evidence
+    row = re.sub(r"\*\*|__|`", "", evidence._cells(it["text"])[0]).strip()
+    col = re.sub(r"\*\*|__|`", "", it.get("header") or "").strip()
+    mean = evidence._meaning(it["cell"], it.get("legend") or {})
+    t = " ".join(f"{row} — {col}: {mean}".split())
+    return t if len(t) <= 160 else t[:159] + "…"
+
+
 def _tag(text: str, prefix: str) -> str:
     """The ledger id an item is tagged with (``(known: csf-7)``, an ID
     cell ``**csf-7**``); "" when none."""
@@ -203,20 +319,24 @@ def record_answer(cwd: str, sid: str, answer: str,
         lines = answer.split("\n")
         prefix = lg.prefix if lg.exists else ""
         out = []
-        rows_seen: set[int] = set()
         for it in items:
-            if it.get("kind") == "cell":      # audited per cell, kept per row
-                if it["start"] in rows_seen:
-                    continue
-                rows_seen.add(it["start"])
-            text = " ".join(it["text"].split())
-            title = _title(it, lines)
+            cell = it.get("kind") == "cell"
+            if cell and not _DEFECT_MARK.search(it.get("cell") or ""):
+                continue      # ✓ is no defect; "not tested" has no mark left
+            if cell:
+                title = _cell_title(it)
+                text = " ".join(evidence._claim_text(it).split())
+                tag_in = f"{it.get('cell') or ''} {it['text']}"
+            else:
+                title = _title(it, lines)
+                text = " ".join(it["text"].split())
+                tag_in = it["text"]
             f, created = lg.record(
                 title, text, paths=paths_in(it["text"]),
-                severity="H" if it.get("kind") != "cell" else "M",
+                severity="M" if cell else "H",
                 evidence=_evidence(it), council=sid,
                 reproduce=" ".join((it["runs"][0].get("command") or "").split()),
-                known=_tag(it["text"], prefix) if prefix else "")
+                known=_tag(tag_in, prefix) if prefix else "")
             out.append((f.id, created))
         return out
     except Exception:  # noqa: BLE001 — memory never fails a council
@@ -225,4 +345,6 @@ def record_answer(cwd: str, sid: str, answer: str,
 
 
 __all__ = ["with_known_findings", "record_answer", "findings_block",
-           "known_findings", "paths_in"]
+           "known_findings", "paths_in", "settled_findings", "answer_items",
+           "settled_audit_prompt", "parse_settled_audit",
+           "apply_settled_audit", "SETTLED_AUDIT_SYSTEM"]

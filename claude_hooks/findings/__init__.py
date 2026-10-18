@@ -2,7 +2,8 @@
 what was decided about them (docs/PLAN-council-memory.md).
 
 The files under ``<project>/.claude-hooks/findings/`` are the record. A
-council records candidates; only the user or the assistant settles them.
+council records candidates; only the user or an assistant session (any,
+the one driving the council included) settles them.
 """
 from __future__ import annotations
 

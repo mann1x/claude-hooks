@@ -3889,6 +3889,43 @@ def _patch_comment_audit(chat_client, model, text, patches, *, state,
     return text, pt, ct
 
 
+def _settled_audit(chat_client, model, text, *, state, cwd, recorder
+                   ) -> tuple[str, int, int]:
+    """One auditor call when the ledger holds by_design or refuted
+    findings relevant to the question: which of the answer's items
+    restate one, each noted with the recorded reason. No ledger, no such
+    finding, or a failed call leaves the answer as it is. Recorded as
+    ``synthesizer:settled-audit``."""
+    from consultants.engine import memory
+    try:
+        findings = memory.settled_findings(cwd, state.get("question") or "")
+        items = memory.answer_items(text) if findings else []
+    except Exception:  # noqa: BLE001 — memory never fails a council
+        log.exception("settled audit: ledger unreadable")
+        return text, 0, 0
+    if not items:
+        return text, 0, 0
+    knobs = _budget_knobs(state, "synthesizer", model)
+    try:
+        reply, p, c = _single_shot(
+            chat_client, model, [
+                {"role": "system", "content": memory.SETTLED_AUDIT_SYSTEM},
+                {"role": "user",
+                 "content": memory.settled_audit_prompt(findings, items)}],
+            think=False, recorder=recorder, role="synthesizer:settled-audit",
+            round=1, knobs=knobs,
+            sampling=_instance_sampling(state, "synthesizer", model,
+                                        chat_client))
+    except Exception:
+        log.exception("settled audit failed; the answer is kept")
+        return text, 0, 0
+    hits = memory.parse_settled_audit(reply, len(items), len(findings))
+    text, n = memory.apply_settled_audit(text, findings, items, hits)
+    if n:
+        log.info("settled audit noted %d item(s) restating a decision", n)
+    return text, p, c
+
+
 #: Share of the auditor's window its prompt may fill; the reply is one
 #: line per claim.
 AUDIT_WINDOW_SHARE = 0.6
@@ -3922,34 +3959,50 @@ def _claim_audit(chat_client, model, text, rows, *, state, recorder
     if not items:
         return text, 0, 0
     knobs = _budget_knobs(state, "synthesizer", model)
-    groups = evidence.claim_audit_batches(items, _audit_budget_chars(
-        chat_client, model, knobs, evidence.CLAIM_AUDIT_SYSTEM))
-    verdicts: dict[int, tuple[str, str]] = {}
-    pt = ct = 0
-    for g in groups:
-        part = [items[i] for i in g]
-        try:
-            reply, p, c = _single_shot(
-                chat_client, model, [
-                    {"role": "system", "content": evidence.CLAIM_AUDIT_SYSTEM},
-                    {"role": "user",
-                     "content": evidence.claim_audit_prompt(part)}],
-                think=False, recorder=recorder, role="synthesizer:audit",
-                round=1, knobs=knobs,
-                sampling=_instance_sampling(state, "synthesizer", model,
-                                            chat_client))
-        except Exception:
-            log.exception("synthesizer claim audit failed; %d item(s) kept",
-                          len(part))
-            continue
-        pt, ct = pt + p, ct + c
-        for k, v in evidence.parse_claim_audit(reply, len(part)).items():
-            verdicts[g[k - 1] + 1] = v
+    budget_chars = _audit_budget_chars(chat_client, model, knobs,
+                                       evidence.CLAIM_AUDIT_SYSTEM)
+    tokens = [0, 0]
+
+    def audit(batch: list[dict]) -> dict[int, tuple[str, str]]:
+        found: dict[int, tuple[str, str]] = {}
+        for g in evidence.claim_audit_batches(batch, budget_chars):
+            part = [batch[i] for i in g]
+            try:
+                reply, p, c = _single_shot(
+                    chat_client, model, [
+                        {"role": "system",
+                         "content": evidence.CLAIM_AUDIT_SYSTEM},
+                        {"role": "user",
+                         "content": evidence.claim_audit_prompt(part)}],
+                    think=False, recorder=recorder, role="synthesizer:audit",
+                    round=1, knobs=knobs,
+                    sampling=_instance_sampling(state, "synthesizer", model,
+                                                chat_client))
+            except Exception:
+                log.exception("synthesizer claim audit failed; %d item(s) "
+                              "kept", len(part))
+                continue
+            tokens[0] += p
+            tokens[1] += c
+            for k, v in evidence.parse_claim_audit(reply, len(part)).items():
+                found[g[k - 1] + 1] = v
+        return found
+
+    verdicts = audit(items)
+    # Run 8: a claim the cited run does not show may be shown by another
+    # run naming the same finding; ask once more before moving it.
+    second = evidence.second_look_items(items, verdicts, rows)
+    if second:
+        again = audit([it for _, it in second])
+        for j, (k, it) in enumerate(second, start=1):
+            v = again.get(j)
+            if v and v[0] == "shown":
+                items[k - 1] = it
+                verdicts[k] = v
     text, moved = evidence.apply_claim_audit(text, items, verdicts)
     if moved:
-        log.info("claim audit changed %d of %d item(s) in %d call(s)",
-                 moved, len(items), len(groups))
-    return text, pt, ct
+        log.info("claim audit changed %d of %d item(s)", moved, len(items))
+    return text, tokens[0], tokens[1]
 
 
 def synthesizer_node(state: dict, *, chat_client, model: str,
@@ -4139,6 +4192,14 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                 duration_seconds=0.0,
             )],
         }
+    # Run 8: a by_design finding ranked first among the improvements.
+    text, _spt, _sct = _settled_audit(chat_client, model, text, state=state,
+                                      cwd=cwd or state.get("cwd") or "",
+                                      recorder=recorder)
+    pt, ct = pt + _spt, ct + _sct
+    if _rows is not None:
+        text = evidence.brief_owed(text, _additional_context_for(
+            state, "synthesizer"), _rows)
     # Plan council-memory M2: what the answer ranked, citing a run that
     # reached the code, goes to the ledger as candidates (never settled).
     if _rows is not None:

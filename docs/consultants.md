@@ -1157,6 +1157,64 @@ enough, so on a run with the shell:
   600 characters and lost coder-0's `showTaskWithId` finding at
   character 875.
 
+  **Run 8** (mail #1672) was the best answer of the eight, but the
+  checks around the patches let it down:
+  - **The patch audit judges a comment against the whole file.** All
+    four ⚠ in run 8 were false: the auditor saw each hunk alone and
+    called a default parameter "unreachable", and a join and two calls
+    "missing" that sat in other hunks of the same patch. Each item now
+    comes with FILES: the lane's every hunk to that file and the file
+    as patched (read from the live view, up to 400,000 characters),
+    each given once per call.
+  - **A lane's sub-heading is its entry.** `` **lane `coder-0`** `` under
+    `### Held Patches` was read as a heading of its own, so the answer's
+    assessment was not found and the harness wrote "not assessed".
+    Sub-sections that name a lane now belong to the held section, and
+    `fixes #csf-1` counts like `fixes #1`.
+  - **Known findings a patch touches.** Every known finding within 40
+    lines of a lane's source hunk is listed under that lane. The entry
+    must say, by id, whether the patch fixes it, leaves it as it is, or
+    widens it. Run 8's coder widened csf-8 and the answer counted the
+    patch as fixing csf-7.
+  - **Options no caller passes.** An option a hunk adds (a TypeScript
+    `name?:` member, a Python keyword parameter) that no other source
+    file the patch changes mentions is listed with where the tree
+    already names it. The entry must name the caller that passes it, or
+    say the fix is not wired. Run 8's csf-6 fix added `forgetReads` to
+    the controller; `session-protocol.ts:383` builds it without, so the
+    green test proved nothing about the product.
+  - **A second look before a claim moves.** A ranked item the audit
+    finds not shown, which names a ledger finding, is checked again
+    against the other runs that name that finding (tests first). If one
+    shows it, the item stays, noted `shown by C<k>, not by the cited
+    C<j>`. Run 8 moved csf-2 to Unverified on C419 while the coder's
+    C280 ran it red to green.
+  - **The ledger takes defect cells only, one per cell**, titled `<row>
+    — <column>: <meaning>`. ✓ cells and cells marked `not tested` are
+    never recorded: run 8 recorded two matrix rows titled by their
+    "not tested" cells. A run is never recorded twice as evidence, and
+    "seen again" is logged once per council.
+  - **Settled findings are not listed again.** When the ledger holds
+    by_design or refuted findings relevant to the question, one auditor
+    call (`synthesizer:settled-audit`) names every item of the answer,
+    in any section but Unverified, Dropped, Held patches and Sandbox,
+    that restates one. The item is kept, with the recorded reason noted
+    on it. Run 8 ranked by_design csf-12 first among the improvements.
+  - **A brief's findings are owed.** A finding an injected brief names,
+    which no run after the brief that reached the code mentions, is
+    listed under Unverified as not re-verified. Run 8's brief asked for
+    csf-8 on the patched tree and nothing ran it.
+  - **A drop superseded by a dropped run is thin.** "C49: superseded by
+    C49" and "C64, C65: superseded by C64" now count.
+  - **The confidence cap names the critic's own rating** ("capped at 0.6
+    by the evidence bar (the critic rated it 0.95)"). The cap did work
+    in run 8, but the CONFIDENCE line is stripped from the critique and
+    the raw reply still said 0.95.
+
+  Who settles a finding: the user, or any assistant session (`by:
+  assistant`), including the one driving the council. The engine only
+  records candidates.
+
   **Run 7** (mail #1659): the research was the best yet and the answer
   lost it. What changed:
   - COMMANDS THE LANES RAN is sized by the reader's window

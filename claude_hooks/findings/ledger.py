@@ -22,7 +22,8 @@ from typing import Iterable, Iterator, Optional, Sequence
 
 from claude_hooks._atomic import write_text_atomic
 from claude_hooks.findings.model import (
-    CANDIDATE, CLAIM, DECIDERS, DECISION, EVIDENCE, FIXED, REPRODUCE, SETTLED,
+    CANDIDATE, CLAIM, DECIDERS, DECISION, EVIDENCE, FIXED, LOG, REPRODUCE,
+    SETTLED,
     SEVERITIES, Finding, normalise_status,
 )
 from claude_hooks.tasks.files import (
@@ -335,7 +336,10 @@ class Ledger:
                     hit.symbols.append(s)
             if reproduce and not hit.reproduce:
                 hit.set_section(REPRODUCE, reproduce)
-            hit.add_log(f"seen again{' in ' + council if council else ''}")
+            seen = f"seen again{' in ' + council if council else ''}"
+            if not (council and any(ln.endswith(seen) for ln in
+                                    hit.section(LOG).split("\n"))):
+                hit.add_log(seen)
             hit.touch()
             self.write(hit)
             return hit, False
