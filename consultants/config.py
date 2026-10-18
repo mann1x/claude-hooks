@@ -364,6 +364,11 @@ def role_think(cfg: "ConsultantsConfig", role: str) -> Any:
 class ServiceConfig:
     mode: str = DEFAULT_SERVICE_MODE
     http_port: int = DEFAULT_HTTP_PORT
+    #: An address the engine also listens on for the read-only council
+    #: dashboard (``0.0.0.0`` or a LAN address, like the proxy
+    #: dashboard's ``listen_host``). Only the dashboard's routes answer
+    #: there; the control API stays loopback-only. "" = loopback only.
+    dashboard_host: str = ""
 
 
 VALID_CHECKPOINTER_BACKENDS: tuple[str, ...] = ("sqlite", "postgres")
@@ -1419,6 +1424,8 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
             base.service.mode = svc["mode"]
         if isinstance(svc.get("http_port"), int) and 1 <= svc["http_port"] <= 65535:
             base.service.http_port = svc["http_port"]
+        if isinstance(svc.get("dashboard_host"), str):
+            base.service.dashboard_host = svc["dashboard_host"].strip()
 
     # checkpointer (v2)
     cp = raw.get("checkpointer") or {}
@@ -1893,6 +1900,8 @@ def _render(cfg: ConsultantsConfig, *,
     L.append("[service]")
     L.append(f"mode = {_toml_str(cfg.service.mode)}")
     L.append(f"http_port = {cfg.service.http_port}")
+    if cfg.service.dashboard_host:
+        L.append(f"dashboard_host = {_toml_str(cfg.service.dashboard_host)}")
     L.append("")
     L.append("[checkpointer]")
     L.append(f"backend = {_toml_str(cfg.checkpointer.backend)}")
@@ -2862,6 +2871,25 @@ def set_service_mode(mode: str, *, scope: str = "user",
         )
     cfg = _load_for_edit(scope, cwd)
     cfg.service.mode = mode
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_dashboard_host(host: str, *, scope: str = "user",
+                       cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """``""`` / ``off`` = loopback only; else an address to bind the
+    read-only dashboard listener on (``0.0.0.0`` or this host's LAN IP)."""
+    import ipaddress
+    host = (host or "").strip()
+    if host.lower() in ("off", "none", "loopback"):
+        host = ""
+    if host:
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            raise ValueError(f"{host!r} is not an IP address (use 0.0.0.0, "
+                             "a LAN address, or off)") from None
+    cfg = _load_for_edit(scope, cwd)
+    cfg.service.dashboard_host = host
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 

@@ -16,6 +16,41 @@ import sys
 from consultants import config as cc
 
 
+def listen_sockets(host: str, dashboard_host: str, port: int) -> list:
+    """The engine's listening sockets: ``host`` (loopback), plus
+    ``dashboard_host`` for the LAN dashboard. A wildcard dashboard host
+    covers loopback too, so it is the only socket. A dashboard socket
+    that cannot bind is logged and skipped: the engine still serves."""
+    import socket
+
+    def bind(h: str) -> socket.socket:
+        fam = socket.AF_INET6 if ":" in h else socket.AF_INET
+        s = socket.socket(fam, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((h, port))
+        s.set_inheritable(True)
+        return s
+
+    dh = (dashboard_host or "").strip()
+    if dh in ("0.0.0.0", "::"):
+        try:
+            return [bind(dh)]
+        except OSError as e:
+            logging.getLogger("consultants.server").error(
+                "dashboard_host %s:%d did not bind (%s); serving %s only",
+                dh, port, e, host)
+            return [bind(host)]
+    socks = [bind(host)]
+    if dh and dh != host:
+        try:
+            socks.append(bind(dh))
+        except OSError as e:
+            logging.getLogger("consultants.server").error(
+                "dashboard_host %s:%d did not bind (%s); the dashboard is "
+                "loopback-only", dh, port, e)
+    return socks
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="consultants-server",
@@ -65,8 +100,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # Open SSE streams must not hold the shutdown; the councils behind
     # them are suspended by the app's shutdown hook either way.
-    uvicorn.run(app, host=args.host, port=port, log_config=None,
-                timeout_graceful_shutdown=5)
+    socks = listen_sockets(args.host, cfg.service.dashboard_host, port)
+    app.state.lan_guard = bool(cfg.service.dashboard_host)
+    server = uvicorn.Server(uvicorn.Config(
+        app, log_config=None, timeout_graceful_shutdown=5))
+    server.run(sockets=socks)
     if getattr(app.state, "shutdown_unfinished", 0):
         # Runner threads still inside an LLM call past the grace.
         # Joining them (the executor's atexit hook would) holds the

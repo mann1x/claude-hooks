@@ -987,6 +987,14 @@ user consent.
 If smart-start, offer idle timeout: `5min` / `30min (default)` /
 `2h` / `Other`. Then `set-idle-timeout <seconds>`.
 
+Then offer the LAN dashboard: `loopback only (default)` / `all
+interfaces (0.0.0.0)` / `Other` (this host's LAN address). Then
+`set-dashboard-host <addr|off>`. The engine then also serves the
+read-only council dashboard (`/dashboard`) on that address. A client
+that is not on loopback gets 403 on every other route, so the LAN can
+never start or steer a council. Surface the CLI's `follow_up` (an
+engine restart is needed).
+
 ### Subflow C — Effort tier
 
 Two-round dialog (AskUserQuestion caps at 4 options, 7 tiers

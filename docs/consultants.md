@@ -1018,16 +1018,43 @@ enough, so on a run with the shell:
 - A critic or meta-critic `ready` that says the tests were not run is
   held at `needs_more_research`, with a `[harness]` note. The round caps
   still bound the loop.
-- The synthesizer gets **COMMANDS THE LANES RAN**, built from
-  `transcript.db`. Test and build runs, and failed commands, come with
-  their exit code and output tail; the other commands are listed one
-  per line. Only these were executed, whatever the reports say.
-- The answer must have an `Unverified` section, even an empty one. This
-  also applies when a checkpoint brief exists. An answer without one is
-  re-asked once (`REVISION_NOTE`), and gets a stub section if it still
-  has none. A claim taken from a checkpoint brief must be marked
-  `(from the checkpoint brief, not re-verified)` unless a report checks
-  it.
+- The synthesizer, the critic and the meta-critic get **COMMANDS THE
+  LANES RAN**, built from `transcript.db`. Only these were executed,
+  whatever the reports say. Each command has an id (`C1`, `C2`, …).
+  Each distinct test or probe run (a test runner, or code run with
+  `node` / `bun` / `python` …) that **reached the code** is shown with
+  what the test printed and the runner's summary. Run 3's best finding
+  sat in the log lines of an "11 passed" run, below a tail that kept
+  only the count. A run that never got to the code (a config that does
+  not load, a missing module, a bad `cd`) is listed on one line with
+  its first error. It is not evidence. Other commands are one line each.
+  The critic is told to check every "verified" claim against that
+  lane's own runs.
+- The synthesizer's answer is audited in code (`audit_answer()`). Three
+  things are checked:
+  - **A ranked defect must cite a run that shows it** (`(C41)`). Items
+    are table rows and top-level list items under a defect / finding /
+    issue heading. A defect that was only read goes under `## Read, not
+    run` and is never ranked.
+  - **Every run that reached the code must be cited somewhere**, or
+    listed under `## Dropped` with a reason. Ranges count (`C3–C9`).
+  - **There must be an `Unverified` section**, even an empty one. This
+    also applies when a checkpoint brief exists.
+
+  An answer that fails gets one re-ask naming exactly what is owed
+  (`revision_note()`). Whatever the revision still owes is enforced by
+  `enforce()`:
+  - unbacked ranked items move to `Unverified` with a harness note;
+  - runs the answer never mentions are listed under `## Dropped by
+    omission`;
+  - an answer with no section gets the stub.
+
+  A claim taken from a checkpoint brief must be marked `(from the
+  checkpoint brief, not re-verified)` unless a report checks it.
+- In write mode, **Sandbox changes** flags a held test file that was
+  never run after its last write, or whose last run failed
+  (`held_test_notes()`), so a held patch of broken tests is not mistaken
+  for evidence.
 
 Without the shell or a brief, none of this runs and prompts are
 unchanged.
@@ -2286,7 +2313,14 @@ event as one JSON object per line. Schema:
 ### The dashboard
 
 The engine serves a read-only dashboard at
-`http://127.0.0.1:38095/dashboard` (loopback, like the engine). It lists
+`http://127.0.0.1:38095/dashboard`. To reach it from the LAN, run
+`claude-consultants config set-dashboard-host 0.0.0.0` (or this host's
+LAN address; `off` undoes it) and restart the engine. The engine then
+also listens there. A client that is not on loopback gets only the
+dashboard routes (`/dashboard`, `GET /v1/dashboard/councils[/<sid>]`,
+`GET /v1/consult/<sid>/events`, `/v1/health`) and a 403 for everything
+else, so the LAN can watch councils but never start, steer or cancel
+one. It lists
 every council on the host, running and past, with status, project,
 effort and duration, and filters by status or by text in the question or
 sid. Selecting a council shows:

@@ -879,6 +879,17 @@ def cmd_config_set_service_mode(args, base: str) -> int:
         "unit, then restart `claude-hooks-daemon`."))
 
 
+def cmd_config_set_dashboard_host(args, base: str) -> int:
+    try:
+        cfg = cc.set_dashboard_host(args.host, **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args, follow_up=(
+        "Restart the engine (`python scripts/deploy.py`) for the listener "
+        "to change. The LAN gets the dashboard only: every other route "
+        "answers 403 to a client that is not on loopback."))
+
+
 def cmd_config_set_override_user_global(args, base: str) -> int:
     """``config set-override-user-global on|off`` — flip the per-project
     file's ``override_user_global`` directive.
@@ -2907,6 +2918,14 @@ def build_parser() -> argparse.ArgumentParser:
     csm.add_argument("mode", choices=cc.VALID_SERVICE_MODES)
     _add_scope_args(csm)
     csm.set_defaults(fn=cmd_config_set_service_mode)
+
+    cdh = cfg_sub.add_parser("set-dashboard-host",
+                             help="Also serve the read-only council "
+                             "dashboard on this address (0.0.0.0, a LAN "
+                             "IP, or off).")
+    cdh.add_argument("host")
+    _add_scope_args(cdh)
+    cdh.set_defaults(fn=cmd_config_set_dashboard_host)
 
     cit = cfg_sub.add_parser("set-idle-timeout",
                              help="Smart-start idle timeout (seconds).")

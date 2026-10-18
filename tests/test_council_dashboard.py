@@ -170,3 +170,94 @@ class TestRoutes:
             assert "csl-r" in sids
             assert c.get("/v1/dashboard/councils/csl-r").json()["answer"] == "the answer"
             assert c.get("/v1/dashboard/councils/csl-zz").status_code == 404
+
+
+class TestLanDashboard:
+    """``[service] dashboard_host``: the LAN gets the dashboard, never the
+    control API."""
+
+    def _client(self, guard, host):
+        from fastapi.testclient import TestClient
+
+        from consultants.server.app import create_app
+        app = create_app()
+        app.state.lan_guard = guard
+        return TestClient(app, client=(host, 50000))
+
+    def test_a_lan_client_gets_the_dashboard_only(self):
+        with self._client(True, "192.168.178.30") as c:
+            assert c.get("/dashboard").status_code == 200
+            assert c.get("/v1/dashboard/councils").status_code == 200
+            assert c.get("/v1/health").status_code == 200
+            for method, path in (("post", "/v1/consult"),
+                                 ("get", "/v1/sessions"),
+                                 ("post", "/v1/consult/csl-x/cancel"),
+                                 ("post", "/v1/dashboard/index/backfill"),
+                                 ("post", "/v1/consult/csl-x/inject")):
+                r = (c.post(path, json={}) if method == "post"
+                     else c.get(path))
+                assert r.status_code == 403, path
+                assert "loopback-only" in r.json()["detail"]
+
+    def test_loopback_keeps_the_api(self):
+        with self._client(True, "127.0.0.1") as c:
+            assert c.get("/v1/sessions").status_code != 403
+
+    def test_no_dashboard_host_changes_nothing(self):
+        with self._client(False, "192.168.178.30") as c:
+            assert c.get("/v1/sessions").status_code != 403
+
+    def test_route_and_client_rules(self):
+        from consultants.server.dashboard_routes import (
+            is_local_client, lan_allowed)
+        assert lan_allowed("GET", "/v1/consult/csl-1/events")
+        assert not lan_allowed("POST", "/v1/dashboard/councils")
+        assert not lan_allowed("GET", "/v1/consult/csl-1/result")
+        assert not lan_allowed("GET", "/v1/dashboard/councils/a/b")
+        assert is_local_client("::1") and is_local_client("testclient")
+        assert not is_local_client("10.0.0.5")
+
+    def test_sockets(self):
+        import socket
+
+        from consultants.server.__main__ import listen_sockets
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        socks = listen_sockets("127.0.0.1", "", port)
+        try:
+            assert [s.getsockname()[0] for s in socks] == ["127.0.0.1"]
+        finally:
+            for s in socks:
+                s.close()
+        socks = listen_sockets("127.0.0.1", "0.0.0.0", port)
+        try:
+            assert [s.getsockname()[0] for s in socks] == ["0.0.0.0"]
+        finally:
+            for s in socks:
+                s.close()
+        # A dashboard address that will not bind (taken): logged, the
+        # engine still serves loopback.
+        with socket.socket() as taken:
+            taken.bind(("127.0.0.2", port))
+            taken.listen()
+            socks = listen_sockets("127.0.0.1", "127.0.0.2", port)
+            try:
+                assert [s.getsockname()[0] for s in socks] == ["127.0.0.1"]
+            finally:
+                for s in socks:
+                    s.close()
+
+    def test_config_round_trip(self, tmp_path, monkeypatch):
+        import pytest as _pt
+
+        from consultants import config as cc
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        cfg = cc.set_dashboard_host("0.0.0.0", scope="user")
+        assert cfg.service.dashboard_host == "0.0.0.0"
+        assert cc.load_config().service.dashboard_host == "0.0.0.0"
+        assert cc.set_dashboard_host("off").service.dashboard_host == ""
+        with _pt.raises(ValueError):
+            cc.set_dashboard_host("lan.example")
