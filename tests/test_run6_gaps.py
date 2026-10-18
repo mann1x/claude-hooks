@@ -48,7 +48,7 @@ class TestEveryCellOfARow:
         assert [i["header"] for i in items] == [
             "Editor", "Restore", "Scan", "Apply Patch", "Bash"]
         prompt = evidence.claim_audit_prompt(items)
-        assert "the column 'Bash' says '✓'" in prompt
+        assert "Bash on CRLF: handles this case correctly" in prompt
 
     def test_a_cell_not_shown_loses_only_its_own_mark(self):
         text = _answer(CRLF)

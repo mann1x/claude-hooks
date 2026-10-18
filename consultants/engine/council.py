@@ -3447,13 +3447,32 @@ def _with_known(msgs: list[dict], state: dict, role: str) -> list[dict]:
     return with_known_findings(msgs, state, role)
 
 
-def _with_command_ledger(msgs: list[dict], recorder) -> list[dict]:
+#: Share of a reader's window the COMMANDS THE LANES RAN block may fill
+#: (run 7: a fixed 24,000 characters hid 53 runs from a synthesizer that
+#: could have read all 104,000).
+COMMANDS_WINDOW_SHARE = 0.35
+
+
+def _commands_budget_chars(chat_client, model, state, role) -> int:
+    try:
+        w = budget.resolve_window(chat_client, model,
+                                  _budget_knobs(state, role, model)).tokens
+    except Exception:  # noqa: BLE001 — sizing never fails the role
+        w = None
+    w = w or budget.DEFAULT_WINDOW_TOKENS
+    return max(24_000, int(w * COMMANDS_WINDOW_SHARE * budget.CHARS_PER_TOKEN))
+
+
+def _with_command_ledger(msgs: list[dict], recorder, *, chat_client=None,
+                         model: str = "", state=None,
+                         role: str = "critic") -> list[dict]:
     """A critic's prompt on a shell run, with the commands the lanes ran
     (run 3: a lane's "verified live" claim contradicted its own output
-    and the critic passed it)."""
+    and the critic passed it), sized by its window."""
     from consultants.engine import evidence
-    ledger = evidence.commands_block(getattr(recorder, "db_path", None),
-                                     rules=False)
+    ledger = evidence.commands_block(
+        getattr(recorder, "db_path", None), rules=False,
+        max_chars=_commands_budget_chars(chat_client, model, state, role))
     if not ledger or not msgs or msgs[-1].get("role") != "user":
         return msgs
     return msgs[:-1] + [{**msgs[-1], "content": (
@@ -3506,7 +3525,8 @@ def critic_node(state: dict, *, chat_client, model: str,
     msgs = _with_claims_framing(msgs, state)
     msgs = _with_known(msgs, state, "critic")
     if shell:
-        msgs = _with_command_ledger(msgs, recorder)
+        msgs = _with_command_ledger(msgs, recorder, chat_client=chat_client,
+                                    model=model, state=state, role="critic")
     t0 = time.monotonic()
     try:
         text, pt, ct = _role_turn(
@@ -3547,9 +3567,11 @@ def critic_node(state: dict, *, chat_client, model: str,
     dt = time.monotonic() - t0
     decision = parse_critic_decision(text)
     if shell:
-        from consultants.engine.evidence import commands_ran, hold_to_evidence_bar
+        from consultants.engine.evidence import (
+            commands_ran, hold_to_evidence_bar, round_lanes)
+        _db = getattr(recorder, "db_path", None)
         decision, text, _held = hold_to_evidence_bar(
-            decision, text, commands_ran(getattr(recorder, "db_path", None)))
+            decision, text, commands_ran(_db), round_lanes(_db))
     # M0: strip the critic's CONFIDENCE line out of ``text`` so it's
     # absent from the critique the synthesizer reads + the turn
     # transcript. Emit + append only on the single-critic path below;
@@ -3668,7 +3690,9 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
     msgs = _with_claims_framing(msgs, state)
     msgs = _with_known(msgs, state, "meta_critic")
     if shell:
-        msgs = _with_command_ledger(msgs, recorder)
+        msgs = _with_command_ledger(msgs, recorder, chat_client=chat_client,
+                                    model=model, state=state,
+                                    role="meta_critic")
     t0 = time.monotonic()
     try:
         text, pt, ct = _role_turn(
@@ -3709,9 +3733,11 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
     dt = time.monotonic() - t0
     decision = parse_critic_decision(text)
     if shell:
-        from consultants.engine.evidence import commands_ran, hold_to_evidence_bar
+        from consultants.engine.evidence import (
+            commands_ran, hold_to_evidence_bar, round_lanes)
+        _db = getattr(recorder, "db_path", None)
         decision, text, _held = hold_to_evidence_bar(
-            decision, text, commands_ran(getattr(recorder, "db_path", None)))
+            decision, text, commands_ran(_db), round_lanes(_db))
     # M0: strip + emit the consolidated confidence (fanned-critic path).
     text, _meta_conf = _extract_confidence(text)
     _emit_confidence(_meta_conf, source="critic", state=state)
@@ -4026,7 +4052,8 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
     _held = None
     if shell:
         _db = getattr(recorder, "db_path", None)
-        ledger = evidence.commands_block(_db)
+        ledger = evidence.commands_block(_db, max_chars=_commands_budget_chars(
+            chat_client, model, state, "synthesizer"))
         _rows = evidence.commands_ran(_db) if ledger else None
         if ledger and msgs and msgs[-1].get("role") == "user":
             msgs = msgs[:-1] + [{**msgs[-1], "content": (

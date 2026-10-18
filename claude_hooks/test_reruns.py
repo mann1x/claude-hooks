@@ -125,6 +125,18 @@ def _command(args: dict) -> str:
     return " ".join(str(x) for x in argv) if isinstance(argv, list) else ""
 
 
+_SEGMENT_SPLIT = re.compile(r"&&|\|\||;|\n|(?<![|>])\|(?!\|)")
+
+
+def _test_segments(command: str) -> list[str]:
+    """The pieces of a compound command (split on ``&&``, ``||``, ``;``,
+    pipes and newlines) that run tests; the whole command when none
+    alone does."""
+    parts = [x for x in _SEGMENT_SPLIT.split(command or "")
+             if TEST_LIKE.search(x)]
+    return parts or [command or ""]
+
+
 def classify(events: Iterable[tuple[str, str, str]]) -> dict[str, str]:
     """``{path: why}`` for every test file whose last write was not
     followed by a run, or whose last run failed. ``events`` are
@@ -141,10 +153,14 @@ def classify(events: Iterable[tuple[str, str, str]]) -> dict[str, str]:
             last[p] = []
         if not TEST_LIKE.search(cmd):
             continue
+        # Only the part of the command that runs tests names what ran
+        # (run 7, C161: `sed … audit-repro.test.ts > v2.test.ts && …
+        # vitest run zz-v2.test.ts` ran the copy, not audit-repro).
+        runs = " ".join(_test_segments(cmd))
         for p in last:
             name = PurePosixPath(p).name
-            if re.search(r"(?<![\w.-])" + re.escape(name) + r"(?![\w.-])", cmd) \
-                    or p in cmd:
+            if re.search(r"(?<![\w.-])" + re.escape(name) + r"(?![\w.-])", runs) \
+                    or p in runs:
                 last[p].append(run_result(result))
     out = {}
     for p, runs in last.items():

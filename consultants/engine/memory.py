@@ -150,6 +150,39 @@ def _evidence(it: dict) -> str:
     return "; ".join(parts)
 
 
+#: The column of a ranked table that says what the defect is.
+_DEFECT_COLUMN = re.compile(r"defect|finding|issue|failure|problem|"
+                            r"description|claim|what goes wrong", re.I)
+_TAG_CELL = re.compile(r"^\W*(?:#?\d+|new|known|[a-z]{1,6}f-\d+)\W*$", re.I)
+
+
+def _title(it: dict, lines: list[str]) -> str:
+    """A finding's title from what the answer says the defect is (run 7:
+    titles came out "new — `grep.ts:260`" from the ID and path columns)."""
+    from consultants.engine import evidence
+    row = lines[it["start"]] if it["start"] < len(lines) else it["text"]
+    if not row.strip().startswith("|"):
+        return evidence._label(it["text"])[:160]
+    cells = [c.strip() for c in evidence._cells(row)]
+    head = evidence._header(lines, it["start"])
+    pick = next((cells[k] for k, h in enumerate(head)
+                 if k < len(cells) and _DEFECT_COLUMN.search(h) and cells[k]), "")
+    if not pick:
+        pick = next((c for c in cells if not _TAG_CELL.match(c)
+                     and not re.fullmatch(r"[`\s]*[\w./-]+\.\w{1,6}(?::\d+)?[`\s/]*.*",
+                                          c) and len(c.split()) >= 3), "")
+    pick = re.sub(r"\*\*|__|`", "", pick or evidence._label(it["text"]))
+    pick = " ".join(pick.split()).rstrip(".;:,")
+    return pick if len(pick) <= 160 else pick[:159] + "…"
+
+
+def _tag(text: str, prefix: str) -> str:
+    """The ledger id an item is tagged with (``(known: csf-7)``, an ID
+    cell ``**csf-7**``); "" when none."""
+    m = re.search(rf"(?<![\w-])({re.escape(prefix)}-\d+)(?![\w-])", text or "")
+    return m.group(1) if m else ""
+
+
 def record_answer(cwd: str, sid: str, answer: str,
                   rows: Optional[list[dict]]) -> list[tuple[str, bool]]:
     """Record a finished answer's ranked items and matrix rows that cite a
@@ -167,6 +200,8 @@ def record_answer(cwd: str, sid: str, answer: str,
         if not items:
             return []
         lg = Ledger(findings_root(cwd))
+        lines = answer.split("\n")
+        prefix = lg.prefix if lg.exists else ""
         out = []
         rows_seen: set[int] = set()
         for it in items:
@@ -175,12 +210,13 @@ def record_answer(cwd: str, sid: str, answer: str,
                     continue
                 rows_seen.add(it["start"])
             text = " ".join(it["text"].split())
-            title = evidence._label(it["text"])[:160]
+            title = _title(it, lines)
             f, created = lg.record(
                 title, text, paths=paths_in(it["text"]),
                 severity="H" if it.get("kind") != "cell" else "M",
                 evidence=_evidence(it), council=sid,
-                reproduce=" ".join((it["runs"][0].get("command") or "").split()))
+                reproduce=" ".join((it["runs"][0].get("command") or "").split()),
+                known=_tag(it["text"], prefix) if prefix else "")
             out.append((f.id, created))
         return out
     except Exception:  # noqa: BLE001 — memory never fails a council

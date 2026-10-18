@@ -42,7 +42,7 @@ COMMENT_MAX_ITEMS = 24
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _COMMENT = re.compile(r"^\s*(?://|#(?![!\w])|#\s|/\*|\*(?!\*?/?\s*$)|--\s|\"\"\"|''')")
-HELD_HEADING = re.compile(r"^\s{0,3}(?:#{1,6}\s*|\*\*)\s*held patch", re.I | re.M)
+HELD_HEADING = re.compile(r"^\s{0,3}(?:(?:#{1,6}\s*)+|\*\*)\s*held patch", re.I | re.M)
 
 
 @dataclass

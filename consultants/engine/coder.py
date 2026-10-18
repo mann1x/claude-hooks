@@ -118,7 +118,13 @@ PLANNER_CODER_GATE_BLOCK = (
     "```\n\n"
     "Rules: 1-4 tasks max; each task is self-contained (the coder "
     "lane will not see the other tasks); ``path`` is advisory — the "
-    "coder may rename. When code generation is NOT needed, OMIT the "
+    "coder may rename. When the question says what coder lanes write "
+    "(tests, fixes, patches), every task asks for all of it: if it asks "
+    "for fixes, each task writes the failing test AND the fix, never "
+    "the test alone. Together the tasks cover the whole set in scope — "
+    "every confirmed finding in KNOWN FINDINGS the question covers, and "
+    "the defects the plan expects — split across tasks, not a subset. "
+    "When code generation is NOT needed, OMIT the "
     "block entirely OR emit "
     "``{\"requires_code_generation\": false}``."
 )
@@ -153,7 +159,10 @@ def build_coder_messages(task: CoderTaskItem,
     msgs.append({"role": "system", "content": CODER_SYSTEM})
     parts: list[str] = []
     if question:
-        parts.append(f"USER QUESTION (context only):\n{question.strip()}")
+        # Run 7: "(context only)" let a tests-only task override the
+        # question's "write the failing tests and the fixes".
+        parts.append("USER QUESTION (what it asks of coder lanes applies to "
+                     f"you, together with TASK):\n{question.strip()}")
     if plan:
         parts.append(f"\nPLAN:\n{plan.strip()}")
     if research:

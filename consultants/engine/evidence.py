@@ -38,8 +38,12 @@ from typing import Optional
 from claude_hooks import test_reruns as _tr
 
 SHELL_TOOL = "run_command"
-#: Commands listed for the synthesizer, newest kept when over.
-COMMANDS_MAX_ROWS = 60
+#: Commands listed for a reader whose window is not known, newest kept
+#: when over. A reader with a known window gets
+#: ``commands_budget_chars()`` instead (run 7: 24,000 characters hid 53
+#: runs, the coder's decisive C152/C153/C161 among them, from a
+#: synthesizer whose window held all 104,000).
+COMMANDS_MAX_ROWS = 10_000
 COMMANDS_MAX_CHARS = 24_000
 OUTPUT_TAIL_CHARS = 280
 
@@ -60,8 +64,10 @@ HELD_NOTE = (
     "(“{quote}”). On a run with the shell the researchers can "
     "run them; name which tests would settle each ranked finding.")
 
-UNVERIFIED_HEADING = re.compile(
-    r"^\s{0,3}(?:#{1,6}\s*|\*\*)\s*unverified\b", re.I | re.M)
+#: A heading, ``### ## Unverified`` included (run 7 wrote that, and the
+#: harness took the section for missing and appended its stub).
+_HEAD = r"^\s{0,3}(?:(?:#{1,6}\s*)+|\*\*)\s*"
+UNVERIFIED_HEADING = re.compile(_HEAD + r"unverified\b", re.I | re.M)
 
 REVISION_NOTE = (
     "Your answer has no `Unverified` section, which is required on this "
@@ -98,8 +104,59 @@ NO_RUN_NOTE = (
     "that ran. Name the command that would settle each ranked finding.")
 
 
+NO_RUN_LANES_NOTE = (
+    "[harness] Held at needs_more_research by the evidence bar: this "
+    "critique answered ready, but {n} of the {m} lanes of this round ran "
+    "nothing that reached the code (lanes {lanes}), so most of what they "
+    "report was read, not run. Name the test or probe that would settle "
+    "each of their findings.")
+LANES_UNRUN_NOTE = (
+    "[harness] Lanes {lanes} of this round ran nothing that reached the "
+    "code: their findings rest on reading alone. Treat each as "
+    "unverified unless another lane's run shows it. Confidence capped at "
+    "{cap} by the evidence bar.")
+#: The most a ready critique may claim while some lanes ran nothing.
+UNRUN_CONFIDENCE_CAP = 0.6
+_CONF_LINE = re.compile(
+    r"(?im)^([ \t>*-]*CONFIDENCE[ \t]*[:=][ \t]*)([01](?:\.\d+)?|0?\.\d+)\b")
+
+
+def round_lanes(db_path) -> Optional[list[int]]:
+    """The researcher lanes of the round the critic is judging: those
+    whose ``node_exit`` comes after the last critic or meta-critic exit.
+    None when the transcript cannot be read."""
+    if not db_path or not Path(db_path).exists():
+        return None
+    try:
+        c = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+        try:
+            last = c.execute(
+                "SELECT COALESCE(MAX(event_id), 0) FROM events WHERE kind = "
+                "'node_exit' AND role IN ('critic', 'meta_critic')").fetchone()[0]
+            lanes = [r[0] for r in c.execute(
+                "SELECT DISTINCT lane_idx FROM events WHERE kind = 'node_exit' "
+                "AND role = 'researcher' AND event_id > ? AND lane_idx IS NOT "
+                "NULL ORDER BY lane_idx", (last,))]
+        finally:
+            c.close()
+    except sqlite3.Error:
+        return None
+    return lanes
+
+
+def _cap_confidence(text: str, cap: float) -> str:
+    def sub(m):
+        try:
+            v = float(m.group(2))
+        except ValueError:
+            return m.group(0)
+        return m.group(0) if v <= cap else f"{m.group(1)}{cap}"
+    return _CONF_LINE.sub(sub, text)
+
+
 def hold_to_evidence_bar(decision: str, text: str,
                          rows: Optional[list[dict]] = None,
+                         lanes: Optional[list[int]] = None,
                          ) -> tuple[str, str, bool]:
     """``(decision, text, held)``: ``ready`` becomes
     ``needs_more_research`` with a note when the critique admits the
@@ -122,6 +179,21 @@ def hold_to_evidence_bar(decision: str, text: str,
                 "none of which reached the code")
         return ("needs_more_research",
                 text.rstrip() + "\n\n" + NO_RUN_NOTE.format(what=what), True)
+    # Run 7 (mail #1659): ready at 1.0 while five of the round's eight
+    # lanes ran nothing that reached the code.
+    if rows is not None and lanes:
+        ran = {r.get("lane") for r in rows
+               if r.get("ran") and r.get("role") == "researcher"}
+        unrun = [ln for ln in lanes if ln not in ran]
+        names = ", ".join(str(x) for x in unrun)
+        if len(unrun) * 2 > len(lanes):
+            return ("needs_more_research", text.rstrip() + "\n\n"
+                    + NO_RUN_LANES_NOTE.format(n=len(unrun), m=len(lanes),
+                                               lanes=names), True)
+        if unrun:
+            capped = _cap_confidence(text, UNRUN_CONFIDENCE_CAP)
+            return decision, capped.rstrip() + "\n\n" + LANES_UNRUN_NOTE.format(
+                lanes=names, cap=UNRUN_CONFIDENCE_CAP), False
     return decision, text, False
 
 
@@ -393,10 +465,13 @@ EVIDENCE_RULES = (
     "the printed lines.\n"
     "- A table row that marks a case ✓, ⚠ or ✗ (an edge-case matrix) "
     "cites the run that shows it, like a ranked defect. A row that cites "
-    "none, or only a line read, has its mark replaced with `not tested`.")
+    "none, or only a line read, has its mark replaced with `not tested`. "
+    "Give the matrix a legend line under it (`✓ = handled correctly; ⚠ = "
+    "…; ✗ = defect shown`): each mark is checked against what it says.")
 
 
-def commands_block(db_path, *, rules: bool = True) -> str:
+def commands_block(db_path, *, rules: bool = True,
+                   max_chars: Optional[int] = None) -> str:
     """The COMMANDS THE LANES RAN block ("" when the transcript cannot be
     read). Each distinct test or probe run comes with what it printed and
     the tail of its output; failures with their tail; other commands
@@ -406,6 +481,7 @@ def commands_block(db_path, *, rules: bool = True) -> str:
     rows = commands_ran(db_path)
     if rows is None:
         return ""
+    budget = int(max_chars or COMMANDS_MAX_CHARS)
     head = ("COMMANDS THE LANES RAN (from the engine's own record, not the "
             "reports; only these were executed):")
     if not rows:
@@ -446,7 +522,7 @@ def commands_block(db_path, *, rules: bool = True) -> str:
     for g in reversed(groups):          # the latest first: they settle it
         ln = one(g[-1], with_tail=True, printed=True,
                  same=[r["id"] for r in g[:-1]])
-        if shown >= COMMANDS_MAX_ROWS or total + len(ln) > COMMANDS_MAX_CHARS:
+        if shown >= COMMANDS_MAX_ROWS or total + len(ln) > budget:
             break
         out.append(ln)
         total += len(ln)
@@ -469,7 +545,7 @@ def commands_block(db_path, *, rules: bool = True) -> str:
             out.append(one(r, with_tail=True))
     out.append(f"Other commands ({len(other)}, reads and git; their output "
                f"is not shown here):")
-    room = max(0, COMMANDS_MAX_CHARS // 3)
+    room = max(0, budget // 3)
     for i, r in enumerate(other):
         ln = one(r)
         if len(ln) > room:
@@ -494,10 +570,8 @@ UNRANKED_SECTION = re.compile(
     r"improvement|recommend|reducer|invariant|sandbox|held", re.I)
 _TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{3,}")
 _ITEM = re.compile(r"^(\s{0,3})(?:[-*+]|\d{1,3}[.)])\s+\S")
-READ_NOT_RUN_HEADING = re.compile(
-    r"^\s{0,3}(?:#{1,6}\s*|\*\*)\s*read,? not run\b", re.I | re.M)
-DROPPED_HEADING = re.compile(r"^\s{0,3}(?:#{1,6}\s*|\*\*)\s*dropped\b",
-                             re.I | re.M)
+READ_NOT_RUN_HEADING = re.compile(_HEAD + r"read,? not run\b", re.I | re.M)
+DROPPED_HEADING = re.compile(_HEAD + r"dropped\b", re.I | re.M)
 MAX_LISTED = 25
 
 
@@ -519,7 +593,8 @@ def _sections(lines: list[str]) -> list[tuple[str, int, int]]:
     for i, ln in enumerate(lines):
         m = _HEADING.match(ln)
         if m:
-            marks.append((i, (m.group(1) or m.group(2) or "").strip()))
+            h = (m.group(1) or m.group(2) or "").strip()
+            marks.append((i, re.sub(r"^(?:#+\s*)+", "", h).strip()))
     out = []
     for k, (i, h) in enumerate(marks):
         end = marks[k + 1][0] if k + 1 < len(marks) else len(lines)
@@ -591,6 +666,8 @@ THIN_DROPPED_MIN = 3
 #: One reason given verbatim to this many runs says nothing about each
 #: (run 6: "Superseded by C387" for 12 runs, most not about C387's file).
 REPEATED_REASON_MIN = 5
+#: "superseded by X": what X is decides whether it is a reason.
+SUPERSEDED = re.compile(r"\bsuperseded\s+by\s+[(`*\s]*([^\s)`*,;.]+)", re.I)
 THIN_DROPPED_NOTE = ("harness: this reason does not say what the run "
                      "showed or why that does not change the answer")
 _DROPPED_LINE = re.compile(
@@ -618,6 +695,16 @@ def thin_dropped(text: str) -> list[dict]:
     for e in entries:
         k = " ".join(e["reason"].lower().strip(" .").split())
         counts[k] = counts.get(k, 0) + 1
+    # Run 7: "superseded by (C211)" for eight runs, "superseded by
+    # `audit-repro.test.ts`" — a file, not a run. A run is superseded by
+    # another run, named; one run said to supersede many says nothing
+    # about each.
+    by_target: dict[int, int] = {}
+    for e in entries:
+        m = SUPERSEDED.search(e["reason"])
+        if m and CMD_REF.match(m.group(1)):
+            t = int(CMD_REF.match(m.group(1)).group(1))
+            by_target[t] = by_target.get(t, 0) + max(1, len(cited(e["ids"])))
     out = []
     for e in entries:
         r = e["reason"]
@@ -626,7 +713,11 @@ def thin_dropped(text: str) -> list[dict]:
             continue
         stock = not CMD_REF.search(r) and not DROPPED_REASON_OK.search(r) \
             and len(re.findall(r"\w+", r)) < 8
-        if stock or counts[k] >= REPEATED_REASON_MIN:
+        sup = SUPERSEDED.search(r)
+        not_a_run = bool(sup) and not CMD_REF.match(sup.group(1))
+        many = bool(sup) and not not_a_run and by_target.get(
+            int(CMD_REF.match(sup.group(1)).group(1)), 0) >= REPEATED_REASON_MIN
+        if stock or not_a_run or many or counts[k] >= REPEATED_REASON_MIN:
             out.append(e)
     return out
 
@@ -788,6 +879,9 @@ CLAIM_AUDIT_SYSTEM = (
     "- PARTLY: the claim makes several assertions (clauses joined by "
     "\"and\", \"also\", a semicolon, a second consequence) and the output "
     "shows some of them but not all. Name the clauses it does not show.\n"
+    "A matrix claim (\"<tool> on <case>: …\") is about how that tool "
+    "behaves on that case, never about a table in the output: decide "
+    "whether the output shows that behaviour.\n"
     "Judge every clause of a claim, not only its first: a claim is SHOWN "
     "only when the output shows all of it. "
     "Use only the output given; never what the claim says it shows. "
@@ -847,6 +941,37 @@ def _header(lines: list[str], i: int) -> list[str]:
     return []
 
 
+#: What a mark asserts when the answer gives no legend (run 7: cells
+#: went to the auditor as "the column `read_files` says '✓'", and every
+#: one came back "no such table printed").
+MARK_MEANING = {"✓": "handles this case correctly (no defect)",
+                "✔": "handles this case correctly (no defect)",
+                "⚠": "partly mishandles this case, or it is a risk",
+                "✗": "mishandles this case: a defect",
+                "✘": "mishandles this case: a defect",
+                "❌": "mishandles this case: a defect"}
+_LEGEND = re.compile(r"([✓✔⚠✗✘❌])\ufe0f?\s*(?:=|:|—|–|-|means)\s*([^;,|✓✔⚠✗✘❌\n]+)")
+
+
+def _legend(lines: list[str], a: int, b: int) -> dict[str, str]:
+    """The marks a table's legend defines, from the lines just above
+    and below it (within its section)."""
+    out: dict[str, str] = {}
+    for ln in lines[max(a, 0):b]:
+        if ln.strip().startswith("|"):
+            continue
+        for m in _LEGEND.finditer(ln):
+            out.setdefault(m.group(1), m.group(2).strip(" .*_"))
+    return out
+
+
+def _cell_note(cells: list[str]) -> str:
+    """A row's own words about its case: the cells that hold no mark,
+    after the case name."""
+    rest = [c.strip() for c in cells[1:] if c.strip() and not CASE_MARK.search(c)]
+    return " ".join(rest)
+
+
 def matrix_rows(text: str) -> list[dict]:
     """Table rows outside the ranked and unranked sections that mark a
     case ✓ / ⚠ / ✗ (council run 5, mail #1641: "Multibyte ✓" was wrong
@@ -868,11 +993,14 @@ def matrix_rows(text: str) -> list[dict]:
             if not CASE_MARK.search(lines[i]):
                 continue
             head = _header(lines, i)
+            cells = _cells(lines[i])
             cols = [(k, head[k] if k < len(head) else f"column {k + 1}",
-                     c.strip()) for k, c in enumerate(_cells(lines[i]))
+                     c.strip()) for k, c in enumerate(cells)
                     if CASE_MARK.search(c)]
             out.append({"start": i, "end": i + 1, "text": lines[i],
-                        "kind": "cell", "cols": cols})
+                        "kind": "cell", "cols": cols,
+                        "legend": _legend(lines, a, b),
+                        "note": _cell_note(cells)})
     return out
 
 
@@ -956,12 +1084,21 @@ def _run_block(r: dict) -> str:
             f"{_shown_output(r)}")
 
 
+def _meaning(cell: str, legend: dict) -> str:
+    m = CASE_MARK.search(cell)
+    mark = m.group(0)[0] if m else ""
+    return legend.get(mark) or MARK_MEANING.get(mark, f"is marked {cell!r}")
+
+
 def _claim_text(it: dict) -> str:
     claim = re.sub(r"\s+", " ", it["text"]).strip()
     if it.get("kind") == "cell":
-        case = _cells(it["text"])[0].strip() or "this row"
-        claim = (f"in the row for {case!r}, the column {it['header']!r} "
-                 f"says {it['cell']!r} (the whole row: {claim})")
+        case = re.sub(r"\*\*|__", "", _cells(it["text"])[0]).strip() or "this case"
+        tool = it["header"].strip("` ")
+        note = re.sub(r"\s+", " ", it.get("note") or "").strip()
+        claim = (f"{tool} on {case}: {_meaning(it['cell'], it.get('legend') or {})}"
+                 f" (the answer's mark: {it['cell']!r}"
+                 + (f"; its note for this case: {note}" if note else "") + ")")
     return claim
 
 
@@ -1133,7 +1270,7 @@ def held_test_notes(db_path, lane: str, paths: list[str]) -> dict[str, str]:
     return {p: f"⚠ {why}" for p, why in found.items() if p in tests}
 
 
-__all__ = ["hold_to_evidence_bar", "claim_audit_items", "claim_audit_prompt",
+__all__ = ["hold_to_evidence_bar", "round_lanes", "claim_audit_items", "claim_audit_prompt",
            "claim_audit_batches",
            "parse_claim_audit", "apply_claim_audit", "CLAIM_AUDIT_SYSTEM",
            "matrix_rows", "mark_untested_cells", "thin_dropped", "no_run_report_check", "lane_runs", "commands_block", "commands_ran",

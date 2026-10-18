@@ -1157,6 +1157,39 @@ enough, so on a run with the shell:
   600 characters and lost coder-0's `showTaskWithId` finding at
   character 875.
 
+  **Run 7** (mail #1659): the research was the best yet and the answer
+  lost it. What changed:
+  - COMMANDS THE LANES RAN is sized by the reader's window
+    (`COMMANDS_WINDOW_SHARE` 0.35 of `resolve_window()`, at least
+    24,000 characters) for the synthesizer, critic and meta-critic. A
+    fixed 24,000 hid 53 runs, the coder's decisive ones among them, from
+    a synthesizer whose window held all 104,000.
+  - A matrix cell goes to the auditor as `<tool> on <case>: <what the
+    mark means>` with the row's note: the answer's own legend when it
+    gives one (it is asked to), else ✓ = handled correctly, ⚠ = partly
+    wrong or a risk, ✗ = a defect. Bare "the column says ✓" came back
+    "no such table printed" for every cell.
+  - A doubled heading (`### ## Unverified`) is read as its section; the
+    harness had added "no Unverified section" beside the one given, and
+    the thin-Dropped check never saw `### ## Dropped`.
+  - Dropped: a run "superseded by" something that is not a run (a file,
+    "static analysis"), or one run said to supersede 5 or more, is thin.
+  - A held test's "last run failed" counts only the part of a command
+    that runs tests (`test_reruns._test_segments`): a `sed` reading the
+    file into a copy is not a run of it.
+  - The ledger reads an item's id tag (`(known: csf-7)`, an ID cell
+    `**csf-7**`) as the match (`Ledger.record(known=)`), takes a new
+    finding's title from the defect column, and does not add a bare
+    name of a path it has.
+  - The planner's coder tasks carry what the question asks of coder
+    lanes (the failing test AND the fix) over the whole set in scope,
+    and the coder sees the question as applying to it, not "context
+    only".
+  - A critic `ready` is held when more than half of the round's lanes
+    (`round_lanes()`: researcher exits after the last critic exit) ran
+    nothing that reached the code; with fewer, it stands but names them
+    and its confidence is capped at 0.6.
+
   A claim taken from a checkpoint brief must be marked `(from the
   checkpoint brief, not re-verified)` unless a report checks it.
 - A lane that is about to report with a test file it wrote that never

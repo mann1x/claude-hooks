@@ -269,23 +269,32 @@ class Ledger:
 
     def record(self, title: str, claim: str, *, paths: Iterable[str] = (),
                symbols: Iterable[str] = (), severity: str = "M",
-               evidence: str = "", reproduce: str = "", council: str = ""
-               ) -> tuple[Finding, bool]:
+               evidence: str = "", reproduce: str = "", council: str = "",
+               known: str = "") -> tuple[Finding, bool]:
         """A council's claim: evidence on the finding it matches, else a
-        new candidate. Returns ``(finding, created)``. Never changes a
+        new candidate. ``known`` is an id the claim was tagged with (the
+        answer said ``(known: csf-7)``); when it names a finding, that is
+        the match. Returns ``(finding, created)``. Never changes a
         status."""
         paths = [str(p) for p in paths if str(p).strip()]
         symbols = [str(s) for s in symbols if str(s).strip()]
         if not (title or "").strip() or not (claim or "").strip():
             raise ValueError("a finding needs a title and a claim")
-        hit = self.match(f"{title}\n{claim}", paths)
+        hit = None
+        if known and self.path_for(known).exists():
+            try:
+                hit = self.read(known)
+            except (OSError, ValueError):
+                hit = None
+        if hit is None:
+            hit = self.match(f"{title}\n{claim}", paths)
         if hit is not None:
             if evidence:
                 hit.add_evidence(evidence, council=council)
             elif council and council not in hit.councils:
                 hit.councils.append(council)
-            for p in paths:
-                if p not in hit.paths:
+            for p in paths:          # a bare name of a path it has is not new
+                if p not in hit.paths and place_score(hit.paths, [p]) < 1.0:
                     hit.paths.append(p)
             for s in symbols:
                 if s not in hit.symbols:
