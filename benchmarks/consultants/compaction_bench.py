@@ -318,6 +318,15 @@ class InOrder:
             v = ""
         return str(v).lstrip("./")
 
+    def report_check(self, _messages) -> Optional[str]:
+        """Asked once before a report is accepted: gemma4:31b-cloud answered
+        at module 40 of 220 with a root cause it had not read (2026-10-19)."""
+        if self.next >= len(self.order):
+            return None
+        return (f"You have read {self.next} of {len(self.order)} modules. "
+                f"The audit needs every module, in order, before the answer: "
+                f"continue with {self.order[self.next]}.")
+
     def _unread(self) -> set[str]:
         return set(self.order[self.next:])
 
@@ -477,7 +486,10 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
         client, model, role="researcher", knobs=knobs, recorder=rec,
         round=0, lane_idx=idx)
     prepare = with_followup(budgeter)
+    ordered = InOrder(make_executor((str(project),)), order)
+    executor = OnceReadable(ordered)
     cfg = LoopConfig(max_iterations=max_iterations,
+                     report_check=ordered.report_check,
                      force_answer_after=max_iterations - 2,
                      tools_available=True, think=think,
                      force_first_tool_call=False, prepare_payload=prepare,
@@ -495,8 +507,6 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
                        request=req, response=resp, prompt_tokens=pt,
                        completion_tokens=ct, duration_ms=ms)
 
-    ordered = InOrder(make_executor((str(project),)), order)
-    executor = OnceReadable(ordered)
     t0 = time.monotonic()
     error = None
     answer = ""
@@ -538,6 +548,8 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
         "limits_reads": executor.reads, "limits_refused": executor.refused,
         "limits_scrubbed": executor.scrubbed,
         "modules_reached": ordered.next, "out_of_order_refused": ordered.refused,
+        #: Answered before reading every module: not a compaction trial.
+        "abandoned": ordered.next < len(order),
         "stop_reason": (final.get("_stop_reason") if error is None
                         and isinstance(final, dict) else None),
         "answer": answer, **grade(answer, order),
@@ -570,8 +582,8 @@ def render_report(trials: list[dict], meta: dict) -> str:
              "| arm | n | answered | fixed (of answered) | "
              "compactions (mean / min–max) | "
              "fold calls | fold s / trial | files read | re-reads | "
-             "coverage | errors |",
-             "|---|---|---|---|---|---|---|---|---|---|---|"]
+             "coverage | abandoned | errors |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for arm in arms:
         rows = [t for t in trials if t["arm"] == arm]
         cs = [r["compactions"] for r in rows]
@@ -586,6 +598,7 @@ def render_report(trials: list[dict], meta: dict) -> str:
             f"/{meta['modules']} | "
             f"{sum(r['re_reads'] for r in rows) / len(rows):.1f} | "
             f"{sum(r['module_coverage'] for r in rows) / len(rows):.2f} | "
+            f"{sum(1 for r in rows if r.get('abandoned'))} | "
             f"{sum(1 for r in rows if r['error'])} |")
     lines += ["", "## Fix-rate by compaction count", "",
               "| compactions | fork baseline | " + " | ".join(arms) + " |",
