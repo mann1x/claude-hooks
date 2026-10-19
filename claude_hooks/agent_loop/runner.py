@@ -687,7 +687,13 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
                 "tool %s(%s) -> %d chars in %d ms",
                 name, args_str[:80], len(output), dt_ms,
             )
-            seen[key] = output
+            # A failure is not a result to reuse: stubbing its repeat as a
+            # duplicate kept a call that would now succeed on its error for
+            # the rest of the lane. The strike counter still sees repeats.
+            if loop_detection.is_failed_output(output):
+                seen.pop(key, None)
+            else:
+                seen[key] = output
             if is_write_tool(name):
                 seen.clear()
                 if repeats is not None:

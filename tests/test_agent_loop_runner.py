@@ -316,6 +316,37 @@ class TestToolBurstHandling:
         # Identical tool_calls collapse — executor called once only.
         assert executed == ['{"x":1}']
 
+    def test_a_failed_call_is_run_again_never_stubbed(self):
+        # A failure is not a result to reuse: a read refused while out of
+        # order, then asked again once legal, got "duplicate: use that prior
+        # result" — the refusal — for the rest of the lane (gemma, 2026-10).
+        executed: list[str] = []
+        turns = iter([
+            [{"id": "a", "type": "function",
+              "function": {"name": "echo", "arguments": '{"x":1}'}}],
+            [{"id": "b", "type": "function",
+              "function": {"name": "echo", "arguments": '{"x":1}'}}],
+        ])
+
+        def chat(p):
+            calls = next(turns, None)
+            if calls is None:
+                return _stop("done")
+            return {"choices": [{"message": {"role": "assistant",
+                                             "tool_calls": calls},
+                                 "finish_reason": "tool_calls"}]}
+
+        def ex(n, a, c):
+            executed.append(a)
+            return "error: not yet" if len(executed) == 1 else "the content"
+
+        runner.run_loop(
+            {"model": "m", "messages": [{"role": "user", "content": "go"}]},
+            cwd="/tmp",
+            config=runner.LoopConfig(force_first_tool_call=False),
+            tool_specs=TOOL_SPECS, chat_fn=chat, tool_executor=ex)
+        assert executed == ['{"x":1}', '{"x":1}']
+
     def test_cap_max_tool_calls_per_turn(self):
         # Three distinct tool calls, cap at 2.
         executed: list[str] = []
