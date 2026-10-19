@@ -1027,7 +1027,12 @@ def compact_messages(messages: list[dict], *, keep_tokens: int,
                 reclaimed.append(value)
 
     dropped = len(dropped_msgs)
-    generation = 1 + sum(1 for m in messages if is_compaction_marker(m))
+    # The previous marker's generation + 1, as the fork counts it. Counting
+    # the markers in the history read 2 forever: each fold takes the
+    # previous marker into its span, so one marker is all there ever is.
+    generation = 1 + max(
+        (int(m.get("_compaction_generation") or 1) for m in messages
+         if is_compaction_marker(m)), default=0)
     marker = None
     if make_marker is not None:
         try:

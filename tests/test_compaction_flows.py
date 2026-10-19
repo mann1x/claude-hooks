@@ -563,3 +563,157 @@ def test_splice_drops_invalid_citations():
     s = tool_ledger.splice("Reading. [#1] Then [#1] and [#9] and [#3-1].", entries)
     assert s.cited == [1] and sorted(s.invalid) == [1, 3, 9]
     assert "1. read_file" in s.text and "[#" not in s.text
+
+
+# --- what the writer is given (compaction bench trace, 2026-10-19) -------- #
+
+def _calls(paths, size=400):
+    msgs = []
+    for i, p in enumerate(paths):
+        msgs.append({"role": "assistant", "content": None, "tool_calls": [
+            {"id": f"k{i}", "function": {"name": "read_file",
+                                         "arguments": json.dumps({"path": p})}}]})
+        msgs.append({"role": "tool", "tool_call_id": f"k{i}",
+                     "content": f"{p}:1-9\n" + "\n".join(f"line {j}" * size
+                                                          for j in range(9))})
+    return msgs
+
+
+def _writer_requests(backend):
+    return [p["messages"][-1]["content"] for p in backend.payloads
+            if p["messages"][0]["content"] in (P.WRITER_SYSTEM_PROMPT,
+                                                P.FULL_SYSTEM_PROMPT)]
+
+
+@pytest.mark.parametrize("flow", ["reduced", "full"])
+def test_the_writer_is_shown_the_task_the_head_keeps(flow):
+    """The head's question is never folded, so it was never in front of the
+    writer: it took the task from the prompt's example ("I am fixing the
+    collision") and wrote the work up against it."""
+    question = "Users report that ledgerd gives up after the first retry."
+    backend = Backend()
+    msgs = _loop_history(question=question)
+    out = compaction.compact(_scope(backend, flow=flow), msgs,
+                             plan=_plan(backend, msgs))
+    assert out.changed
+    req = _writer_requests(backend)[0]
+    quoted = req.split("Conversation:", 1)[0]
+    assert f"<user_request>\n{question}\n</user_request>" in quoted
+    # shown, not stored: the head still carries it verbatim
+    marker = next(m for m in out.messages if m.get("_compaction_marker"))
+    assert question not in (marker.get("_compaction_user_requests") or [])
+    assert out.messages[1]["content"] == question
+
+
+def test_the_task_comes_before_later_requests_and_is_not_repeated():
+    backend = Backend()
+    msgs = _loop_history(n=12, question="the task")
+    msgs.insert(8, {"role": "user", "content": "a follow-up"})
+    msgs += _loop_history(n=12)[2:]
+    compaction.compact(_scope(backend), msgs, plan=_plan(backend, msgs))
+    quoted = _writer_requests(backend)[0].split("Conversation:", 1)[0]
+    assert quoted.count("<user_request>\nthe task\n") == 1
+    assert quoted.index("the task") < quoted.index("a follow-up")
+
+
+def test_the_writer_reads_the_span_and_the_reviewer_still_fits_the_window():
+    """The writer used to read half the digest target (≈3.8k tokens of a
+    32k window); the fork gives it the summarizer's whole input limit. The
+    transcript is sized so the largest request that carries it — the
+    reviewer's — still fits the window with its reply."""
+    from claude_hooks import token_calib
+    backend = Backend()
+    msgs = ([{"role": "system", "content": "s"}, {"role": "user", "content": "q"}]
+            + _calls([f"src/m{i}.py" for i in range(30)]))
+    out = compaction.compact(_scope(backend), msgs, plan=_plan(backend, msgs))
+    sizes = [token_calib.estimate_tokens(
+        sum(len(m["content"]) for m in p["messages"]), "lane-model")
+        + int((p.get("options") or {}).get("num_predict") or 0)
+        for p in backend.payloads]
+    assert max(sizes) <= 32_768
+    writer = _writer_requests(backend)[0]
+    dropped = sum(1 for m in msgs if m.get("role") == "tool") - sum(
+        1 for m in out.messages if m.get("role") == "tool")
+    assert writer.count("[Tool result]:") >= dropped - 2
+
+
+def test_the_projection_prices_what_the_writer_is_shown():
+    """Twenty 21k-char reads fit once cut to what the serializer shows;
+    priced raw, the projection squeezed every one of them."""
+    backend = Backend()
+    msgs = ([{"role": "system", "content": "s"}, {"role": "user", "content": "q"}]
+            + _calls([f"src/m{i}.py" for i in range(20)]))
+    compaction.compact(_scope(backend), msgs, plan=_plan(backend, msgs))
+    writer = _writer_requests(backend)[0]
+    assert "…[truncated" not in writer
+    assert "more chars]" in writer       # the serializer's own cut
+
+
+def test_a_half_critic_gets_the_whole_summary_cap():
+    backend = Backend()
+    msgs = _loop_history()
+    compaction.compact(_scope(backend, flow="full"), msgs, plan=_plan(backend, msgs))
+    caps = {p["messages"][0]["content"]: p["options"]["num_predict"]
+            for p in backend.payloads}
+    assert caps[P.CRITIC_SYSTEM_PROMPT] == caps[P.WRITER_SYSTEM_PROMPT]
+
+
+def test_the_key_keeps_every_call_of_the_span_at_a_small_window():
+    """At 32k the fork's eviction kept 6 of 9 calls in the writer's key and
+    renumbered them; the writer read all 9 in the transcript and narrated
+    calls it never made. The span's calls stay; the budget bounds what is
+    carried to the next generation."""
+    seen = {}
+
+    def writer(payload, n):
+        seen.setdefault("req", payload["messages"][-1]["content"])
+        return "Let me read the limits. [#1] Durations are in deciseconds."
+
+    backend = Backend(writer=writer)
+    paths = [f"src/m{i}.py" for i in range(30)]
+    msgs = ([{"role": "system", "content": "s"}, {"role": "user", "content": "q"}]
+            + _calls(paths))
+    out = compaction.compact(_scope(backend, review=False), msgs,
+                             plan=_plan(backend, msgs))
+    assert out.changed
+    key = seen["req"].split("Cite these as", 1)[1].split("Conversation:", 1)[0]
+    shown = seen["req"].split("Conversation:", 1)[1].count("[Bot tool calls]:")
+    assert shown > 9
+    for i in range(shown):
+        assert f"{i + 1}. read_file  path=src/m{i}.py" in key
+    marker = next(m for m in out.messages if m.get("_compaction_marker"))
+    body = marker["content"]
+    # [#1] is the read of m0, under the sentence that describes it
+    assert body.index("1. read_file  path=src/m0.py") < body.index("deciseconds")
+    # what is carried is evicted to budget, as the fork carries it
+    stored = [tool_ledger.Entry.from_dict(d) for d in marker["_compaction_ledger"]]
+    assert sum(tool_ledger._chars(e) for e in stored) <= tool_ledger.budget_chars(
+        out.report["target"])
+    assert [e.index for e in stored] == list(range(1, len(stored) + 1))
+
+
+def test_the_uncited_block_numbers_calls_as_they_are_stored():
+    backend = Backend(writer=lambda payload, n: "Reading. Done.")
+    msgs = ([{"role": "system", "content": "s"}, {"role": "user", "content": "q"}]
+            + _calls([f"src/m{i}.py" for i in range(30)]))
+    d = compaction.write_digest(
+        _scope(backend, review=False), msgs[2:], target_tokens=7_000,
+        context_tokens=32_768)
+    stored = [tool_ledger.Entry.from_dict(x) for x in d.ledger]
+    assert stored and len(stored) < 30
+    assert d.uncited == tool_ledger.render(stored)
+
+
+def test_the_generation_advances_with_every_fold():
+    """Counting markers read 2 forever: each fold takes the last marker into
+    its span. The fork's previous generation + 1 is what the ladder keys on."""
+    backend = Backend()
+    msgs = _loop_history()
+    gens = []
+    for _ in range(3):
+        out = compaction.compact(_scope(backend), msgs, plan=_plan(backend, msgs))
+        assert out.changed
+        marker = next(m for m in out.messages if m.get("_compaction_marker"))
+        gens.append(marker["_compaction_generation"])
+        msgs = out.messages + _loop_history()[2:]
+    assert gens == [1, 2, 3]

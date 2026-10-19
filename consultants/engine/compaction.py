@@ -661,8 +661,10 @@ def council(scope: Scope, replay: str, retro: str, *, transcript: str,
                     ledger_key.strip(), "", "---", ""]
         req += ["The transcript both halves were written from:", "",
                 transcript or "(empty)"]
+        # The summary's own cap, as the fork's critics get: a half asked to
+        # come back within 10% of its length must not be cut short by a cap.
         r = call(scope, f"critic:{half}", P.CRITIC_SYSTEM_PROMPT, "\n".join(req),
-                 max(512, max_tokens // 2 + 256))
+                 max_tokens)
         if r.error or not r.text:
             continue
         text, _ = cut_echo(r.text)
@@ -707,11 +709,43 @@ def council(scope: Scope, replay: str, retro: str, *, transcript: str,
 # The digest
 # --------------------------------------------------------------------- #
 
+def _capped(messages: list[dict]) -> list[dict]:
+    """Each message cut to what :func:`serialize` shows, so the input
+    projection prices what the writer reads rather than raw tool output
+    (a 21k-char read priced in full pushed whole calls out)."""
+    out = []
+    for m in messages or []:
+        if isinstance(m, dict) and isinstance(m.get("content"), str) \
+                and len(m["content"]) > MAX_MESSAGE_CHARS:
+            m = {**m, "content": _cut(m["content"], MAX_MESSAGE_CHARS)}
+        out.append(m)
+    return out
+
+
+def transcript_budget(context_tokens: int, *, fixed_request: str,
+                      summary_max: int, model: str) -> int:
+    """How much transcript the compaction calls can carry: the window less
+    what the largest request carrying it also holds — the reviewer's
+    prompt, the replay it revises (up to ``summary_max``), the fixed part
+    of the writer's request, and the reply (``summary_max``) — less the
+    margin. The fork gives the writer the summarizer's whole input limit
+    (agentic-compaction.ts:673-702); a fixed half of the digest target
+    (≈3.8k tokens of a 32k window) dropped the oldest calls of a long span
+    before the writer saw them."""
+    fixed = token_calib.estimate_tokens(
+        len(fixed_request) + len(P.REVIEWER_PROMPT) + len(P.CRITIC_PROMPT) // 2,
+        model)
+    return int(context_tokens) - fixed - 2 * int(summary_max) \
+        - budget.WINDOW_MARGIN_TOKENS
+
+
 def write_digest(scope: Scope, dropped: list[dict], *, target_tokens: int,
                  generation: int = 1,
                  previous: Optional[retrospective.Digest] = None,
                  pinned: Optional[dict] = None,
-                 tail: bool = True) -> retrospective.Digest:
+                 tail: bool = True,
+                 context_tokens: Optional[int] = None,
+                 task: Optional[dict] = None) -> retrospective.Digest:
     """Writer → retrospective → review, on the lane's own model.
 
     The writer writes first against 70% of the generation's combined
@@ -733,33 +767,55 @@ def write_digest(scope: Scope, dropped: list[dict], *, target_tokens: int,
     input_budget = max(retrospective.MIN_INPUT_TOKENS,
                        int(target_tokens * retrospective.MAX_INPUT_SHARE_OF_TARGET))
 
-    # Requests: stored ones carried + the span's; the pinned prompt is shown
-    # to the writer but not stored (it survives verbatim below the digest).
+    # Requests: stored ones carried + the span's; the task (the head's
+    # question) and the pinned prompt are shown to the writer but not
+    # stored — both survive verbatim around the digest. The writer cannot
+    # see either otherwise, and a writer that does not know the task takes
+    # one from the prompt's examples ("I am fixing the collision") and
+    # summarises the work against it (compaction bench, 2026-10-19; the
+    # fork pins and shows its first prompt for the same reason,
+    # agentic-compaction.ts:579-605).
     stored_requests = merge_requests(previous.user_requests if previous else [],
                                      collect_user_requests(dropped))
     shown = list(stored_requests)
+    if task is not None and budget.is_typed_prompt(task):
+        shown = merge_requests([_text(task).strip()], shown)
     if pinned is not None and budget.is_typed_prompt(pinned):
         shown = merge_requests(shown, [_text(pinned).strip()])
     shown = render_requests(shown, int(input_budget * 3 * USER_REQUEST_SHARE))
 
-    # Ledger: carried + this span's, evicted to budget.
+    # Ledger: the carried calls, evicted to budget, then every call of this
+    # span. The span's calls are never evicted from the key: the writer
+    # reads them in the transcript, and a key that dropped the oldest and
+    # renumbered the rest (≈6 of 9 at a 32k window, priced at the results
+    # the key does not even show) had the writer cite by counting and
+    # narrate calls it never made (compaction bench trace, 2026-10-19).
+    # The budget bounds what is carried to the next generation instead.
     ledger: list[tool_ledger.Entry] = []
+    ledger_budget = tool_ledger.budget_chars(target_tokens)
     if s.ledger:
         carried = [tool_ledger.Entry.from_dict(d)
                    for d in (previous.ledger if previous else [])]
-        ledger = tool_ledger.evict(
-            tool_ledger.merge(carried, tool_ledger.build(dropped)),
-            tool_ledger.budget_chars(target_tokens))
+        ledger = tool_ledger.merge(tool_ledger.evict(carried, ledger_budget),
+                                   tool_ledger.build(dropped))
     key = tool_ledger.render_key(ledger)
 
-    view = budget_projection.project(dropped, target_tokens=input_budget,
-                                     policy_intent="summary_input", model=model)
-    retrospective._log_projection("writer", view)
-    transcript = serialize(view.messages)
     full_flow = s.flow == "full" and tail
     prompt = P.REPLAY_PROMPT if tail else P.FULL_PROMPT
     if full_flow:
         prompt = P.with_halfway_section(prompt)
+    writer_budget = input_budget
+    if context_tokens:
+        fixed = build_writer_request(
+            prompt, "", previous_summary=previous.summary if previous else "",
+            requests=shown, ledger_key=key)
+        writer_budget = max(input_budget, transcript_budget(
+            context_tokens, fixed_request=fixed, summary_max=summary_max,
+            model=model))
+    view = budget_projection.project(_capped(dropped), target_tokens=writer_budget,
+                                     policy_intent="summary_input", model=model)
+    retrospective._log_projection("writer", view)
+    transcript = serialize(view.messages)
     request = build_writer_request(
         prompt, transcript,
         previous_summary=previous.summary if previous else "",
@@ -805,8 +861,14 @@ def write_digest(scope: Scope, dropped: list[dict], *, target_tokens: int,
 
     spliced = tool_ledger.splice(replay, ledger) if (replay and ledger) else None
     final = spliced.text if spliced else replay
-    uncited = ([e for e in ledger if e.index in set(spliced.uncited)]
-               if spliced else ledger)
+    # What is carried: the whole ledger evicted to budget, as the fork
+    # carries it; the uncited calls appended after the text are those that
+    # survive it, numbered as they are stored.
+    gone = tool_ledger.evicted(ledger, ledger_budget)
+    uncited_at = set(spliced.uncited) if spliced else {e.index for e in ledger}
+    survivors = [e for i, e in enumerate(ledger) if i not in gone]
+    kept = tool_ledger._renumber(survivors)
+    uncited = [k for k, e in zip(kept, survivors) if e.index in uncited_at]
     if spliced and spliced.invalid:
         log.warning("compaction replay cited %d call(s) not in the record: %s",
                     len(spliced.invalid), spliced.invalid[:10])
@@ -820,7 +882,7 @@ def write_digest(scope: Scope, dropped: list[dict], *, target_tokens: int,
         dropped=len(dropped),
         stand_down="" if (final or retro) else "both-phases-empty",
         user_requests=stored_requests, shown_requests=stored,
-        ledger=[e.as_dict() for e in ledger],
+        ledger=[e.as_dict() for e in kept],
         uncited=tool_ledger.render(uncited) if final else "",
         invalid_citations=list(spliced.invalid) if spliced else [],
         flow=s.flow if tail else "full-state",
@@ -894,6 +956,10 @@ def compact(scope: Scope, messages: list[dict], *, plan: "budget.Budget",
             ctx, overhead_tokens=overhead, trigger_tokens=trigger,
             share=float(s.target_share))
         previous = retrospective.previous_digest(messages)
+        # The question the head keeps verbatim: never folded, so the writer
+        # is shown it explicitly.
+        head = budget._head_end(messages)
+        task = messages[head - 1] if 0 < head <= len(messages) else None
         report: dict = {"flow": s.flow, "placement": s.placement,
                         "reason": reason, "before": before, "target": target,
                         "trigger": trigger, "context_length": ctx}
@@ -904,6 +970,7 @@ def compact(scope: Scope, messages: list[dict], *, plan: "budget.Budget",
                 if s.flow == "basic":
                     return None
                 digest = write_digest(scope, dropped, target_tokens=target,
+                                      context_tokens=ctx, task=task,
                                       generation=generation, previous=previous,
                                       pinned=pinned, tail=tail)
                 digests.append(digest)

@@ -51,7 +51,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -171,7 +171,7 @@ def build_project(dest: Path, *, seed: int = 7, funcs: int = 7) -> list[str]:
 # Grading
 # --------------------------------------------------------------------------- #
 
-TASK_VERSION = 2
+TASK_VERSION = 3
 TICKET = "LDG-4471"
 FOLLOWUP_AFTER = 8
 FOLLOWUP = (f"One more thing from the on-call lead: whatever you find, the "
@@ -195,21 +195,29 @@ def grade(answer: str, order: list[str]) -> dict:
     conversion = _CONVERSION.search(text) is not None
     ticket = TICKET in text
     modules = sum(1 for p in order if Path(p).stem in text)
+    # An answer at all: a lane that stopped on a promise of more reading
+    # ("I'll read the remaining 20 files") says nothing about compaction.
+    answered = names_file or "root cause" in low
     return {"fixed": bool(names_fn and names_file and units and conversion
-                          and ticket),
+                          and ticket), "answered": answered,
             "names_fn": names_fn, "names_file": names_file, "units": units,
             "conversion": conversion, "ticket": ticket,
             "module_coverage": round(modules / len(order), 3)}
 
 
 class OnceReadable:
-    """The builtin executor, except ``src/config/limits.py`` answers once."""
+    """The builtin executor, except ``src/config/limits.py`` answers once.
+
+    Once it has been read, no other tool shows its lines either: a
+    ``grep RETRY_WINDOW`` returned the "in deciseconds" comment and let a
+    trial whose every fold dropped the fact re-learn it (task v3)."""
 
     def __init__(self, inner, path: str = "src/config/limits.py"):
         self.inner = inner
         self.path = path
         self.reads = 0
         self.refused = 0
+        self.scrubbed = 0
 
     def __call__(self, name, args, cwd):
         if name == "read_file":
@@ -223,7 +231,17 @@ class OnceReadable:
                 if self.reads > 1:
                     self.refused += 1
                     return LOCKED
-        return self.inner(name, args, cwd)
+                return self.inner(name, args, cwd)
+        out = self.inner(name, args, cwd)
+        if self.reads and isinstance(out, str) and "limits.py" in out:
+            kept = [ln for ln in out.split("\n")
+                    if not re.match(r"^\S*config/limits\.py[:-]\d", ln)]
+            if len(kept) != out.count("\n") + 1:
+                self.scrubbed += 1
+                kept.append("(src/config/limits.py is locked by a running "
+                            "deploy; its lines are not shown)")
+            out = "\n".join(kept)
+        return out
 
 
 def with_followup(prepare, *, after: int = FOLLOWUP_AFTER):
@@ -231,6 +249,9 @@ def with_followup(prepare, *, after: int = FOLLOWUP_AFTER):
     results are in the history — a typed prompt, not a harness note, so
     the cut planner treats it as the user's."""
     sent = {"done": False}
+    #: generation -> whether that generation's marker carries the unit,
+    #: read from the history each call is actually sent with.
+    carried: dict[int, bool] = {}
 
     def wrapped(payload):
         msgs = payload.get("messages") or []
@@ -239,12 +260,20 @@ def with_followup(prepare, *, after: int = FOLLOWUP_AFTER):
             msgs.append({"role": "user", "content": FOLLOWUP})
             payload["messages"] = msgs
             sent["done"] = True
-        return prepare(payload)
+        out = prepare(payload)
+        for m in ((out if isinstance(out, dict) else payload).get("messages")
+                  or []):
+            if m.get("_compaction_marker"):
+                text = str(m.get("content") or "").lower()
+                carried[int(m.get("_compaction_generation") or 1)] = (
+                    "decisecond" in text or "tenths of a second" in text)
+        return out
 
     for attr in ("observe", "recover", "session"):
         if hasattr(prepare, attr):
             setattr(wrapped, attr, getattr(prepare, attr))
     wrapped.sent = sent
+    wrapped.carried = carried
     return wrapped
 
 
@@ -329,6 +358,7 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
     t0 = time.monotonic()
     error = None
     answer = ""
+    final = None
     try:
         final = run_loop(payload, str(project), config=cfg,
                          tool_specs=openai_tool_specs(),
@@ -351,7 +381,7 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
         "fold_reports": [{k: f.get(k) for k in
                           ("flow", "placement", "reason", "before", "after",
                            "target", "trigger", "rescue", "calls",
-                           "invalid_citations", "digest")} for f in folds],
+                           "invalid_citations", "digest", "cut")} for f in folds],
         "researcher_calls": len(calls), "tool_calls": len(rec.tools),
         "reads": len(reads), "distinct_reads": len(distinct),
         "re_reads": len(reads) - len(distinct),
@@ -360,7 +390,12 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
         "compaction_seconds": round(sum(c["ms"] for c in comp_calls) / 1000, 1),
         "max_prompt_tokens": max((c["pt"] or 0 for c in calls), default=0),
         "followup_sent": prepare.sent["done"],
+        #: per generation, in order: did that digest carry the unit?
+        "unit_carried": [prepare.carried[g] for g in sorted(prepare.carried)],
         "limits_reads": executor.reads, "limits_refused": executor.refused,
+        "limits_scrubbed": executor.scrubbed,
+        "stop_reason": (final.get("_stop_reason") if error is None
+                        and isinstance(final, dict) else None),
         "answer": answer, **grade(answer, order),
     }
 
@@ -384,15 +419,18 @@ def render_report(trials: list[dict], meta: dict) -> str:
              f"{WINDOW:,} tokens, think={meta['think']}, "
              f"{meta['trials']} trials per arm, commit `{meta['commit']}`.",
              "", "## By arm", "",
-             "| arm | n | fixed | compactions (mean / min–max) | "
+             "| arm | n | answered | fixed (of answered) | "
+             "compactions (mean / min–max) | "
              "fold calls | fold s / trial | files read | re-reads | "
              "coverage | errors |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
     for arm in arms:
         rows = [t for t in trials if t["arm"] == arm]
         cs = [r["compactions"] for r in rows]
+        answered = [r for r in rows if r.get("answered", True)]
         lines.append(
-            f"| {arm} | {len(rows)} | {_pct(_rate(rows))} | "
+            f"| {arm} | {len(rows)} | {len(answered)} | "
+            f"{_pct(_rate(answered))} ({sum(r['fixed'] for r in answered)}) | "
             f"{sum(cs) / len(cs):.1f} / {min(cs)}–{max(cs)} | "
             f"{sum(r['compaction_calls'] for r in rows) / len(rows):.1f} | "
             f"{sum(r['compaction_seconds'] for r in rows) / len(rows):.0f} | "

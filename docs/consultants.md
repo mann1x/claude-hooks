@@ -1689,6 +1689,20 @@ method — the discarded reasoning paired with what each stretch produced
 (or, in `full`, the two critics and the synthesizer) fixes tense and
 keeps citations; a revision under half the original is rejected.
 
+**What the writer is given.** The task first: the head's question is
+never folded, so the writer would not see it otherwise, and a writer
+with no task took one from the prompt's examples ("I am fixing the
+collision") and wrote the work up against it (compaction bench,
+2026-10-19). Then every typed request, the previous digest, the numbered
+key, and the folded span sized from the window — the transcript the
+largest compaction request carries, with its reply, must fit the
+window — not a fixed share of the target. The key lists **every call of
+the span**, plus the carried calls evicted to budget: a key that dropped
+the span's oldest calls and renumbered the rest made the writer narrate
+calls it never made. The ledger budget bounds only what is carried to
+the next fold. Each fold's generation is the previous one's plus one;
+the output-budget ladder keys on it.
+
 **What the fold message carries**, in this order:
 
 1. every typed user request, verbatim — follow-ups included, within a

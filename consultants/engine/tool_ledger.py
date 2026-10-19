@@ -266,13 +266,11 @@ def budget_chars(target_tokens: int) -> int:
     return max(MIN_LEDGER_CHARS, int(target_tokens * 3 * LEDGER_BUDGET_SHARE))
 
 
-def evict(entries: list[Entry], budget: int) -> list[Entry]:
-    """Bring the ledger under ``budget`` characters, losing what can be
-    redone first; oldest first within a tier. Whole entries only: half an
-    entry says something that did not happen."""
+def evicted(entries: list[Entry], budget: int) -> set[int]:
+    """The positions :func:`evict` drops to bring ``entries`` under
+    ``budget`` characters: what can be redone first, oldest first within
+    a tier (successful calls, then failed ones, then verdicts)."""
     total = sum(_chars(e) for e in entries)
-    if total <= budget:
-        return _renumber(list(entries))
 
     def tier(e: Entry) -> int:
         return 2 if e.verdict else (1 if e.failed else 0)
@@ -284,6 +282,13 @@ def evict(entries: list[Entry], budget: int) -> list[Entry]:
             break
         dropped.add(i)
         total -= _chars(entries[i])
+    return dropped
+
+
+def evict(entries: list[Entry], budget: int) -> list[Entry]:
+    """Bring the ledger under ``budget`` characters. Whole entries only:
+    half an entry says something that did not happen."""
+    dropped = evicted(entries, budget)
     return _renumber([e for i, e in enumerate(entries) if i not in dropped])
 
 
@@ -358,6 +363,6 @@ def splice(replay: str, entries: list[Entry]) -> Splice:
                   invalid=invalid)
 
 
-__all__ = ["Entry", "Splice", "build", "merge", "evict", "budget_chars",
+__all__ = ["Entry", "Splice", "build", "merge", "evict", "evicted", "budget_chars",
            "render", "render_entry", "render_key", "splice", "is_verdict",
            "looks_refused", "summarize_input", "summarize_output"]

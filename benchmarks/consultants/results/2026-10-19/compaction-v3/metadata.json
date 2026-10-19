@@ -1,0 +1,22 @@
+{
+  "date": "2026-10-19",
+  "task_version": 3,
+  "model": "qwen36-base-mtp_tb:27b-q4km-128k",
+  "base": "http://192.168.178.161:22434",
+  "window": 32768,
+  "think": false,
+  "trials": 4,
+  "arms": [
+    "reduced/system",
+    "full/system",
+    "basic/system"
+  ],
+  "commit": "8185719",
+  "max_iterations": 48,
+  "fork_baseline": {
+    "0": 0.85,
+    "1": 0.63,
+    "2": 0.5,
+    "3": 0.25
+  }
+}
