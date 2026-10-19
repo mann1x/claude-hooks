@@ -34,6 +34,14 @@ each refused read refused, fixed in the loop). Now:
   folds had run when the module was first read (:class:`ReadLog`) — so a
   flow's recall of what it read before a fold is measured directly.
 
+Task v6 (2026-10-19): v5 measured nothing — gemma and qwen both found the
+bug after ~26 reads, never folded, and wrote the rest of the table from file
+names (24/221 rows right). Each module's main operation now writes two
+record fields drawn per module from :data:`_FIELDS`, and a row counts only
+when it names both: no name gives them away. Before the answer is accepted
+the loop asks once (``report_check``, as production does on shell runs) how
+many modules are still unread; nothing is ever refused.
+
 Task v4: the extra modules that size the project carry real-looking names
 and are interleaved (``modules_for``).
 
@@ -156,8 +164,9 @@ below needs what each module does, and only its code shows that.
 Then answer with:
 1. **Root cause** — the file and the function that is wrong, and why.
 2. **Fix** — the exact corrected line of code.
-3. **Module table** — every module under `src/`, one line each: its path
-   and what it does.
+3. **Module table** — every module under `src/` except `config/limits.py`
+   and `net/backoff.py`, one line each: its path and the two record fields
+   its main operation writes (besides `version`).
 """
 
 #: Record kinds a module works on. No time words ("window", "retry"): a
@@ -182,14 +191,26 @@ _VERBS = [
 ]
 
 
+#: Record fields a module's main operation writes, two per module. Only its
+#: code says which: they are what the table is graded on (task v6).
+_FIELDS = ("owner_shard sealed_epoch replica_count checksum_kind tier "
+           "quarantine_reason source_region compaction_level hold_epoch "
+           "priority_class origin_node codec parent_span lineage "
+           "retention_class route_hint tenant_id schema_rev fence_token "
+           "weight placement_group dirty_bit audit_ref cost_units "
+           "spill_target").split()
+
+
 def verb_stem(verb: str) -> str:
     """What a table row must contain: ``reconcil`` matches reconciles /
     reconciling / reconciliation."""
     return verb[:-1] if verb.endswith("e") else verb
 
 
-def _main_block(rng: random.Random, verb: str, third: str, noun: str) -> str:
+def _main_block(rng: random.Random, verb: str, third: str, noun: str,
+                fields: tuple[str, str] = ("tier", "codec")) -> str:
     n = noun
+    f1, f2 = fields
     return f'''
 
 def {verb}_{n}s(store, {n}s, *, limit=None):
@@ -209,6 +230,11 @@ def _{verb}_one(current, {n}):
     """{third} one {n}: the stored copy updated by the incoming one."""
     out = dict(current)
     out.update({{k: v for k, v in {n}.items() if v is not None}})
+    if {n}.get("{f1}") is not None:
+        out["{f1}"] = {n}["{f1}"]
+    else:
+        out["{f1}"] = current.get("{f1}")
+    out["{f2}"] = max(current.get("{f2}") or 0, {n}.get("{f2}") or 0)
     out["version"] = current.get("version", 0) + 1
     return out
 
@@ -263,7 +289,8 @@ class {cls}:
 
 
 def _module_text(rng: random.Random, module: str, n_kinds: int = FUNCS,
-                 verb: Optional[tuple[str, str]] = None) -> str:
+                 verb: Optional[tuple[str, str]] = None,
+                 fields: tuple[str, str] = ("tier", "codec")) -> str:
     """A module's body: with ``verb``, one main operation on its first
     record kind (docstring + functions named for it), then helpers for
     ``n_kinds`` kinds. Code that does something, so a "what it does" line
@@ -275,7 +302,7 @@ def _module_text(rng: random.Random, module: str, n_kinds: int = FUNCS,
         nouns.append(rng.choice([x for x in _NOUNS if x not in nouns]))
     out = []
     if verb is not None:
-        out.append(_main_block(rng, verb[0], verb[1], nouns[0]))
+        out.append(_main_block(rng, verb[0], verb[1], nouns[0], fields))
     for noun in nouns:
         out.append(_helper_block(rng, noun, stem))
     return "".join(out)
@@ -313,10 +340,11 @@ def modules_for(extra: int, seed: int = 11) -> list[str]:
 
 
 def build_project(dest: Path, *, seed: int = 7, funcs: int = FUNCS,
-                  extra: int = 0) -> tuple[list[str], dict[str, str]]:
-    """Write the project; returns the module paths (under src/) and each
-    graded module's operation verb. ``config/limits`` and ``net/backoff``
-    carry the bug and are not graded in the table."""
+                  extra: int = 0
+                  ) -> tuple[list[str], dict[str, tuple[str, str]]]:
+    """Write the project; returns the module paths (under src/) and the two
+    fields each graded module's main operation writes. ``config/limits``
+    and ``net/backoff`` carry the bug and are not graded in the table."""
     rng = random.Random(seed)
     order, purposes = [], {}
     for mod in modules_for(extra):
@@ -337,8 +365,10 @@ def build_project(dest: Path, *, seed: int = 7, funcs: int = FUNCS,
             what = "records" if kind == "record" else f"{kind} records"
             head = (f'"""ledgerd {mod.replace("/", ".")}: {verb[1]} {what} '
                     f'for the {mod.split("/")[0]} layer."""\n')
-            text = head + _module_text(rng, mod, funcs, verb=verb)
-            purposes[rel] = verb[0]
+            fields = tuple(rng.sample(_FIELDS, 2))
+            text = head + _module_text(rng, mod, funcs, verb=verb,
+                                       fields=fields)
+            purposes[rel] = fields
         path.write_text(text, encoding="utf-8")
         order.append(rel)
     return order, purposes
@@ -348,7 +378,7 @@ def build_project(dest: Path, *, seed: int = 7, funcs: int = FUNCS,
 # Grading
 # --------------------------------------------------------------------------- #
 
-TASK_VERSION = 5
+TASK_VERSION = 6
 TICKET = "LDG-4471"
 FOLLOWUP_AFTER = 8
 FOLLOWUP = (f"One more thing from the on-call lead: whatever you find, the "
@@ -361,22 +391,22 @@ _CONVERSION = re.compile(
     r"|//\s*1e8|45[_,]?000\b", re.I)
 
 
-def grade_table(answer: str, purposes: dict[str, str],
+def grade_table(answer: str, purposes: dict[str, tuple[str, str]],
                 phases: dict[str, int]) -> dict:
-    """Per graded module: does a line naming it (by basename) also name its
-    operation? Split by read phase (folds run before its first read;
-    ``unread`` = never read). Returns ``{phase: [right, total]}``."""
+    """Per graded module: does a line naming it also name both fields its
+    main operation writes? Split by read phase (folds run before its first
+    read; ``unread`` = never read). Returns ``{phase: [right, total]}``."""
     lines = (answer or "").lower().splitlines()
     by: dict[str, list[int]] = {}
-    for path, verb in purposes.items():
+    for path, fields in purposes.items():
         base = Path(path).stem.lower()
         pkg = Path(path).parent.name.lower()
         # A row names the module as `<base>.py` or `<pkg>/<base>`; a bare
         # word ("queue") may sit in another module's row.
         names = re.compile(rf"\b{re.escape(base)}\.py\b|"
                            rf"\b{re.escape(pkg)}/{re.escape(base)}\b")
-        stem = verb_stem(verb)
-        right = any(stem in names.sub("", ln.replace(path.lower(), ""))
+        right = any(all(f in names.sub("", ln.replace(path.lower(), ""))
+                        for f in fields)
                     for ln in lines if names.search(ln))
         ph = phases.get(path)
         key = "unread" if ph is None else str(ph)
@@ -422,13 +452,28 @@ class ReadLog:
     refused, hidden or locked."""
 
     def __init__(self, inner, rec: "Recorder",
-                 limits: str = "src/config/limits.py"):
+                 limits: str = "src/config/limits.py",
+                 order: Optional[list[str]] = None):
         self.inner = inner
+        self.order = list(order or [])
         self.rec = rec
         self.limits = limits
         self.phase: dict[str, int] = {}
         self.limits_reads = 0
         self.limits_rereads_after_fold = 0
+
+    def report_check(self, _messages) -> Optional[str]:
+        """Asked once before the answer is accepted (the loop's
+        ``report_check``, as on a production shell run): how many modules
+        are unread. A nudge, never a refusal; ``None`` when all were read."""
+        unread = [p for p in self.order if p not in self.phase]
+        if not unread:
+            return None
+        return (f"You have read {len(self.order) - len(unread)} of "
+                f"{len(self.order)} modules under src/. The module table needs "
+                f"the fields each module's main operation writes, which only "
+                f"its code shows; {len(unread)} are unread (for example "
+                f"{', '.join(unread[:3])}).")
 
     def _folds(self) -> int:
         return sum(1 for e in self.rec.events if e.get("kind") == "compaction")
@@ -571,7 +616,7 @@ def make_client(base: str, window: Optional[int]):
 def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
               order: list[str], max_iterations: int, think,
               window: Optional[int] = None,
-              purposes: Optional[dict[str, str]] = None) -> dict:
+              purposes: Optional[dict[str, tuple[str, str]]] = None) -> dict:
     flow, placement = arm.split("/")
     client = make_client(base, window)
     rec = Recorder()
@@ -585,8 +630,9 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
         client, model, role="researcher", knobs=knobs, recorder=rec,
         round=0, lane_idx=idx)
     prepare = with_followup(budgeter)
-    executor = ReadLog(make_executor((str(project),)), rec)
+    executor = ReadLog(make_executor((str(project),)), rec, order=order)
     cfg = LoopConfig(max_iterations=max_iterations,
+                     report_check=executor.report_check,
                      force_answer_after=max_iterations - 2,
                      tools_available=True, think=think,
                      force_first_tool_call=False, prepare_payload=prepare,
@@ -697,8 +743,9 @@ def render_report(trials: list[dict], meta: dict) -> str:
             f"{sum(r['re_reads'] for r in rows) / len(rows):.1f} | "
             f"{sum(1 for r in rows if r['error'])} |")
     lines += ["", "## Module table by read phase", "",
-              "Share of graded modules whose table row names what the module "
-              "does, by how many folds had run when it was first read "
+              "Share of graded modules whose table row names both fields its "
+              "main operation writes, by how many folds had run when it was "
+              "first read "
               "(0 = before the first fold). What a flow keeps across a fold "
               "shows as the gap between phase 0 and the last phase.", ""]
     phases = sorted({k for t in trials for k in (t.get("table") or {})},

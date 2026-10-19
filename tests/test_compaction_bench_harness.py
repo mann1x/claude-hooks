@@ -57,34 +57,39 @@ def test_reads_are_never_refused_and_note_their_read_phase():
 
 
 def test_the_table_is_graded_per_module_by_read_phase():
-    purposes = {"src/a/lease_router.py": "evict",
-                "src/b/shard_keeper.py": "reconcile",
-                "src/c/span_loader.py": "flush"}
+    purposes = {"src/a/lease_router.py": ("tier", "codec"),
+                "src/b/shard_keeper.py": ("lineage", "weight"),
+                "src/c/span_loader.py": ("tenant_id", "fence_token")}
     phases = {"src/a/lease_router.py": 0, "src/b/shard_keeper.py": 1}
-    answer = ("| src/a/lease_router.py | evicts stale leases |\n"
-              "| src/b/shard_keeper.py | keeps shards |\n"
-              "| src/c/span_loader.py | flushing spans |")
+    answer = ("| src/a/lease_router.py | tier, codec |\n"
+              "| src/b/shard_keeper.py | lineage only |\n"
+              "| src/c/span_loader.py | `tenant_id`, `fence_token` |")
     assert cb.grade_table(answer, purposes, phases) == {
         "0": [1, 1], "1": [0, 1], "unread": [1, 1]}
     # A bare word in another module's row is not this module's row.
-    assert cb.grade_table("| src/b/shard_keeper.py | evicts the lease_router |",
-                          {"src/a/lease_router.py": "evict"},
+    assert cb.grade_table("| src/b/shard_keeper.py | tier, codec; lease_router |",
+                          {"src/a/lease_router.py": ("tier", "codec")},
                           {"src/a/lease_router.py": 0}) == {"0": [0, 1]}
-    # The module's own name never counts as its purpose.
-    assert cb.grade_table("| src/x/evict_router.py | routes |",
-                          {"src/x/evict_router.py": "evict"},
-                          {"src/x/evict_router.py": 0}) == {"0": [0, 1]}
 
 
-def test_modules_say_what_they_do_and_names_never_give_it_away(tmp_path):
+def test_one_nudge_names_the_unread_modules_and_never_refuses():
+    rec = _Rec()
+    ex = cb.ReadLog(_inner, rec, order=["src/a.py", "src/b.py"])
+    ex("read_file", '{"path": "src/a.py"}', ".")
+    note = ex.report_check([])
+    assert "1 of 2" in note and "src/b.py" in note
+    ex("read_file", '{"path": "src/b.py"}', ".")
+    assert ex.report_check([]) is None
+
+
+def test_modules_say_what_they_write_and_names_never_give_it_away(tmp_path):
     order, purposes = cb.build_project(tmp_path, extra=60)
     assert "src/config/limits.py" not in purposes
     assert "src/net/backoff.py" not in purposes
     assert len({p.rsplit("/", 1)[-1] for p in order}) == len(order)
-    for path, verb in purposes.items():
+    for path, (f1, f2) in purposes.items():
         text = (tmp_path / path).read_text()
-        assert f"def {verb}_" in text  # the operation is in the code
-        assert cb.verb_stem(verb) not in path.lower()
-    # No word salad, no decoy echoing the bug.
+        assert f'out["{f1}"]' in text and f'out["{f2}"]' in text
+        assert f1 not in path and f2 not in path
     joined = " ".join(order)
     assert "window" not in joined and "retry" not in joined
