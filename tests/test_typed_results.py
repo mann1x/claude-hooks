@@ -320,6 +320,31 @@ def test_each_field_that_fails_says_why(tmp_path):
                      "the quote is not in the file"]
 
 
+def test_g6_false_notes_are_gone(tmp_path):
+    """bug-1086, from the G6 cost tier: a quote running over two comment
+    lines and a prose ``symbol`` were both read as failures."""
+    (tmp_path / "r.py").write_text(
+        "# the cooldown was protective. So the\n"          # 1
+        "# breaker is OFF by default and only worth\n"     # 2
+        "# enabling under the h2 rollback.\n"              # 3
+        "BREAKER = False\n"                                 # 4
+        "\n" * 8 +                                          # 5-12
+        "def far():\n"                                      # 13
+        "    pass\n")                                       # 14
+    rec = {"summary": "s", "gaps": [], "claims": [
+        {"claim": "c", "path": "r.py", "line": 2,
+         "quote": "breaker is OFF by default and only worth enabling under the h2"},
+        {"claim": "c", "path": "r.py", "line": 2, "symbol": "BREAKER comment"},
+        {"claim": "c", "path": "r.py", "line": 1, "symbol": "module docstring"},
+        {"claim": "c", "path": "r.py", "line": 2, "symbol": "far(x)"},
+        {"claim": "c", "path": "r.py", "line": 2, "symbol": "mod::far"}]}
+    out = tr.verify_claims(rec, [str(tmp_path)])["claims"]
+    assert [c.get("unverified") for c in out] == [
+        None, None, None,
+        "`far(x)` is not at that line",          # a real identifier is still checked
+        "`mod::far` is not at that line"]
+
+
 def test_no_roots_checks_nothing(tmp_path):
     rec = {"summary": "s", "claims": [{"claim": "c", "path": "gone.py"}]}
     assert tr.verify_claims(rec, []) is rec

@@ -77,11 +77,16 @@ class TestOptInsOffByDefault(unittest.TestCase):
         # interrupt_before=["synthesizer"].
         self.assertFalse(self.cfg.runtime.review_before_synthesis)
 
-    def test_interrupt_on_low_confidence_off_by_default(self):
-        # M5: dynamic interrupt when synth self-confidence < target.
-        # Off because the signal normally drives xauto escalation
-        # (not a human pause).
-        self.assertFalse(self.cfg.runtime.interrupt_on_low_confidence)
+    def test_a_removed_runtime_key_still_loads(self):
+        # Plan §9: interrupt_on_low_confidence was never read and is
+        # gone; a config that still names it loads and renders without it.
+        from consultants import config as cc
+        cfg = cc._merge_layer(cc.ConsultantsConfig(),
+                              {"runtime": {"interrupt_on_low_confidence": True,
+                                           "review_before_synthesis": True}})
+        self.assertTrue(cfg.runtime.review_before_synthesis)
+        self.assertFalse(hasattr(cfg.runtime, "interrupt_on_low_confidence"))
+        self.assertNotIn("interrupt_on_low_confidence", cc._render(cfg))
 
     # ----- M6 (tool_executor role) ------------------------------ #
 

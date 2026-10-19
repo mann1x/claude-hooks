@@ -312,14 +312,29 @@ CUT_OR_INVALID = ("Your {name} call was {what}. Call {name} again, smaller: "
 NEAR_LINES = 3
 
 
+#: A comment marker leading a line. A quote that runs over two comment
+#: lines is quoted without the second marker, so it is matched with the
+#: markers dropped (G6: a true quote read as "not in the file").
+_COMMENT_LEAD = re.compile(r"^\s*(?:#+|//+|/\*+|\*+/?|--|;+)[ \t]?")
+
+#: A ``symbol`` that names code: an identifier, dotted, maybe called. Prose
+#: such as "`X` comment" or "module docstring" names nothing to look up.
+_IDENTIFIER = re.compile(r"[A-Za-z_$]\w*(?:(?:\.|::)[A-Za-z_$]\w*)*(?:\(.*\))?")
+
+
 def _squash(text: str) -> str:
-    return " ".join(str(text or "").replace("`", "").split())
+    text = "\n".join(_COMMENT_LEAD.sub("", ln)
+                     for ln in str(text or "").splitlines())
+    return " ".join(text.replace("`", "").split())
 
 
 def _symbol_near(path, lines: list[str], symbol: str,
                  line: Optional[int]) -> bool:
     from consultants.engine import citation_linter as cl
-    sym = symbol.strip().strip("`").split("(")[0].split(".")[-1].strip()
+    raw = symbol.strip().strip("`").strip()
+    if not _IDENTIFIER.fullmatch(raw):
+        return True
+    sym = re.split(r"\.|::", raw.split("(")[0])[-1].strip()
     if not sym:
         return True
     if line is None:
@@ -340,9 +355,9 @@ def _quote_at(lines: list[str], quote: str, line: Optional[int]
     if not q:
         return True, None
     def window(lo, hi):
-        return _squash(" ".join(lines[max(0, lo):hi]))
+        return _squash("\n".join(lines[max(0, lo):hi]))
     if line is None:
-        return (q in _squash(" ".join(lines))), None
+        return (q in _squash("\n".join(lines))), None
     if q in window(line - 1 - NEAR_LINES, line + NEAR_LINES):
         return True, None
     span = max(1, len(quote.splitlines()))

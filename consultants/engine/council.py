@@ -138,7 +138,7 @@ def _record_failed_exit(recorder, role: str, round: int,
 # raw text (so it never leaks into the user-facing answer or the
 # critique the synthesizer reads), append it to the ``confidence``
 # state channel, and emit a ConfidenceUpdate event. This is what makes
-# ``interrupt_on_low_confidence`` + the xauto escalator + the M2
+# the xauto escalator + the M2
 # adversary-checkpoint gate actually fire — before this the channel
 # was fully plumbed but never written.
 

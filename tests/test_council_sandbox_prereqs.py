@@ -203,19 +203,6 @@ class TestControlLadder(unittest.TestCase):
                 build_runtime_control_delta(
                     {"tool_permissions": {"read_file": bad}})
 
-    def test_the_unwired_interrupt_policy_still_sees_an_ask(self):
-        from consultants.engine.interrupt_policy import (
-            should_interrupt_on_tool_permission,
-        )
-        state = {"runtime_control": {"tool_permissions": {
-            "write_file": "ask_human"}}}
-        self.assertIsNotNone(
-            should_interrupt_on_tool_permission(state, "write_file"))
-        state["runtime_control"]["tool_permissions"]["write_file"] = \
-            "ask_assistant"
-        self.assertIsNone(
-            should_interrupt_on_tool_permission(state, "write_file"))
-
 
 # ====================================================================== #
 # 3. lane-isolated effects

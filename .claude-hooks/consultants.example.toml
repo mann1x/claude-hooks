@@ -36,8 +36,6 @@ postgres_pool_timeout_s = 30.0
 [runtime]
 # review_before_synthesis: pause before the final answer to approve / inject
 review_before_synthesis = false
-# interrupt_on_low_confidence: opt-in HITL when synthesizer self-rates below confidence_target
-interrupt_on_low_confidence = false
 
 [store]
 # Long-term memory BaseStore for cross-lane / cross-session recall.

@@ -1730,8 +1730,8 @@ claude-consultants resume <sid> --value '{"approve": true}'
 node entry calls ``interrupt()``. ``resume`` clears the interrupt
 and schedules a ``Command(resume=value)`` re-invoke. ``--value``
 is forwarded as the resume payload (JSON-decoded if parsable,
-otherwise a literal string). A dynamic interrupt set by the
-synthesizer's low-confidence policy returns the same way.
+otherwise a literal string). ``review_before_synthesis`` (opt-in,
+``[runtime]``) parks before the synthesizer the same way.
 
 ### cancel — abort with cleanup
 

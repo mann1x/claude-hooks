@@ -6,14 +6,14 @@
 
 ## Active (3)
 
-- [ch-13](.claude-hooks/tasks/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 51m
-- [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 1m
-- [ch-12](.claude-hooks/tasks/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 37m
+- [ch-13](.claude-hooks/tasks/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 2h
+- [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 1h
+- [ch-12](.claude-hooks/tasks/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 2h
 
 ## Ready (2)
 
 - [ch-10](.claude-hooks/tasks/ch-10.md) `consultants.polykv` Council F — PolyKV, complete (opencoti + xOllama), last — 4d
-- [ch-11](.claude-hooks/tasks/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 17m
+- [ch-11](.claude-hooks/tasks/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 1m
 
 ## By plan
 

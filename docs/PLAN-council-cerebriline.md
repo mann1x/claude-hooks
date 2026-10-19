@@ -837,6 +837,7 @@ is listed here so it isn't forgotten:
 - **The one-call fold as default:** xOllama's choice, not ours.
 - **Shrink-on-retry, and global (non-keyed) calibration.**
 - **Anything that waits on a human mid-run** (§0.7). Our own unwired `consultants/engine/interrupt_policy.py` (`review_before_synthesis`, the low-confidence pause, `POST /interrupt`) points the wrong way: delete it, or keep it strictly opt-in and never default. Cancel, inject, tool approval and the adversary checkpoint stay; they are the human surfaces, not guards.
+  - **Done 2026-10-19.** `interrupt_policy.py` is deleted: no engine path called any `should_interrupt_*`, and `interrupt_on_low_confidence` was parsed, rendered and settable through `/control` but never read (removed; an old config naming it still loads, `/control` refuses it). Its one live helper, `clear_interrupt` (`POST /resume`), moved to `consultants/server/control.py`. `POST /interrupt` stays — the pause is real, out-of-band on `RunControl.request_pause()` — and so does `review_before_synthesis`, opt-in and default off.
 
 ---
 

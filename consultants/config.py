@@ -406,17 +406,12 @@ class RuntimeConfig:
       execution pauses just before the synthesizer composes the final
       answer. The HTTP ``GET /state`` endpoint exposes the partial
       research so the human can preview + inject before approving.
-    - ``interrupt_on_low_confidence`` (default ``False``) — opt-in
-      dynamic interrupt when the synthesizer's self-rating dips
-      below ``confidence_target``. Off by default because the same
-      signal normally drives xauto escalation, not a human pause.
     - ``xauto_retry_infra_lanes`` (default ``True``) — plan D9: an xauto
       run reruns, once and before the critic, the first-round researcher
       lanes that failed on infrastructure (``failure_class = infra``), as
       ``retry-lanes`` would after the run. Other tiers never do.
     """
     review_before_synthesis: bool = False
-    interrupt_on_low_confidence: bool = False
     xauto_retry_infra_lanes: bool = True
 
 
@@ -1461,9 +1456,8 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
         if "review_before_synthesis" in rt:
             base.runtime.review_before_synthesis = \
                 bool(rt["review_before_synthesis"])
-        if "interrupt_on_low_confidence" in rt:
-            base.runtime.interrupt_on_low_confidence = \
-                bool(rt["interrupt_on_low_confidence"])
+        # ``interrupt_on_low_confidence`` (removed 2026-10-19, plan §9)
+        # was never read; an old file naming it still loads.
         if "xauto_retry_infra_lanes" in rt:
             base.runtime.xauto_retry_infra_lanes = \
                 bool(rt["xauto_retry_infra_lanes"])
@@ -1938,10 +1932,6 @@ def _render(cfg: ConsultantsConfig, *,
              "approve / inject")
     L.append("review_before_synthesis = "
              f"{'true' if cfg.runtime.review_before_synthesis else 'false'}")
-    L.append("# interrupt_on_low_confidence: opt-in HITL when synthesizer "
-             "self-rates below confidence_target")
-    L.append("interrupt_on_low_confidence = "
-             f"{'true' if cfg.runtime.interrupt_on_low_confidence else 'false'}")
     L.append("# xauto_retry_infra_lanes: xauto reruns lanes that failed on "
              "infrastructure, once, before the critic")
     L.append("xauto_retry_infra_lanes = "
@@ -3051,8 +3041,7 @@ VALID_STORE_BACKENDS: tuple[str, ...] = ("memory", "pgvector", "sqlite_vec")
 #: The permission ladder, mirrored from
 #: ``claude_hooks.tool_registry.policy.LEVELS``. Duplicated rather than
 #: imported so ``consultants.config`` stays importable without
-#: ``claude_hooks`` on the path — the same reason ``interrupt_policy``
-#: avoids its LangGraph import. ``test_tool_registry`` pins the two
+#: ``claude_hooks`` on the path. ``test_tool_registry`` pins the two
 #: lists together so they cannot drift.
 VALID_PERMISSION_LEVELS: tuple[str, ...] = (
     "auto", "ask_assistant", "ask_human", "deny",

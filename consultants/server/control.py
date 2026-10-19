@@ -367,7 +367,6 @@ def build_runtime_control_delta(
       "ask_human" / "deny"]; the deprecated ``"allow"`` and ``"ask"``
       are stored as ``"auto"`` and ``"ask_human"``).
     - ``review_before_synthesis`` (bool) — toggle static interrupt.
-    - ``interrupt_on_low_confidence`` (bool) — toggle dynamic interrupt.
 
     The returned shape::
 
@@ -453,8 +452,7 @@ def build_runtime_control_delta(
                     )
                 perms[tn] = level
             out[k] = perms
-        elif k in ("review_before_synthesis",
-                   "interrupt_on_low_confidence"):
+        elif k == "review_before_synthesis":
             out[k] = bool(v)
         else:
             raise ControlInputError(
@@ -474,11 +472,9 @@ def build_interrupt_delta(
     """Build the delta for ``POST /interrupt``.
 
     Doesn't actually pause anything — it just flips the
-    ``runtime_control.pause_requested`` flag. The next node that
-    enters consults :func:`consultants.engine.interrupt_policy
-    .should_interrupt_on_user_pause` and, if the flag is set,
-    calls ``langgraph.types.interrupt(...)`` which durably parks
-    execution.
+    ``runtime_control.pause_requested`` flag, the record of the request.
+    The pause itself is out-of-band, ``RunControl.request_pause()`` in
+    ``POST /interrupt``: a running graph never re-reads this channel.
 
     ``reason`` is recorded on the runtime_mutation event so the
     transcript shows why the pause was requested.
@@ -489,6 +485,15 @@ def build_interrupt_delta(
             "pause_requested": True,
             "pause_reason": reason_str,
         }
+    }
+
+
+def clear_interrupt(state: dict) -> dict:
+    """The state delta ``POST /resume`` applies before re-entry: no
+    active interrupt, and the recorded pause request turned off."""
+    return {
+        "interrupt_state": None,
+        "runtime_control": {"pause_requested": False},
     }
 
 
@@ -517,8 +522,7 @@ def build_resume_command(
                      config={"configurable": {"thread_id": sid}})
 
     where the first update clears the ``interrupt_state`` channel
-    so the next-node-entry guard in
-    :func:`should_interrupt_before_synthesis` doesn't re-fire.
+    and the recorded pause request together (:func:`clear_interrupt`).
     """
     return InterruptResume(value=value, decision=decision or "")
 
@@ -721,6 +725,7 @@ __all__ = [
     "build_cancel_request",
     "build_inject_delta",
     "build_interrupt_delta",
+    "clear_interrupt",
     "build_resume_command",
     "build_runtime_control_delta",
     "classify_phase",

@@ -5,8 +5,7 @@ front of tool dispatch, so every provider added later inherits
 approval, denial and audit without touching its own code. See
 ``docs/PLAN-council-tool-surface.md`` for the full design.
 
-**Pure Python, no LangGraph import**, deliberately — mirroring
-``consultants/engine/interrupt_policy.py``. The gate returns a
+**Pure Python, no LangGraph import**, deliberately. The gate returns a
 *decision*; whoever owns an approval channel decides how to pose it.
 The consultants engine turns an ``ask_*`` into a LangGraph
 ``interrupt()``; ``/get-advice`` and the caliber proxy have no such

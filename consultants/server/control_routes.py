@@ -752,11 +752,10 @@ def register_control_routes(app: "FastAPI") -> None:
         decision = str(body.get("decision") or "")
         resume_cmd = build_resume_command(value, decision=decision)
 
-        # Clear the interrupt_state channel BEFORE re-entry so the
-        # next-node guard in interrupt_policy doesn't immediately
-        # re-trigger the pause. update_state respects the reducer
+        # Clear the interrupt_state channel and the recorded pause
+        # request BEFORE re-entry. update_state respects the reducer
         # for runtime_control (merge); pause_requested goes false.
-        from consultants.engine.interrupt_policy import clear_interrupt
+        from consultants.server.control import clear_interrupt
         clear_delta = clear_interrupt({})
         _safe_apply_state_delta(s, clear_delta)
 

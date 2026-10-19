@@ -149,11 +149,12 @@ class TestBuildRuntimeControlDelta(unittest.TestCase):
     def test_boolean_flags(self):
         d = build_runtime_control_delta({
             "review_before_synthesis": True,
-            "interrupt_on_low_confidence": True,
         })
         rc = d["runtime_control"]
         self.assertIs(rc["review_before_synthesis"], True)
-        self.assertIs(rc["interrupt_on_low_confidence"], True)
+        # Removed (plan §9): nothing read it, so setting it is refused.
+        with self.assertRaises(ControlInputError):
+            build_runtime_control_delta({"interrupt_on_low_confidence": True})
 
     def test_per_lane_hard_s_positive(self):
         d = build_runtime_control_delta({"per_lane_hard_s": 1800.0})
