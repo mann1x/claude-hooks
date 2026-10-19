@@ -550,14 +550,19 @@ top-level `decision` block, a decision model (TypeSafe's Jev or a local
 ```json
 "decision": {"choice": "followup", "confidence": 0.71, "confident": true,
   "probabilities": {"accept": 0.1, "followup": 0.81, "research": 0.09},
-  "model": "jev-1.13.0"}
+  "model": "jev-1.13.0",
+  "answer_confidence": {"p": 0.38, "model": "jev-1.13.0",
+    "meaning": "on real councils it ranked answers well (AUC 0.85) but runs low: …"}}
 ```
 
 Treat it as one input, never the verdict. A **confident** `followup` or
 `research` is a reason to look harder for the gap before accepting; name
 it in your rationale ("decision model: followup 0.81 — …"). A confident
 `accept` does not excuse skipping your own review. When `confident` is
-false, ignore it. Cites the engine marked `[unsupported — the cited code
+false, ignore it. `answer_confidence` (only with the `confidence` seam;
+it may come without `choice`) is the model's raw p that the answer is
+right and complete, with what that server's scores mean: read p against
+`meaning`, not against 0.5 — Jev's accepted answers averaged 0.46. Cites the engine marked `[unsupported — the cited code
 does not show this]` are claims the decision model found the cited code
 did not support — verify those first.
 
@@ -1366,8 +1371,11 @@ Read `decision` from `config show`. Off by default. Then ask:
   key itself in config; the engine reads the file at call time.
 - **Seams** — `--seams review,confidence,struggle,citations` (any
   subset). `review`: accept / followup / research on the answer, shown
-  as `decision` in `result`; `confidence`: a scored confidence beside the
-  critic's and synthesizer's own; `struggle`: one nudge to a researcher
+  as `decision` in `result`; `confidence`: advice, never an override — the
+  critic, meta-critic and synthesizer get the scored p with what the
+  server's scores mean before they rate, their own `CONFIDENCE` stays on
+  the channel, and the answer's score goes to `result` as
+  `decision.answer_confidence`; `struggle`: one nudge to a researcher
   lane that repeats itself; `citations`: flags cites whose code does not
   show the claim.
 - **Shadow** — `--shadow confidence` (any subset of the seams): asked

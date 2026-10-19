@@ -3626,6 +3626,7 @@ def critic_node(state: dict, *, chat_client, model: str,
     if shell:
         msgs = _with_command_ledger(msgs, recorder, chat_client=chat_client,
                                     model=model, state=state, role="critic")
+    msgs = _with_decision_advice(msgs, state, "critic", recorder)
     t0 = time.monotonic()
     try:
         text, pt, ct = _role_turn(
@@ -3720,9 +3721,6 @@ def critic_node(state: dict, *, chat_client, model: str,
     # Single-critic path (every base tier + xmedium/xhigh + xmax
     # without critic extras): emit the full delta as before.
     _emit_confidence(_critic_conf, source="critic", state=state)
-    _scored = _scored_critic_confidence(state, recorder)
-    if _scored is not None:
-        _critic_conf = _scored
     out = {
         "critique": text,
         "critic_decision": decision,
@@ -3798,6 +3796,7 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
         msgs = _with_command_ledger(msgs, recorder, chat_client=chat_client,
                                     model=model, state=state,
                                     role="meta_critic")
+    msgs = _with_decision_advice(msgs, state, "meta_critic", recorder)
     t0 = time.monotonic()
     try:
         text, pt, ct = _role_turn(
@@ -3847,9 +3846,6 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
     # M0: strip + emit the consolidated confidence (fanned-critic path).
     text, _meta_conf = _extract_confidence(text)
     _emit_confidence(_meta_conf, source="critic", state=state)
-    _scored = _scored_critic_confidence(state, recorder)
-    if _scored is not None:
-        _meta_conf = _scored
     # Meta-critic owns the single critic_reroutes_used increment in
     # multi-critic mode (the C parallel critics suppress their own
     # delta — see critic_node). Adds 1 if the consolidated decision
@@ -4234,6 +4230,7 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                 msgs = msgs[:-1] + [{**msgs[-1], "content": (
                     str(msgs[-1].get("content") or "") + "\n\n"
                     + held_patches.held_block(_patches, _ovl))}]
+    msgs = _with_decision_advice(msgs, state, "synthesizer", recorder)
     models_to_try: list[str] = [model] + list(fallback_models or [])
     t0 = time.monotonic()
     text: Optional[str] = None
@@ -4367,8 +4364,7 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
         log.exception(
             "citation_linter raised; using unlinted synthesizer output"
         )
-    text, _scored_conf, _review = _synthesizer_decision_seams(
-        state, text, recorder=recorder)
+    text, _review = _synthesizer_decision_seams(state, text, recorder=recorder)
     turn = RoleTurn(
         role="synthesizer", round=1, content=text,
         prompt_tokens=pt, completion_tokens=ct, duration_seconds=dt,
@@ -4389,12 +4385,7 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
         "total_prompt_tokens": pt,
         "total_completion_tokens": ct,
     }
-    # A scored confidence (plan H) stands in for the self-rating on the
-    # channel the escalator, the low-confidence interrupt and the
-    # adversary checkpoint read: it is calibrated, a self-rating is not.
-    if _scored_conf is not None:
-        out["confidence"] = [_scored_conf]
-    elif _self_conf is not None:
+    if _self_conf is not None:
         out["confidence"] = [_self_conf]
     if _review:
         out["decision_review"] = _review
@@ -4470,39 +4461,41 @@ def _struggle_watch(state: dict, prepare, *, recorder=None,
     return watch
 
 
-def _scored_critic_confidence(state: dict, recorder=None) -> Optional[float]:
-    """Plan H ``confidence`` at the critic: p that the research gathered so
-    far suffices to answer the question — what the critic's own
-    ``CONFIDENCE:`` line rates. ``None`` when off or unanswered."""
+def _with_decision_advice(msgs: list[dict], state: dict, role: str,
+                          recorder=None) -> list[dict]:
+    """Plan H ``confidence`` as advice (owner, 2026-10-15: never an
+    override): the decision model's p that the research so far suffices,
+    labelled with what its scores mean, appended for the judge to weigh
+    before it rates. Its own ``CONFIDENCE:`` stays on the channel.
+    Unchanged when off, shadowed or unanswered."""
     from consultants.engine import decision
-    if not decision.enabled(state, "confidence"):
-        return None
+    if not decision.enabled(state, "confidence") or not msgs \
+            or msgs[-1].get("role") != "user":
+        return msgs
     research = state.get("research") or []
     evidence = "\n\n".join(str(r) for r in research[-4:] if r)
-    if not evidence.strip():
-        return None
     try:
-        scored = decision.score_evidence(state, state.get("question") or "",
-                                         evidence, recorder=recorder)
-    except Exception:  # pragma: no cover
-        log.exception("critic decision seam raised; ignored")
-        return None
-    if decision.shadowed(state, "confidence"):
-        return None             # recorded by the seam; the self-rating stands
-    if scored is not None:
-        _emit_confidence(scored, source="decision", state=state)
-    return scored
+        note = decision.evidence_advice(state, state.get("question") or "",
+                                        evidence, role=role,
+                                        recorder=recorder)
+    except Exception:  # pragma: no cover — a seam never fails the role
+        log.exception("%s decision seam raised; ignored", role)
+        return msgs
+    if not note:
+        return msgs
+    return msgs[:-1] + [{**msgs[-1], "content": (
+        str(msgs[-1].get("content") or "") + "\n\n" + note)}]
 
 
 def _synthesizer_decision_seams(state: dict, text: str, *, recorder=None
-                                ) -> tuple[str, Optional[float],
-                                           Optional[dict]]:
+                                ) -> tuple[str, Optional[dict]]:
     """Plan H at the synthesizer: semantic citation check (``citations``),
-    then one call for ``review`` + ``confidence``. Each seam is a no-op
-    when off or when the decision model fails."""
+    then one call for ``review`` + ``confidence``: the recommendation and
+    the answer's score, for the reviewer. Each seam is a no-op when off or
+    when the decision model fails."""
     from consultants.engine import decision
     if decision.settings(state) is None or not (text or "").strip():
-        return text, None, None
+        return text, None
     try:
         if decision.enabled(state, "citations"):
             from consultants.engine.citation_linter import (
@@ -4526,11 +4519,13 @@ def _synthesizer_decision_seams(state: dict, text: str, *, recorder=None
                                      text, recorder=recorder)
     except Exception:  # pragma: no cover — a seam never fails the node
         log.exception("decision seams raised; answer kept as is")
-        return text, None, None
-    scored = got.get("confidence")
-    if scored is not None:
-        _emit_confidence(scored, source="decision", state=state)
-    return text, scored, got.get("recommendation")
+        return text, None
+    # The answer's score goes to the reviewer with the recommendation; the
+    # channel keeps the synthesizer's own rating (advice, never override).
+    review = dict(got.get("recommendation") or {})
+    if got.get("answer_confidence"):
+        review["answer_confidence"] = got["answer_confidence"]
+    return text, review or None
 
 
 def adversary_node(state: dict, *, chat_client, model: str,

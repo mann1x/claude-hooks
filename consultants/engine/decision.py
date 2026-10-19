@@ -12,9 +12,13 @@ Seams (``[decision] seams``):
 
 ``review``      :func:`review_answer` — accept / followup / research on the
                 council's answer, carried to the consultancy review loop.
-``confidence``  :func:`review_answer` too (same call, one more question):
-                a scored confidence beside the synthesizer's self-rating;
-                :func:`score_evidence` for the critic.
+``confidence``  advice, never an override (owner, 2026-10-15):
+                :func:`evidence_advice` gives the critic, meta-critic and
+                synthesizer the scored p, labelled with what that server's
+                scores mean (:data:`SCORE_MEANINGS`), before they rate;
+                their own ``CONFIDENCE:`` stays on the channel.
+                :func:`review_answer` scores the finished answer for the
+                reviewer (``answer_confidence``).
 ``struggle``    :func:`stuck` — is a lane repeating itself without new
                 information?
 ``citations``   :func:`check_citations` — does the quoted code support the
@@ -126,9 +130,10 @@ def _record(recorder, *, seam, role, round, lane_idx, model, resp, error,
 def review_answer(state: dict, question: str, answer: str, *,
                   recorder=None, transport=None) -> dict:
     """The synthesizer's seams in one call: ``review`` (a recommendation)
-    and ``confidence`` (p that the answer is right and complete). Returns
-    ``{"recommendation": {...}?, "confidence": float?}`` — only what was
-    asked and answered."""
+    and ``confidence`` (p that the answer is right and complete, for the
+    reviewer, never the channel). Returns ``{"recommendation": {...}?,
+    "answer_confidence": {p, model, meaning}?}`` — only what was asked and
+    answered."""
     questions: dict[str, dict] = {}
     if enabled(state, "review"):
         questions["next"] = dc.choice(
@@ -163,26 +168,84 @@ def review_answer(state: dict, question: str, answer: str, *,
     sound = resp.answers.get("sound")
     if isinstance(sound, dict) and "noul" in sound \
             and not shadowed(state, "confidence"):
-        out["confidence"] = round(max(0.0, min(1.0, float(sound["noul"]))), 4)
+        p = round(max(0.0, min(1.0, float(sound["noul"]))), 4)
+        out["answer_confidence"] = {"p": p, "model": resp.model,
+                                    "meaning": score_meaning(resp.model)}
     return out
 
 
 def score_evidence(state: dict, question: str, evidence: str, *,
-                   recorder=None, transport=None) -> Optional[float]:
-    """The critic's confidence seam: p that ``evidence`` is sufficient and
-    correct to answer ``question`` (what the critic's own
-    ``CONFIDENCE:`` line rates)."""
+                   role: str = "critic", recorder=None, transport=None
+                   ) -> Optional[float]:
+    """p that ``evidence`` is sufficient and correct to answer
+    ``question`` (what a judge's own ``CONFIDENCE:`` line rates)."""
+    return _evidence_score(state, question, evidence, role=role,
+                           recorder=recorder, transport=transport)[0]
+
+
+def _evidence_score(state, question, evidence, *, role, recorder=None,
+                    transport=None) -> tuple[Optional[float], str]:
     resp = ask(state, "confidence",
                {"question": dc.bound_text(question),
                 "evidence": dc.bound_text(evidence)},
                {"enough": dc.noul(
                    "Is `evidence` sufficient and correct to answer "
                    "`question` without more research?")},
-               recorder=recorder, role="critic", transport=transport)
+               recorder=recorder, role=role, transport=transport)
     a = (resp.answers.get("enough") if resp else None) or {}
     if "noul" not in a:
-        return None
-    return round(max(0.0, min(1.0, float(a["noul"]))), 4)
+        return None, ""
+    return (round(max(0.0, min(1.0, float(a["noul"]))), 4),
+            resp.model or endpoint(settings(state) or {}).model)
+
+
+#: What each server's scores were measured to mean on real councils (plan
+#: H6, 2026-10-15, 20 review cases). The owner (2026-10-19): the role gets
+#: the raw score labelled with this, no fitted mapping. First prefix wins.
+_LOCAL_MEANING = ("on real councils it barely ranked answers (AUC "
+                  "0.56-0.74) and rated wrong answers sound (mean p "
+                  "0.69-0.75)")
+SCORE_MEANINGS: tuple[tuple[str, str], ...] = (
+    ("jev", "on real councils it ranked answers well (AUC 0.85) but runs "
+            "low: answers the reviewer accepted averaged p 0.46, wrong "
+            "ones 0.20"),
+    ("tev1", _LOCAL_MEANING),
+    ("nimble", _LOCAL_MEANING),
+    ("clef-flash", _LOCAL_MEANING),
+)
+UNMEASURED_MEANING = "its scores have not been measured on councils"
+ADVICE_HEADER = "DECISION-MODEL ADVICE (an input to weigh, not a verdict)"
+EVIDENCE_ABOUT = ("the evidence gathered so far is sufficient and correct "
+                  "to answer the question without more research")
+
+
+def score_meaning(model: str) -> str:
+    m = (model or "").lower()
+    return next((t for p, t in SCORE_MEANINGS if m.startswith(p)),
+                UNMEASURED_MEANING)
+
+
+def advice_note(model: str, p: float, about: str) -> str:
+    return (f"{ADVICE_HEADER}\nThe decision model `{model}` gives p = "
+            f"{p:.2f} that {about}. What its scores mean: "
+            f"{score_meaning(model)}. Your own CONFIDENCE line stays yours: "
+            "weigh this score or set it aside, and say so when it changes "
+            "your call.")
+
+
+def evidence_advice(state: dict, question: str, evidence: str, *,
+                    role: str, recorder=None, transport=None) -> str:
+    """The ``confidence`` seam as advice (owner, 2026-10-15: never an
+    override): the scored p, labelled, for the role to read before it
+    rates. ``""`` when off, shadowed (asked and recorded only) or
+    unanswered."""
+    if not enabled(state, "confidence") or not (evidence or "").strip():
+        return ""
+    p, model = _evidence_score(state, question, evidence, role=role,
+                               recorder=recorder, transport=transport)
+    if p is None or shadowed(state, "confidence"):
+        return ""
+    return advice_note(model, p, EVIDENCE_ABOUT)
 
 
 def stuck(state: dict, goal: str, recent_calls: list[str], *,
@@ -245,4 +308,6 @@ def check_citations(state: dict, items: list[dict], *, recorder=None,
 
 
 __all__ = ["settings", "enabled", "endpoint", "ask", "review_answer",
-           "score_evidence", "stuck", "check_citations", "REVIEW_OPTIONS"]
+           "score_evidence", "evidence_advice", "advice_note",
+           "score_meaning", "SCORE_MEANINGS", "ADVICE_HEADER", "stuck",
+           "check_citations", "REVIEW_OPTIONS"]

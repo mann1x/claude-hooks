@@ -1770,7 +1770,7 @@ or when the call fails:
 | seam | where | what changes |
 |---|---|---|
 | `review` | after the synthesizer | an accept / followup / research recommendation on the answer, in `show` as `decision` (and `metadata.json`) for the review loop |
-| `confidence` | critic, meta-critic, synthesizer | a scored p beside the role's `CONFIDENCE:` line; the scored value is what the xauto escalator, the low-confidence interrupt and the adversary checkpoint read |
+| `confidence` | critic, meta-critic, synthesizer | advice, never an override (owner, 2026-10-15/19): before the role rates, its prompt gets a `DECISION-MODEL ADVICE` block with the raw p that the research suffices, labelled with what that server's scores were measured to mean (`decision.SCORE_MEANINGS`, from H6: Jev ranks well but its accepted answers averaged 0.46; the local models barely rank). The role's own `CONFIDENCE:` stays on the channel the xauto escalator, the low-confidence interrupt and the adversary checkpoint read. The finished answer's score goes to `result` as `decision.answer_confidence` for the reviewer |
 | `struggle` | researcher loop | every 6 tool results, *is this lane repeating itself?*; a confident yes (high-stakes floor) adds one harness nudge per lane |
 | `citations` | after the CitationLinter | *does the cited code show what the sentence claims?*; a confident no annotates the cite `[unsupported — the cited code does not show this]` |
 
@@ -1798,8 +1798,8 @@ claude-consultants config set-decision --enabled off
 ```
 
 **Shadow.** A seam in `[decision] shadow` is asked and recorded exactly
-as an acting one, and its answer is then dropped: no scored confidence
-on the channel, no recommendation in `result`, no struggle nudge, no
+as an acting one, and its answer is then dropped: no advice block in the
+prompt, no `answer_confidence`, no recommendation in `result`, no struggle nudge, no
 citation note. Shadow wins over `seams`. The recorded `decision` events
 carry `shadow`, and `benchmarks/consultants/mine_decision_cases.py`
 pairs each answer's live scores with what the reviewer did next (a

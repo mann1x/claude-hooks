@@ -706,7 +706,7 @@ consultants skill and the council, a precious addition". Cerebriline
 | H2 | **Config** `[decision]` (enabled, url, model, key_file, floor 0.6, high_stakes_floor 0.85, timeout_s 15, seams); off by default, no host defaults; seeded as `runtime_control.decision` only when on, with the key file's path, never the key; `claude-consultants config set-decision`, `claude-consultants decision-models` | done |
 | H3 | **Seams** `consultants/engine/decision.py`, every one a no-op when off or failed: `review` (accept / followup / research on the final answer → `decision_review` state → `ConsultationResult.decision` → `show`), `confidence` (scored p beside the critic's and synthesizer's `CONFIDENCE:` line; the scored value goes on the channel the escalator, low-confidence interrupt and adversary checkpoint read), `struggle` (stuck-vs-progressing every 6 tool results; one harness nudge per lane at the high-stakes floor), `citations` (does the cited code support the claim, after the CitationLinter's existence checks; `[unsupported — …]` annotation) | done |
 | H4 | **Bench** `benchmarks/consultants/decision_bench.py` over `questions/decision/cases.json` (25 council-shaped cases) | done, 2026-10-14 |
-| H5 | The `/consultants` review loop reads `decision` from `show` as one input to accept / follow-up | skill text |
+| H5 | The `/consultants` review loop reads `decision` from `show` as one input to accept / follow-up | done — skill text, incl. `answer_confidence` (2026-10-19) |
 | H6 | Re-bench on cases mined from real `transcript.db` councils before any default changes; floors tuned per server (TypeSafe's and Ollama's confidence differ in definition) | done, 2026-10-15 — `mine_decision_cases.py`, report below; the `confidence` mapping per server is open |
 
 Owner decisions (2026-10-14): **Jev cloud for every seam for now** ("I
@@ -760,6 +760,16 @@ acts. First, `[decision] shadow` (built 2026-10-15) asks and records the
 score on live councils without acting, so the live scores can be read
 against the reviewer's next move (`mine_decision_cases.py`: follow-ups
 and `accept` as labels, `live` scores per answer).
+
+**Built (2026-10-19), owner: raw score, labelled, no fitted mapping.**
+`confidence` is now advice: `decision.evidence_advice()` scores the
+research before the critic, meta-critic and synthesizer rate and appends a
+`DECISION-MODEL ADVICE` block naming the model, the p and what that
+server's scores mean (`SCORE_MEANINGS`, the H6 numbers above); the role's
+own `CONFIDENCE:` stays on the channel. The finished answer's score goes to
+the reviewer as `decision.answer_confidence`. The per-server mapping is
+closed by that ruling: the label carries the scale instead of a fit. The
+configs keep `confidence` in shadow until the owner moves it to `seams`.
 
 **Exit H:** the seams are inert when off (parity tests); every failure path
 keeps today's behaviour; the bench is recorded; H6 before any default

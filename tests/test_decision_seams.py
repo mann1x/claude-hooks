@@ -114,36 +114,74 @@ def test_review_and_confidence_share_one_call(monkeypatch):
     assert set(fake.calls[0]["questions"]) == {"next", "sound"}
     assert out["recommendation"]["choice"] == "followup"
     assert out["recommendation"]["confident"] is True
-    assert out["confidence"] == 0.2
+    assert "confidence" not in out                  # never the channel value
+    assert out["answer_confidence"]["p"] == 0.2
+    assert "AUC 0.85" in out["answer_confidence"]["meaning"]
 
 
-def test_synthesizer_seams_put_the_scored_confidence_on_the_channel(
+def test_synthesizer_seams_give_the_answer_score_to_the_reviewer(
         monkeypatch):
     monkeypatch.setattr(dc, "evaluate", Fake({
         "next": {"type": "choice", "choice": "accept", "confidence": 0.9,
                  "probabilities": {"accept": 0.95}},
         "sound": {"type": "noul", "noul": 0.0}}))
-    text, scored, review = council._synthesizer_decision_seams(
+    emitted = []
+    monkeypatch.setattr(council, "_emit_confidence",
+                        lambda s, **kw: emitted.append(s))
+    text, review = council._synthesizer_decision_seams(
         _state(seams=("review", "confidence")), "answer")
-    assert text == "answer" and scored == 0.0   # a 0.0 is kept, not dropped
-    assert review["choice"] == "accept"
+    assert text == "answer" and review["choice"] == "accept"
+    assert review["answer_confidence"]["p"] == 0.0   # a 0.0 is kept
+    assert emitted == []                             # nothing on the channel
 
 
 def test_synthesizer_seams_are_inert_without_decision(monkeypatch):
     fake = Fake()
     monkeypatch.setattr(dc, "evaluate", fake)
     text = "answer with `a.py:3`"
-    assert council._synthesizer_decision_seams({}, text) == (text, None, None)
+    assert council._synthesizer_decision_seams({}, text) == (text, None)
     assert not fake.calls
 
 
-def test_critic_scored_confidence(monkeypatch):
-    monkeypatch.setattr(dc, "evaluate", Fake({
-        "enough": {"type": "noul", "noul": 0.31}}))
+def test_a_judge_gets_the_score_as_labelled_advice(monkeypatch):
+    fake = Fake({"enough": {"type": "noul", "noul": 0.31}})
+    monkeypatch.setattr(dc, "evaluate", fake)
+    msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "Q"}]
     st = _state(seams=("confidence",), research=["found the unit bug"])
-    assert council._scored_critic_confidence(st) == 0.31
-    assert council._scored_critic_confidence(
-        _state(seams=("review",), research=["x"])) is None
+    out = council._with_decision_advice(msgs, st, "critic")
+    note = out[-1]["content"]
+    assert note.startswith("Q\n\n" + decision.ADVICE_HEADER)
+    assert "p = 0.31" in note and "`jev-1.13.0`" in note
+    assert "accepted averaged p 0.46" in note       # what Jev's scale means
+    assert "CONFIDENCE line stays yours" in note
+    assert msgs[-1]["content"] == "Q"               # the input is not mutated
+    assert fake.calls[0]["questions"].keys() == {"enough"}
+    off = _state(seams=("review",), research=["x"])
+    assert council._with_decision_advice(msgs, off, "critic") is msgs
+    assert council._with_decision_advice(
+        msgs, _state(seams=("confidence",)), "critic") is msgs   # no research
+
+
+def test_score_meaning_per_server():
+    assert "AUC 0.85" in decision.score_meaning("jev-latest")
+    for m in ("tev1:latest", "nimble:latest", "clef-flash:latest"):
+        assert "barely ranked" in decision.score_meaning(m)
+    assert decision.score_meaning("other:7b") == decision.UNMEASURED_MEANING
+
+
+def test_critic_node_keeps_its_own_confidence(monkeypatch):
+    monkeypatch.setattr(dc, "evaluate", Fake({
+        "enough": {"type": "noul", "noul": 0.05}}))
+    seen = {}
+
+    def turn(chat_client, model, msgs, **kw):
+        seen["msgs"] = msgs
+        return "DECISION: ready\nCONFIDENCE: 0.8", 1, 1
+    monkeypatch.setattr(council, "_role_turn", turn)
+    st = _state(seams=("confidence",), research=["found it"], plan="1. look")
+    out = council.critic_node(st, chat_client=None, model="m")
+    assert out["confidence"] == [0.8]               # the critic's, not 0.05
+    assert "p = 0.05" in seen["msgs"][-1]["content"]
 
 
 # --- struggle ----------------------------------------------------------- #
@@ -215,7 +253,7 @@ def test_unsupported_cites_are_annotated_once(tmp_path, monkeypatch):
     monkeypatch.setattr(dc, "evaluate", Fake({
         "q0": {"type": "noul", "noul": 0.05}}))
     st = _state(seams=("citations",), cwd=str(tmp_path))
-    out, _, _ = council._synthesizer_decision_seams(st, text)
+    out, _ = council._synthesizer_decision_seams(st, text)
     assert out.count("[unsupported") == 1
     again = citation_linter.annotate_unsupported(out, ["src/net.py:2"])
     assert again == out
@@ -271,8 +309,9 @@ def test_shadow_confidence_leaves_the_channel_alone(monkeypatch):
                         lambda s, **kw: emitted.append((s, kw["source"])))
     st = _shadow(["confidence"], research=["found it"])
     assert council._synthesizer_decision_seams(st, "answer") == (
-        "answer", None, None)
-    assert council._scored_critic_confidence(st) is None
+        "answer", None)
+    msgs = [{"role": "user", "content": "Q"}]
+    assert council._with_decision_advice(msgs, st, "critic") is msgs
     assert emitted == []
 
 
@@ -283,7 +322,8 @@ def test_shadow_review_gives_no_recommendation(monkeypatch):
         "sound": {"type": "noul", "noul": 0.9}}))
     out = decision.review_answer(_shadow(["review"], seams=("confidence",)),
                                  "q", "a")
-    assert out == {"confidence": 0.9}                     # confidence acts
+    assert set(out) == {"answer_confidence"}              # confidence acts
+    assert out["answer_confidence"]["p"] == 0.9
 
 
 def test_shadow_struggle_never_nudges(monkeypatch):
@@ -301,7 +341,7 @@ def test_shadow_citations_leave_the_answer_as_written(tmp_path, monkeypatch):
     text = "It backs off exponentially (`src/net.py:2`)."
     fake = Fake({"q0": {"type": "noul", "noul": 0.02}})
     monkeypatch.setattr(dc, "evaluate", fake)
-    out, _, _ = council._synthesizer_decision_seams(
+    out, _ = council._synthesizer_decision_seams(
         _shadow(["citations"], cwd=str(tmp_path)), text)
     assert fake.calls and out == text
 
@@ -309,8 +349,12 @@ def test_shadow_citations_leave_the_answer_as_written(tmp_path, monkeypatch):
 def test_shadow_wins_over_seams(monkeypatch):
     monkeypatch.setattr(dc, "evaluate", Fake({
         "enough": {"type": "noul", "noul": 0.2}}))
+    fake = Fake({"enough": {"type": "noul", "noul": 0.2}})
+    monkeypatch.setattr(dc, "evaluate", fake)
     st = _shadow(["confidence"], seams=("confidence",), research=["x"])
-    assert council._scored_critic_confidence(st) is None
+    msgs = [{"role": "user", "content": "Q"}]
+    assert council._with_decision_advice(msgs, st, "critic") is msgs
+    assert fake.calls                                # asked and recorded
 
 
 def test_set_decision_shadow(tmp_path, monkeypatch):
@@ -325,3 +369,35 @@ def test_set_decision_shadow(tmp_path, monkeypatch):
     args = cli.build_parser().parse_args(
         ["config", "set-decision", "--shadow", "confidence"])
     assert args.shadow == "confidence"
+
+
+def test_synthesizer_node_keeps_its_own_confidence(monkeypatch):
+    monkeypatch.setattr(dc, "evaluate", Fake({
+        "enough": {"type": "noul", "noul": 0.05},
+        "sound": {"type": "noul", "noul": 0.07}}))
+    seen = {}
+
+    def turn(chat_client, model, msgs, **kw):
+        seen["msgs"] = msgs
+        return "The answer.\nCONFIDENCE: 0.9", 1, 1
+    monkeypatch.setattr(council, "_role_turn", turn)
+    st = _state(seams=("confidence",), research=["found it"], plan="1. look")
+    out = council.synthesizer_node(st, chat_client=None, model="m")
+    assert out["confidence"] == [0.9]               # its own, not 0.07
+    assert "p = 0.05" in seen["msgs"][-1]["content"]
+    assert out["decision_review"]["answer_confidence"]["p"] == 0.07
+
+
+def test_meta_critic_node_gets_the_advice(monkeypatch):
+    monkeypatch.setattr(dc, "evaluate", Fake({
+        "enough": {"type": "noul", "noul": 0.12}}))
+    seen = {}
+
+    def turn(chat_client, model, msgs, **kw):
+        seen["msgs"] = msgs
+        return "DECISION: ready\nCONFIDENCE: 0.7", 1, 1
+    monkeypatch.setattr(council, "_role_turn", turn)
+    st = _state(seams=("confidence",), research=["found it"], plan="1. look")
+    out = council.meta_critic_node(st, chat_client=None, model="m")
+    assert out["confidence"] == [0.7]
+    assert "p = 0.12" in seen["msgs"][-1]["content"]
