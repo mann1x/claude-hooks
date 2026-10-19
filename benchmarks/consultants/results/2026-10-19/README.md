@@ -46,5 +46,24 @@ decides; nothing was flipped.
 
 ## C §11.2 — compaction message placement (`compaction-v2/`)
 
-`compaction_bench.py`, all five arms × 4 trials, qwen3.6 27B on eleven2go
-xOllama. See its `report.md` once written.
+`compaction_bench.py` task v2, all five arms × 4 trials, qwen3.6 27B on
+eleven2go xOllama, window pinned at 32,768, commit 5b60e8a. Every trial
+folded 3+ times except two.
+
+| arm | fixed | decisecond unit | ×100 fix | ticket |
+|---|---|---|---|---|
+| reduced/system | 0/4 | 2/4 | 0/4 | 4/4 |
+| reduced/user | 0/4 | 0/4 | 0/4 | 4/4 |
+| full/system | 2/4 | 3/4 | 2/4 | 4/4 |
+| full/user | 1/4 | 1/4 | 1/4 | 1/4 |
+| basic/system | 1/4 | 1/4 | 1/4 | 3/4 |
+
+**Placement:** `system` is at least as good as `user` in both flows (full
+2/4 vs 1/4; reduced 0/4 vs 0/4 but 2/4 vs 0/4 on the unit). n = 4, so this
+is weak evidence, and it points the same way as the default: keep `system`.
+
+**Not asked, but found:** the default `reduced` flow fixed 0 of 8 trials,
+below `full` (3/8) and below `basic` (no model call, 1/4). Its replay
+keeps the follow-up ticket (8/8) but loses the once-readable ×100
+conversion. That puts §11.1 (reduced by default, 2026-10-10) back in front
+of the owner; nothing was changed.
