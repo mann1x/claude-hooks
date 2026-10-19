@@ -873,3 +873,45 @@ class TestCostReport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTypedArm(unittest.TestCase):
+    """Plan G6: the same critic on the typed protocol, and the cost knob."""
+
+    def test_typed_arm_hands_the_critic_its_verdict_tool(self):
+        from benchmarks.consultants.role_tools_bench import run_detect_trial
+        seen = []
+
+        class Chat:
+            def chat(self, payload):
+                seen.append([t["function"]["name"]
+                             for t in payload.get("tools") or []])
+                return {"choices": [{"message": {
+                    "role": "assistant", "content": "", "tool_calls": [{
+                        "id": "c1", "type": "function", "function": {
+                            "name": "council_verdict", "arguments": json.dumps({
+                                "decision": "ready", "why": "ok",
+                                "confidence": 0.9})}}]},
+                    "finish_reason": "tool_calls"}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 3}}
+
+        q = load_detect_questions()[0]
+        t = run_detect_trial(q, arm="tooled-typed", trial_idx=0,
+                             chat_client=Chat(), model="m")
+        self.assertFalse(t.error)
+        self.assertIn("council_verdict", seen[0])
+        self.assertIn("DECISION: ready", t.verdict)
+        t = run_detect_trial(q, arm="tooled", trial_idx=0,
+                             chat_client=Chat(), model="m")
+        self.assertNotIn("council_verdict", seen[-1])
+
+    def test_typed_knob_writes_the_protocol_block(self):
+        import tempfile
+        from benchmarks.consultants.role_tools_bench import write_arm_config
+        with tempfile.TemporaryDirectory() as d:
+            on = write_arm_config(Path(d), all_roles=True, effort="high",
+                                  typed=True).read_text()
+            self.assertIn("[protocol]\ntyped = true", on)
+            off = write_arm_config(Path(d), all_roles=True,
+                                   effort="high").read_text()
+            self.assertNotIn("[protocol]", off)

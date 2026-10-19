@@ -373,7 +373,7 @@ def run_detect_trial(q: DetectQuestion, *, arm: str, trial_idx: int,
 
     tool_specs = tool_executor = None
     n_tools = {"n": 0}
-    if arm == "tooled":
+    if arm.startswith("tooled"):
         from claude_hooks.tool_registry import (
             BuiltinToolProvider,
             GitToolProvider,
@@ -395,6 +395,9 @@ def run_detect_trial(q: DetectQuestion, *, arm: str, trial_idx: int,
         "research": [q.research],
         "research_rounds_used": 1,
     }
+    if arm.endswith("-typed"):
+        # Plan G6: the same critic on the typed protocol (council_verdict).
+        state["runtime_control"] = {"typed_protocol": True}
     t0 = time.monotonic()
     try:
         out = council.critic_node(
@@ -469,7 +472,11 @@ def summarize(trials: list[DetectTrial]) -> dict:
     """Per-arm aggregates. Precision is computed over flags, not over
     questions, so the control question carries its full weight."""
     out: dict[str, dict] = {}
-    for arm in ("untooled", "tooled"):
+    # Both M-B arms always appear (a missing one reads as zero, not as
+    # absent); any other arm (G6's ``tooled-typed``) follows.
+    arms = list(dict.fromkeys(["untooled", "tooled"]
+                              + [t.arm for t in trials]))
+    for arm in arms:
         rows = [t for t in trials if t.arm == arm and not t.error]
         caught = sum(len(t.caught) for t in rows)
         missed = sum(len(t.missed) for t in rows)
@@ -491,37 +498,43 @@ def summarize(trials: list[DetectTrial]) -> dict:
             "prompt_tokens": sum(t.prompt_tokens for t in rows),
             "completion_tokens": sum(t.completion_tokens for t in rows),
             "wall_s": round(sum(t.wall_s for t in rows), 2),
+            "completion_per_call": (round(sum(t.completion_tokens for t in rows)
+                                          / len(rows)) if rows else None),
+            "prompt_per_call": (round(sum(t.prompt_tokens for t in rows)
+                                      / len(rows)) if rows else None),
         }
     return out
 
 
 def render_report(summary: dict, trials: list[DetectTrial]) -> str:
-    u, t = summary.get("untooled", {}), summary.get("tooled", {})
+    arms = [a for a in summary
+            if summary[a].get("trials") or a in ("untooled", "tooled")]
 
     def pct(v):
         return "n/a" if v is None else f"{v * 100:.1f}%"
+
+    def row(label, key, f=lambda v: v):
+        return (f"| {label} | "
+                + " | ".join(str(f(summary.get(a, {}).get(key))) for a in arms)
+                + " |")
 
     lines = [
         "# M-B role-tools bench — Tier 1 (detection)",
         "",
         f"bench_version={BENCH_VERSION}  trials={len(trials)}",
         "",
-        "| metric | untooled | tooled |",
-        "|---|---|---|",
-        f"| recall (planted falsehoods caught) | {pct(u.get('recall'))} "
-        f"| {pct(t.get('recall'))} |",
-        f"| precision (flags that were real) | {pct(u.get('precision'))} "
-        f"| {pct(t.get('precision'))} |",
-        f"| false positives | {u.get('false_positives')} "
-        f"| {t.get('false_positives')} |",
-        f"| silent fixes (looked, knew, didn't say) | "
-        f"{u.get('silent_fixes')} | {t.get('silent_fixes')} |",
-        f"| trials reporting CORRECTIONS | {u.get('corrections_reported')} "
-        f"| {t.get('corrections_reported')} |",
-        f"| tool calls | {u.get('tool_calls')} | {t.get('tool_calls')} |",
-        f"| completion tokens | {u.get('completion_tokens')} "
-        f"| {t.get('completion_tokens')} |",
-        f"| wall (s) | {u.get('wall_s')} | {t.get('wall_s')} |",
+        "| metric | " + " | ".join(arms) + " |",
+        "|---|" + "---|" * len(arms),
+        row("recall (planted falsehoods caught)", "recall", pct),
+        row("precision (flags that were real)", "precision", pct),
+        row("false positives", "false_positives"),
+        row("silent fixes (looked, knew, didn't say)", "silent_fixes"),
+        row("trials reporting CORRECTIONS", "corrections_reported"),
+        row("tool calls", "tool_calls"),
+        row("completion tokens", "completion_tokens"),
+        row("completion tokens per trial", "completion_per_call"),
+        row("prompt tokens per trial", "prompt_per_call"),
+        row("wall (s)", "wall_s"),
         "",
         "Recall is a **lower bound**. A catch is scored two ways: the",
         "verdict names the fabricated token near a doubt word, or names",
@@ -579,6 +592,10 @@ def _argparser() -> argparse.ArgumentParser:
                    help="Tier 2: council effort tier (default high).")
     p.add_argument("--base", default="http://127.0.0.1:38095",
                    help="Tier 2: consultants engine base URL.")
+    p.add_argument("--knob", choices=("all_roles", "typed"),
+                   default="all_roles",
+                   help="Tier 2: what the two arms flip. `typed` (plan G6) "
+                        "keeps all_roles on in both arms.")
     p.add_argument("--seed-dir", default="",
                    help="Tier 2: code copied into each arm's project. "
                         "Required for --trials > 1, since arms must not "
@@ -668,7 +685,7 @@ def materialize_arm_project(base: Path, seed: Path, tag: str) -> Path:
 
 
 def run_cost_arm(*, project: Path, question: str, all_roles: bool,
-                 base: str, effort: str,
+                 base: str, effort: str, typed: bool = False,
                  timeout_s: float = 3600.0) -> dict:
     """One full council run, and what it cost.
 
@@ -681,7 +698,7 @@ def run_cost_arm(*, project: Path, question: str, all_roles: bool,
     flipped.
     """
     import subprocess
-    write_arm_config(project, all_roles=all_roles, effort=effort)
+    write_arm_config(project, all_roles=all_roles, effort=effort, typed=typed)
     # Point the CLI at the engine we were told to use. A long-lived
     # server caches modules, so an A/B against one started before the
     # change under test silently measures the old code — the reason
@@ -699,7 +716,8 @@ def run_cost_arm(*, project: Path, question: str, all_roles: bool,
     except json.JSONDecodeError:
         payload = {"ok": False, "raw": (proc.stdout or "")[-2000:]}
     return {
-        "all_roles": all_roles, "effort": effort, "wall_s": round(wall, 1),
+        "all_roles": all_roles, "typed": typed, "effort": effort,
+        "wall_s": round(wall, 1),
         "ok": bool(payload.get("ok")), "sid": payload.get("sid"),
         "returncode": proc.returncode,
         "stderr": (proc.stderr or "")[-1000:],
@@ -708,7 +726,7 @@ def run_cost_arm(*, project: Path, question: str, all_roles: bool,
 
 
 def write_arm_config(project: Path, *, all_roles: bool,
-                     effort: str) -> Path:
+                     effort: str, typed: bool = False) -> Path:
     """Write the isolated per-arm project config."""
     d = project / ".claude-hooks"
     d.mkdir(parents=True, exist_ok=True)
@@ -737,7 +755,9 @@ def write_arm_config(project: Path, *, all_roles: bool,
         "[role.tool_executor]\nenabled = false\n"
         "\n[tools]\n"
         "enabled = true\n"
-        f"all_roles = {'true' if all_roles else 'false'}\n",
+        f"all_roles = {'true' if all_roles else 'false'}\n"
+        # Plan G6: the typed-protocol arm.
+        + ("\n[protocol]\ntyped = true\n" if typed else ""),
         encoding="utf-8")
     return path
 
@@ -808,6 +828,9 @@ def _render_cost_multi(arms, offs, ons, vals) -> str:
         row("tool calls", "tool_calls"),
         f"| wall (s) | {_mean([a.get('wall_s') for a in offs]):.0f} "
         f"| {_mean([a.get('wall_s') for a in ons]):.0f} |  |",
+        f"| `[unverified` notes in the answer | "
+        f"{_mean([a.get('unverified_in_answer') for a in offs]):.1f} "
+        f"| {_mean([a.get('unverified_in_answer') for a in ons]):.1f} |  |",
         "",
         "## Correctness — did the stale doc reach the answer?",
         "",
@@ -827,7 +850,8 @@ def _render_cost_multi(arms, offs, ons, vals) -> str:
                     f"{got.count('absent')}")
         lines.append(f"| {label} | {tally(offs)} | {tally(ons)} |")
 
-    lines += ["", "## Per role (mean LLM calls / mean completion tokens)", "",
+    lines += ["", "## Per role (mean LLM calls / mean completion tokens / "
+              "prompt tokens per call / completion tokens per call)", "",
               "| role | off | on |", "|---|---|---|"]
     roles = sorted({r for a in arms
                     for r in (a.get("totals") or {}).get("by_role", {})})
@@ -836,11 +860,16 @@ def _render_cost_multi(arms, offs, ons, vals) -> str:
             return _mean([(a.get("totals") or {}).get("by_role", {})
                           .get(r, {}).get(k, 0) for a in group
                           if a.get("totals")])
+        def pc(group, k):
+            c = per(group, "calls")
+            return (per(group, k) / c) if c else 0
         lines.append(
             f"| {r} | {per(offs, 'calls'):.1f} / "
-            f"{per(offs, 'completion_tokens'):.0f} "
+            f"{per(offs, 'completion_tokens'):.0f} / "
+            f"{pc(offs, 'prompt_tokens'):.0f} / {pc(offs, 'completion_tokens'):.0f} "
             f"| {per(ons, 'calls'):.1f} / "
-            f"{per(ons, 'completion_tokens'):.0f} |")
+            f"{per(ons, 'completion_tokens'):.0f} / "
+            f"{pc(ons, 'prompt_tokens'):.0f} / {pc(ons, 'completion_tokens'):.0f} |")
     return "\n".join(lines) + "\n"
 
 
@@ -857,21 +886,25 @@ def render_cost_report(arms: list[dict]) -> str:
     Means, plus the per-trial spread, because a mean over 3 high-variance
     council runs can hide a split that reverses the sign.
     """
-    def vals(all_roles, k):
+    knob = (arms[0].get("knob") if arms else None) or "all_roles"
+
+    def vals(on, k):
         return [(a.get("totals") or {}).get(k) or 0 for a in arms
-                if a.get("all_roles") is all_roles and a.get("totals")]
+                if bool(a.get(knob)) is on and a.get("totals")]
 
     def g(a, k, d=0):
         return (a.get("totals") or {}).get(k, d) or 0
 
-    offs = [a for a in arms if not a.get("all_roles")]
-    ons = [a for a in arms if a.get("all_roles")]
+    offs = [a for a in arms if not a.get(knob)]
+    ons = [a for a in arms if a.get(knob)]
     off = offs[0] if offs else {}
     on = ons[0] if ons else {}
     multi = len(offs) > 1 or len(ons) > 1
 
     if multi:
-        return _render_cost_multi(arms, offs, ons, vals)
+        return _render_cost_multi(arms, offs, ons, vals).replace(
+            "all_roles off", f"{knob} off").replace(
+            "all_roles on", f"{knob} on")
 
     def delta(k):
         a, b = g(off, k), g(on, k)
@@ -925,31 +958,35 @@ def main(argv: Optional[list[str]] = None) -> int:
         project = Path(args.project).resolve()
         seed = Path(args.seed_dir).resolve() if args.seed_dir else None
         arms: list[dict] = []
+        typed_knob = args.knob == "typed"
         if args.dry_run:
-            for all_roles in (False, True):
+            for on in (False, True):
                 p = (materialize_arm_project(
-                    project, seed, f"dry-{'on' if all_roles else 'off'}")
+                    project, seed, f"dry-{'on' if on else 'off'}")
                     if seed else project)
-                path = write_arm_config(p, all_roles=all_roles,
-                                        effort=args.effort)
-                print(f"[dry-run] wrote {path} (all_roles={all_roles})")
+                path = write_arm_config(
+                    p, all_roles=True if typed_knob else on,
+                    effort=args.effort, typed=on if typed_knob else False)
+                print(f"[dry-run] wrote {path} ({args.knob}={on})")
             return 0
 
         from concurrent.futures import ThreadPoolExecutor
 
-        def one(trial: int, all_roles: bool) -> dict:
-            tag = f"t{trial}-{'on' if all_roles else 'off'}"
+        def one(trial: int, on: bool) -> dict:
+            tag = f"t{trial}-{'on' if on else 'off'}"
             proj = (materialize_arm_project(project, seed, tag)
                     if seed else project)
             arm = run_cost_arm(project=proj, question=args.question,
-                               all_roles=all_roles, base=args.base,
-                               effort=args.effort)
+                               all_roles=True if typed_knob else on,
+                               typed=on if typed_knob else False,
+                               base=args.base, effort=args.effort)
             arm.update(question=args.question, trial=trial, tag=tag,
-                       project=str(proj))
+                       project=str(proj), knob=args.knob)
             if arm.get("sid"):
                 arm["totals"] = cost_totals(arm["sid"], proj)
-                arm["facts"] = score_answer(
-                    (arm.get("payload") or {}).get("summary_markdown") or "")
+                answer = (arm.get("payload") or {}).get("summary_markdown") or ""
+                arm["facts"] = score_answer(answer)
+                arm["unverified_in_answer"] = answer.count("[unverified")
             return arm
 
         for trial in range(args.trials):
@@ -965,9 +1002,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                     try:
                         arm = fut.result()
                     except Exception as e:  # keep the sibling's data
-                        arm = {"all_roles": ar, "trial": trial, "ok": False,
+                        arm = {args.knob: ar, "knob": args.knob,
+                               "trial": trial, "ok": False,
                                "error": f"{type(e).__name__}: {e}"}
-                    print(f"trial {trial} all_roles={arm['all_roles']}: "
+                    print(f"trial {trial} {args.knob}={arm.get(args.knob)}: "
                           f"ok={arm.get('ok')} wall={arm.get('wall_s')}s "
                           f"sid={arm.get('sid')} facts={arm.get('facts')}")
                     arms.append(arm)

@@ -690,6 +690,13 @@ follow-up (`follow_up_route` node), `--tried`. "Unknown inject targets are
 rejected loudly" was already true (`build_inject_delta`). The coder's G5
 items wait for a coder verify step. G6 bench next.
 
+**G6 measured (2026-10-19, `benchmarks/consultants/results/2026-10-19/`).**
+Detect tier (critic, 36 trials): recall 100% both, precision 34.9% → 38.5%,
+completion +24%. Cost tier (full council, high, 3 trials): typed on +17%
+calls, +59% prompt and +64% completion tokens, wall flat, one stale-doc
+fact wrong (11/12 against 12/12). The default stays `typed = false`
+pending the owner's decision. Two G4 false notes found (bug-1086).
+
 **Exit G:**
 - the bench is recorded;
 - the typed path passes the parity cohort when off;

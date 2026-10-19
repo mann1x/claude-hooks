@@ -7,7 +7,7 @@ area: consultants.sandbox
 tags: [council, cerebriline]
 plan: docs/PLAN-council-cerebriline.md
 created: 2026-10-14T13:22:15Z
-updated: 2026-10-18T13:41:20Z
+updated: 2026-10-19T06:21:54Z
 sessions: [0a7a5bf4]
 ---
 
@@ -22,6 +22,7 @@ Milestone E: E1 prerequisite fixes (runtime_permissions, control.py enum, per-la
 - [ ] Windows smoke passes
 
 ## Log
+- 2026-10-19 06:21Z [0a7a5bf4] E8 built 5b60e8a (2026-10-19): measured hardening drop-in <unit>.d/hardening.conf via scripts/engine_hardening.py, written by deploy step_sandbox, checked by verify check_engine_hardening. ProtectSystem=full (strict stops unit), no ProtectHostname (sandbox preflight refuses). Not deployed yet; this host's verify will FAIL until the next deploy writes it. Landlock + VM backend remain optional/later.
 - 2026-10-18 13:41Z [0a7a5bf4] Run-5 grade (#1641) fixes deployed at f43a445; the caps are in 596cf2b and the glm-5.3-flash defaults in 2fb31d4. Researcher caps high/xhigh 40/32, max 80/72 (shell: 60/52, 120/112); coder workspace 60. Edge-case matrix rows with no run that reached the code are marked "not tested", and cited rows are claim-audited. The critic checks case labels against the runs. CitationLinter resolves a short path by unique suffix. Open, user's call: gap 2 (known findings carried across councils), gap 5 (the critic re-ranks the deliberate read ledger every run). Run 6 requested (#1642).
 - 2026-10-18 12:57Z [0a7a5bf4] 2026-10-18 [0a7a5bf4] Run-4 grade (#1636) fixed and deployed at c2c985e (DEPLOY OK). Researcher caps: high/xhigh 30/24, max 60/54; shell bonus max(10, i//2), so xhigh + shell = 45/39. Coder: 12, or 40 with its workspace. Critic ready is held when no run reached the code. Researcher report_check (once). Synthesizer claim audit (synthesizer:audit): not shown / contradicted items move to Unverified. test_reruns follows cp/mv and catches failures hidden by a pipe. glm-5.3-flash inherits glm-5.2's stall thresholds. Dashboard (dfa8454, 2081cb8) is live as well. Ollama mailed; waiting on run 5.
 - 2026-10-18 11:50Z [0a7a5bf4] Run-3 grade (mail #1633) fixed + deployed in a7eabe8. COMMANDS numbers each command C<n> and shows the lines a probe printed. A run that never reached the code is not evidence. Synthesizer answer audited in code: a ranked defect cites a run; every run is cited or listed under Dropped; enforce() moves or lists what is still owed. The critic gets the runs. Sandbox changes flags held tests that never ran green. Also deployed: the read-only council dashboard on the engine, LAN via [service] dashboard_host (ae59085, 991e4b2). Waiting on ollama for run 4.
