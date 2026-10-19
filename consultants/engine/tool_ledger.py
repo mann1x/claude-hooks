@@ -303,10 +303,27 @@ def render(entries: list[Entry]) -> str:
     return "\n".join(render_entry(e) for e in entries)
 
 
-def render_key(entries: list[Entry]) -> str:
+def render_key(entries: list[Entry], max_chars: Optional[int] = None) -> str:
     """What the writer cites against: which call is which, and nothing
-    else — it has the conversation for the results."""
-    return "\n".join(f"{e.index}. {e.tool}  {e.input}" for e in entries)
+    else — it has the conversation for the results.
+
+    Over ``max_chars`` every input is cut to the same share and no call is
+    left out: a key that drops a call renumbers the rest, and the writer,
+    who reads every call of the fold, then cites by counting (fork
+    ``renderToolLedgerKey``, 46bafaeb71)."""
+    heads = [f"{e.index}. {e.tool}" for e in entries]
+    full = sum(len(h) + 2 + len(e.input) + 1 for h, e in zip(heads, entries))
+    allowance = None
+    if max_chars is not None and full > max_chars:
+        allowance = max(0, (max_chars - sum(len(h) + 3 for h in heads))
+                        // max(1, len(entries)))
+    lines = []
+    for h, e in zip(heads, entries):
+        inp = e.input
+        if allowance is not None and len(inp) > allowance:
+            inp = inp[:allowance - 1] + "…" if allowance > 1 else ""
+        lines.append(f"{h}  {inp}" if inp else h)
+    return "\n".join(lines)
 
 
 _CITATION = re.compile(r"\[#(\d+)(?:\s*[-–—]\s*#?(\d+))?\]")

@@ -463,6 +463,11 @@ def _ensure_files(text: str, dropped: list[dict]) -> str:
 #: a long tool loop.
 SUMMARY_MIN_OUTPUT_TOKENS = 4_096
 
+#: The most of the writer's input the call key may take before its inputs
+#: are cut (fork TOOL_LEDGER_KEY_SHARE). A long fold's key reached 23,000
+#: characters in the fork's replay.
+KEY_SHARE = 0.1
+
 
 def build_writer_request(prompt: str, conversation: str, *,
                          previous_summary: str = "",
@@ -798,7 +803,11 @@ def write_digest(scope: Scope, dropped: list[dict], *, target_tokens: int,
                    for d in (previous.ledger if previous else [])]
         ledger = tool_ledger.merge(tool_ledger.evict(carried, ledger_budget),
                                    tool_ledger.build(dropped))
-    key = tool_ledger.render_key(ledger)
+    # Bounded by shortening inputs, never by leaving calls out, at a tenth
+    # of the writer's input (fork TOOL_LEDGER_KEY_SHARE); it is part of the
+    # fixed request the transcript budget is measured against.
+    key = tool_ledger.render_key(ledger, max(
+        ledger_budget, int((context_tokens or input_budget) * 3 * KEY_SHARE)))
 
     full_flow = s.flow == "full" and tail
     prompt = P.REPLAY_PROMPT if tail else P.FULL_PROMPT
@@ -861,14 +870,15 @@ def write_digest(scope: Scope, dropped: list[dict], *, target_tokens: int,
 
     spliced = tool_ledger.splice(replay, ledger) if (replay and ledger) else None
     final = spliced.text if spliced else replay
-    # What is carried: the whole ledger evicted to budget, as the fork
-    # carries it; the uncited calls appended after the text are those that
-    # survive it, numbered as they are stored.
+    # What is carried: the key's calls evicted to budget and numbered afresh
+    # for the next generation. The uncited calls appended after the text are
+    # those that survive it, keeping the numbers the writer saw (fork
+    # 46bafaeb71): the rest of the fold is in no ledger after this one.
     gone = tool_ledger.evicted(ledger, ledger_budget)
     uncited_at = set(spliced.uncited) if spliced else {e.index for e in ledger}
-    survivors = [e for i, e in enumerate(ledger) if i not in gone]
-    kept = tool_ledger._renumber(survivors)
-    uncited = [k for k, e in zip(kept, survivors) if e.index in uncited_at]
+    kept = tool_ledger._renumber([e for i, e in enumerate(ledger) if i not in gone])
+    uncited = [e for i, e in enumerate(ledger)
+               if i not in gone and e.index in uncited_at]
     if spliced and spliced.invalid:
         log.warning("compaction replay cited %d call(s) not in the record: %s",
                     len(spliced.invalid), spliced.invalid[:10])

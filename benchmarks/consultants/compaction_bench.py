@@ -330,7 +330,12 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
     flow, placement = arm.split("/")
     client = PinnedClient(base, WINDOW)
     rec = Recorder()
-    knobs = budget.Knobs(compaction=compaction.Settings(flow=flow,
+    # The window is pinned in the budget too, not only on the wire: a cloud
+    # model's own window (cloud recommendations) outranks the client's, and
+    # gemma4:31b-cloud ran to 56k prompt tokens on a "32k" window with no
+    # compaction at all.
+    knobs = budget.Knobs(num_ctx=WINDOW,
+                         compaction=compaction.Settings(flow=flow,
                                                         placement=placement))
     budgeter = council._loop_payload_budgeter(
         client, model, role="researcher", knobs=knobs, recorder=rec,

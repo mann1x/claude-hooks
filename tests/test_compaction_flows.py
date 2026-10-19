@@ -692,7 +692,10 @@ def test_the_key_keeps_every_call_of_the_span_at_a_small_window():
     assert [e.index for e in stored] == list(range(1, len(stored) + 1))
 
 
-def test_the_uncited_block_numbers_calls_as_they_are_stored():
+def test_the_uncited_block_keeps_the_numbers_the_writer_saw():
+    """Fork 46bafaeb71: the appended calls are the uncited ones that survive
+    the carry budget, numbered as the key numbered them; what is stored for
+    the next generation is numbered afresh."""
     backend = Backend(writer=lambda payload, n: "Reading. Done.")
     msgs = ([{"role": "system", "content": "s"}, {"role": "user", "content": "q"}]
             + _calls([f"src/m{i}.py" for i in range(30)]))
@@ -701,7 +704,23 @@ def test_the_uncited_block_numbers_calls_as_they_are_stored():
         context_tokens=32_768)
     stored = [tool_ledger.Entry.from_dict(x) for x in d.ledger]
     assert stored and len(stored) < 30
-    assert d.uncited == tool_ledger.render(stored)
+    assert [e.index for e in stored] == list(range(1, len(stored) + 1))
+    first = stored[0].input                      # e.g. path=src/m24.py
+    n = int(first.split("src/m")[1].split(".")[0]) + 1
+    assert d.uncited.startswith(f"{n}. read_file  {first}")
+    assert d.uncited.count("read_file") == len(stored)
+
+
+def test_an_over_long_key_shortens_inputs_and_keeps_every_call():
+    entries = tool_ledger.build(_calls([f"src/{'deep/' * 30}m{i}.py"
+                                        for i in range(40)], size=1))
+    full = tool_ledger.render_key(entries)
+    cut = tool_ledger.render_key(entries, 2_000)
+    assert len(full) > 2_000 >= len(cut)
+    lines = cut.splitlines()
+    assert [ln.split(".", 1)[0] for ln in lines] == [str(i) for i in range(1, 41)]
+    assert all(ln.endswith("…") for ln in lines)
+    assert tool_ledger.render_key(entries, 10 ** 6) == full
 
 
 def test_the_generation_advances_with_every_fold():
@@ -717,3 +736,20 @@ def test_the_generation_advances_with_every_fold():
         gens.append(marker["_compaction_generation"])
         msgs = out.messages + _loop_history()[2:]
     assert gens == [1, 2, 3]
+
+
+def test_the_writers_key_is_bounded_at_a_tenth_of_its_input():
+    seen = {}
+
+    def writer(payload, n):
+        seen.setdefault("req", payload["messages"][-1]["content"])
+        return "Reading. Done."
+
+    calls = _calls([f"src/{'deep/' * 40}m{i}.py" for i in range(60)], size=1)
+    compaction.write_digest(_scope(Backend(writer=writer), review=False), calls,
+                            target_tokens=3_000, context_tokens=9_000)
+    key = seen["req"].split("Cite these as `[#N]` in your replay rather than "
+                            "writing them out:\n", 1)[1].split("\n\nConversation:", 1)[0]
+    assert len(key) <= max(tool_ledger.budget_chars(3_000),
+                           int(9_000 * 3 * compaction.KEY_SHARE))
+    assert len(key.splitlines()) == 60
