@@ -273,8 +273,11 @@ write_results_md() {
             echo "Model pin: per-role config (no override). Snapshot of \`claude-consultants config show --user\`:"
             echo
             echo '```json'
-            "${REPO}/bin/claude-consultants" config show --user 2>/dev/null \
-                || echo '(could not read config)'
+            # The store DSN carries the database password; results.md
+            # is committed, so the password is masked.
+            { "${REPO}/bin/claude-consultants" config show --user 2>/dev/null \
+                || echo '(could not read config)'; } \
+                | sed -E 's#(://[^:/@"]+:)[^@"]+@#\1***@#g'
             echo '```'
         fi
         echo
