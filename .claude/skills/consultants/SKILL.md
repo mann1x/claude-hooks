@@ -183,6 +183,13 @@ claude-consultants consult --message "<your framing>" --cwd "$(pwd)"
 Optional `--effort low|medium|high|max|xmedium|xhigh|xmax` to
 override the configured tier for this call.
 
+**What you already tried.** When you ran checks before asking (tests,
+greps, a repro), pass them with `--tried <file.json>` —
+`[{"what": "ran pytest tests/test_x.py", "output": "<verbatim output>"}]`
+(at most 20). Every role gets them under ALREADY TRIED, verbatim, so the
+council builds on them instead of redoing them. Paste outputs as they
+were; never summarise them.
+
 **Reaching files outside cwd.** The council's tools are sandboxed
 to `cwd` plus whatever Claude Code's
 `permissions.additionalDirectories` (auto-discovered from

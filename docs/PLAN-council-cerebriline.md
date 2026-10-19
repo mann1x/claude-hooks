@@ -682,6 +682,13 @@ Already covered elsewhere in this plan, not duplicated here:
 
 Not taken: the builder role, broadcast notes, the async review desk, and client-held sealed state (our checkpoints are at parity).
 
+**Status (2026-10-19): G3–G5 built.** Lane/round labels (every mode), G4
+field checks (`verify_claims`) and evidence by ref (`read_evidence.py`,
+cache-only), G5 stop-on-no-progress (`barren_rounds`, 2 rounds), route-only
+follow-up (`follow_up_route` node), `--tried`. "Unknown inject targets are
+rejected loudly" was already true (`build_inject_delta`). The coder's G5
+items wait for a coder verify step. G6 bench next.
+
 **Exit G:**
 - the bench is recorded;
 - the typed path passes the parity cohort when off;

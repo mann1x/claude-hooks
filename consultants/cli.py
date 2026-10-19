@@ -169,6 +169,13 @@ def cmd_consult(args, base: str) -> int:
         body["skip_preflight"] = True
     if getattr(args, "shell", None) is not None:
         body["shell"] = _shell_body(args)
+    if getattr(args, "tried", None):
+        # Plan G5: what you already tried, with its verbatim output.
+        try:
+            body["tried"] = json.loads(Path(args.tried).read_text())
+        except (OSError, ValueError) as e:
+            print(f"error: --tried {args.tried}: {e}", file=sys.stderr)
+            return 2
     # --trace / --no-trace are deprecated in v1.1 (the JSONL trace
     # was replaced by the per-session transcript.db). The flag is
     # still accepted but no longer forwarded to the engine; warn
@@ -2378,6 +2385,12 @@ def build_parser() -> argparse.ArgumentParser:
             "follow-ups inherit."
         ),
     )
+    c.add_argument(
+        "--tried", metavar="FILE",
+        help=("JSON file listing what you already tried, "
+              '[{"what": "ran pytest tests/x.py", "output": "<verbatim>"}]; '
+              "every role gets it as ALREADY TRIED so the council does not "
+              "redo it."))
     c.add_argument(
         "--skip-preflight", dest="skip_preflight", action="store_true",
         help=(

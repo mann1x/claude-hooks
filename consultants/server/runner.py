@@ -431,6 +431,9 @@ def make_runner(*, ollama_base_url: str):
         initial["runtime_control"] = _seed_runtime_control(
             cfg, enabled,
             n_fanout_extras=len(extra_models_by_role.get("researcher", [])))
+        _tried = _tried_docs(runner_input)
+        if _tried:
+            initial["additional_context"] = _tried
         if enabled:
             state.progress[enabled[0]] = "in_progress"
 
@@ -933,6 +936,10 @@ def make_follow_up_runner(*, ollama_base_url: str):
             state, cfg, cwd, memory_saver_cls=_MemSaver)
         # #314: same always-on synthesizer interrupt as the council so
         # a mid-flight follow-up inject can rewind to a researcher round.
+        # Plan G5: on the typed protocol one tiny call routes the
+        # follow-up (a retry-lanes child has its route already).
+        deps.follow_up_route = bool(getattr(getattr(cfg, "protocol", None),
+                                            "typed", False)) and not retry_lanes
         compiled = build_follow_up_graph(
             deps, tracer=tracer, checkpointer=fu_checkpointer,
             interrupt_before=["synthesizer"],
@@ -1612,6 +1619,17 @@ def _mark_suspended(state, recorder, exc, *, log_label: str) -> None:
             recorder.close()
         except Exception:  # pragma: no cover — defensive
             log.exception("recorder.close raised on suspend")
+
+
+def _tried_docs(runner_input: dict) -> list:
+    """Plan G5: what the asking assistant already tried, as one Doc every
+    role reads (``additional_context``); ``[]`` when nothing was sent."""
+    tried = runner_input.get("tried") or []
+    if not tried:
+        return []
+    from consultants.engine import council as council_mod
+    from consultants.engine.state_v2 import Doc
+    return [Doc("any", council_mod.render_tried(tried), source="already_tried")]
 
 
 def _seed_runtime_control(cfg, enabled, *, n_fanout_extras: int = 0) -> dict:

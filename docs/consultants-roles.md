@@ -592,6 +592,37 @@ Verified live on 2026-10-14: the critic on opencoti (`@bs2`) returned a
 `council_verdict` as its only call, which rendered as `DECISION: ready`.
 Measuring the effect on token use and quality is G6.
 
+Built 2026-10-19 (plan G3–G5):
+
+- **Reports are labelled by lane and round** in every mode:
+  `RESEARCHER REPORT N (lane L, round R)` from `research_lanes`. The old
+  `(round i)` was the report's index. `N` is what corrections and
+  challenges cite; a follow-up seeded with parent reports (lanes not
+  aligned) is labelled by number only.
+- **Claims are checked at the source** (G4, typed only):
+  `typed_results.verify_claims()` checks each `council_report` claim
+  field by field before it is rendered: the file exists, the line is in
+  it, the `symbol` is within 3 lines (or, in Python, encloses the line),
+  and the `quote` is in the file there (else "the quote is at line K").
+  A failed field renders `[unverified — …]` beside the cite. The typed
+  report is not re-linted by the regex CitationLinter, whose 80-char
+  proximity check reads rendered fields wrong.
+- **Evidence by ref** (G4): a critic, meta-critic or synthesizer with tools
+  gets `evidence(path, start_line, end_line)`, answered only from the
+  run's read cache (`read_evidence.py`): the lines a lane read, as it read
+  them; lines no lane read are listed as unread, and a lane whose view
+  diverged (the shell) is not evidence.
+- **Stop on no progress** (G5): two rounds in a row whose reports cite no
+  new `path:line` overrule the critic's re-route (`barren_rounds()`).
+- **Route-only follow-up** (G5): a follow-up starts with one call on the
+  synthesizer's model (thinking off, 32-token cap): `synthesize` re-answers
+  from the parent's evidence, anything else researches. Recorded as a
+  `follow_up_route` event; `fresh` is recorded and researched.
+- **Already tried** (G5, every mode): `consult --tried FILE` (body
+  `tried`) gives every role the asker's earlier attempts verbatim.
+- The forced answer at the step bound already offers only the result tool
+  (G1). Coder-side G5 items wait for a coder verify step.
+
 ---
 
 ## See also

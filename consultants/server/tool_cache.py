@@ -125,6 +125,12 @@ class SharedReadCache:
             self._results.clear()
             self._bytes = 0
 
+    def snapshot(self) -> list[tuple[tuple, str]]:
+        """``(key, output)`` for every kept result, copied under the lock
+        (plan G4's ``evidence`` tool reads what the lanes read)."""
+        with self._lock:
+            return list(self._results.items())
+
     def clear_lane(self, lane: str) -> None:
         """Drop ``lane``'s private reads; the shared ones stay."""
         with self._lock:

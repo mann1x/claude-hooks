@@ -348,7 +348,7 @@ class TestToolAddendum(unittest.TestCase):
         and the synthesizer both see."""
         d = council._ROLE_TOOL_DIRECTIVE["critic"]
         self.assertIn("CORRECTIONS:", d)
-        self.assertIn("RESEARCHER REPORT (round N)", d)
+        self.assertIn("RESEARCHER REPORT N", d)
         self.assertIn("report N: claimed", d)
 
     def test_a_correction_does_not_trigger_another_research_round(self):

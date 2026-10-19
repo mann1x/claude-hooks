@@ -134,6 +134,8 @@ class CouncilState(TypedDict, total=False):
     # One per challenged report: the critic's ruling (stands / narrowed /
     # falls / open), read by the synthesis audits.
     cross_exam_rulings: Annotated[list, operator.add]
+    # Plan G5: a typed follow-up's route (``follow_up_route_node``).
+    follow_up_route: Optional[str]
     # Send-injected: the one lane a cross_examine node answers for.
     cross_exam_item: Optional[dict]
     # Send-injected, per-lane fields. Set on a researcher invocation
@@ -445,6 +447,10 @@ class GraphDeps:
     # and with ``xauto_lane_retry`` off too the node is not wired.
     escalation_model: str = ""
     escalation_max: int = 2
+    # Plan G5: on the typed protocol a follow-up is routed by one tiny call
+    # (synthesize from the parent's evidence, or research). Off: the
+    # follow-up graph starts at the researcher as before.
+    follow_up_route: bool = False
     # Called with (kind, payload) for gate events (``node_cancelled`` /
     # ``awaiting_resume`` / ``resumed``). The runner passes a recorder
     # bridge; ``None`` means the gate still works, silently.
@@ -557,6 +563,8 @@ def _retry_lane_send(state: dict, spec: dict) -> Any:
 #: reports. ``START`` led to the planner, which re-planned from scratch
 #: and fanned out lanes that never carried the brief.
 REWIND_NODE = "rewind"
+#: Plan G5: the typed follow-up's routing call.
+FOLLOW_UP_ROUTE_NODE = "follow_up_route"
 #: Rewind lanes are numbered from here, clear of the first round's.
 REWIND_LANE_BASE = 100
 
@@ -789,13 +797,15 @@ def _has_shell(deps: GraphDeps) -> bool:
 
 def _with_lane_tags(state: dict, out: dict) -> dict:
     """``out`` with one ``research_lanes`` entry per report it adds, so
-    report N can be traced to the lane that wrote it (plan
-    council-memory M5)."""
+    report N can be traced to the lane and round that wrote it (plan
+    council-memory M5; the prompts label it, plan G3). A lane runs in the
+    round after the ones already counted."""
     reports = out.get("research") if isinstance(out, dict) else None
     if not reports:
         return out
-    return {**out, "research_lanes": [{"lane": state.get("lane_idx")}
-                                      for _ in reports]}
+    rnd = int(state.get("research_rounds_used") or 0) + 1
+    return {**out, "research_lanes": [{"lane": state.get("lane_idx"),
+                                       "round": rnd} for _ in reports]}
 
 
 def _wrap_cross_examine(deps: GraphDeps):
@@ -2254,6 +2264,21 @@ def build_follow_up_graph(deps: GraphDeps,
         def _fanout_retried_lanes(state: dict) -> Any:
             return [_retry_lane_send(state, spec) for spec in lanes]
         sg.add_conditional_edges(START, _fanout_retried_lanes, ["researcher"])
+    elif deps.follow_up_route:
+        def _route_node(state: dict) -> dict:
+            return council.follow_up_route_node(
+                state, chat_client=deps.chat_clients["synthesizer"],
+                model=deps.models["synthesizer"],
+                prior_messages=deps.prior_messages_by_role.get("synthesizer"),
+                recorder=deps.recorder)
+        sg.add_node(FOLLOW_UP_ROUTE_NODE, _wrap("synthesizer", _route_node))
+        sg.add_edge(START, FOLLOW_UP_ROUTE_NODE)
+        sg.add_conditional_edges(
+            FOLLOW_UP_ROUTE_NODE,
+            lambda s: ("synthesizer" if _stopping(deps)
+                       or s.get("follow_up_route") == "synthesize"
+                       else "researcher"),
+            ["researcher", "synthesizer"])
     else:
         sg.add_edge(START, "researcher")
     if "critic" in enabled:

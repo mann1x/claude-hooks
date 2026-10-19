@@ -15,7 +15,7 @@ def test_reports_that_fit_render_exactly_as_before():
     reports = [_report(1, 100), _report(2, 100)]
     msgs = council.build_synthesizer_messages("q", "p", reports, None)
     body = msgs[1]["content"]
-    assert "RESEARCHER REPORT (round 1):" in body
+    assert "RESEARCHER REPORT 1:" in body
     assert "RESEARCH INDEX" not in body
 
 

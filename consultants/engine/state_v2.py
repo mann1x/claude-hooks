@@ -537,6 +537,8 @@ class CouncilStateV2(TypedDict, total=False):
     # One per challenged report: the critic's ruling (stands / narrowed /
     # falls / open), read by the synthesis audits.
     cross_exam_rulings: Annotated[list, operator.add]
+    # Plan G5: a typed follow-up's route (``follow_up_route_node``).
+    follow_up_route: Optional[str]
     # Send-injected: the one lane a cross_examine node answers for.
     cross_exam_item: Optional[dict]
 

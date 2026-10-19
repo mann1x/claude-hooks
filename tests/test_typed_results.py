@@ -271,3 +271,127 @@ def test_protocol_cli_roundtrip(tmp_path, monkeypatch, capsys):
     assert cli.main(["config", "set-protocol", "--typed", "on", "--user"]) == 0
     assert json.loads(capsys.readouterr().out)["protocol"] == {"typed": True}
     assert cc.load_config(tmp_path).protocol.typed is True
+
+
+# ------------------------------------------------------------ G4: claims at the source
+
+SRC = ("import os\n"                       # 1
+       "\n"                                # 2
+       "def foo(x):\n"                     # 3
+       "    if x is None:\n"               # 4
+       "        return None\n"             # 5
+       "    total = x + 1\n"               # 6
+       "    return total\n"                # 7
+       "\n"                                # 8
+       "def bar():\n"                      # 9
+       "    return foo(2)\n")              # 10
+
+
+def _claims(tmp_path, *claims):
+    (tmp_path / "a.py").write_text(SRC)
+    rec = {"summary": "s", "claims": [dict(c) for c in claims], "gaps": []}
+    return tr.verify_claims(rec, [str(tmp_path)])["claims"]
+
+
+def test_claims_that_hold_are_left_alone(tmp_path):
+    out = _claims(tmp_path,
+                  {"claim": "foo adds one", "path": "a.py", "line": 6,
+                   "symbol": "foo", "quote": "total = x + 1"},
+                  {"claim": "whole file", "path": "a.py"},
+                  # foo encloses line 7 though its name is 4 lines up
+                  {"claim": "foo returns", "path": "a.py", "line": 7,
+                   "symbol": "foo()"})
+    assert not any("unverified" in c for c in out)
+
+
+def test_each_field_that_fails_says_why(tmp_path):
+    out = _claims(tmp_path,
+                  {"claim": "c", "path": "gone.py", "line": 1},
+                  {"claim": "c", "path": "a.py", "line": 40},
+                  {"claim": "c", "path": "a.py", "line": 5, "symbol": "bar"},
+                  {"claim": "c", "path": "a.py", "line": 4,
+                   "quote": "return foo(2)"},
+                  {"claim": "c", "path": "a.py", "line": 6,
+                   "quote": "total = x * 2"})
+    notes = [c.get("unverified") for c in out]
+    assert notes == ["file not found", "file has 10 lines",
+                     "`bar` is not at that line",
+                     "the quote is at line 10",
+                     "the quote is not in the file"]
+
+
+def test_no_roots_checks_nothing(tmp_path):
+    rec = {"summary": "s", "claims": [{"claim": "c", "path": "gone.py"}]}
+    assert tr.verify_claims(rec, []) is rec
+
+
+def test_a_failed_check_renders_beside_its_cite(tmp_path):
+    out = _claims(tmp_path, {"claim": "c", "path": "a.py", "line": 5,
+                             "symbol": "bar"})
+    text = tr.render(tr.REPORT, {"summary": "s", "claims": out, "gaps": []})
+    assert "(`a.py:5` [unverified — `bar` is not at that line])" in text
+
+
+def test_researcher_typed_report_is_checked_not_relinted(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text(SRC)
+    report = {"summary": "foo guards None.", "claims": [
+        # The prose names `bar`, the record names foo, which holds: the
+        # regex linter would have written "[in foo, not bar]" here.
+        {"claim": "the `bar` path returns early", "path": "src/a.py", "line": 4,
+         "symbol": "foo"},
+        {"claim": "bar is at the top", "path": "src/a.py", "line": 1,
+         "symbol": "bar"}]}
+    chat = FakeChat([_resp(calls=[_call("read_file", {"path": "src/a.py"})]),
+                     _resp(calls=[_call(tr.REPORT, report, call_id="c2")])])
+    state = council.initial_state(question="q", cwd=str(tmp_path),
+                                  models={"researcher": "m"},
+                                  topology="council", effort="high")
+    state.update(plan="1. look at a.py", research_rounds_used=0)
+    state["runtime_control"] = {"typed_protocol": True}
+    up = council.researcher_node(
+        state, chat_client=chat, model="m", cwd=str(tmp_path),
+        tool_specs=[{"type": "function", "function": {
+            "name": "read_file", "parameters": {"type": "object"}}}],
+        tool_executor=lambda n, a, c: SRC, grounding_msgs=[])
+    text = up["research"][0]
+    assert "(`src/a.py:4`) [`foo`]" in text
+    assert "[in " not in text                       # not re-linted
+    assert text.count("[unverified — `bar` is not at that line]") == 1
+
+
+# ------------------------------------------------------------ G5: stop on no progress
+
+def _rounds(*cites_per_round):
+    reports, lanes = [], []
+    for rnd, cites in enumerate(cites_per_round, start=1):
+        reports.append(" ".join(f"(`{c}`)" for c in cites) or "nothing")
+        lanes.append({"lane": 0, "round": rnd})
+    return reports, lanes
+
+
+def test_barren_rounds_count_trailing_rounds_with_no_new_cite():
+    assert council.barren_rounds(*_rounds(["src/a.py:1"], ["src/a.py:2"])) == 0
+    assert council.barren_rounds(*_rounds(["src/a.py:1"], ["src/a.py:1"])) == 1
+    assert council.barren_rounds(*_rounds(["src/a.py:1"], ["src/a.py:1"], [])) == 2
+    assert council.barren_rounds(*_rounds(["src/a.py:1"], [], ["src/b.py:3"])) == 0
+    reports, lanes = _rounds(["src/a.py:1"], ["src/a.py:1"], ["src/a.py:1"])
+    assert council.barren_rounds(reports, lanes[:2]) == 0    # misaligned
+
+
+def _stalled_state(typed: bool):
+    reports, lanes = _rounds(["src/a.py:1"], ["src/a.py:1"], ["src/a.py:1"])
+    st = {"critic_decision": "needs_more_research", "effort": "max",
+          "research_rounds_used": 3, "critic_reroutes_used": 0,
+          "research": reports, "research_lanes": lanes,
+          "runtime_control": {"max_rounds": 9, "max_reroutes": 9}}
+    if typed:
+        st["runtime_control"]["typed_protocol"] = True
+    return st
+
+
+def test_two_barren_rounds_overrule_the_reroute_on_the_typed_protocol():
+    assert council.route_after_critic(_stalled_state(True)) == \
+        council.ROUTE_SYNTHESIZER
+    assert council.route_after_critic(_stalled_state(False)) == \
+        council.ROUTE_RESEARCHER                              # parity

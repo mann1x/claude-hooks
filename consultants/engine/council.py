@@ -516,6 +516,7 @@ def build_meta_critic_messages(
     *,
     strictness: str = "normal",
     adversarial_focus: str = "",
+    lanes=None,
 ) -> list[dict]:
     """Build the meta-critic's prompt. Critics are anonymized as
     ``Critic 1``, ``Critic 2``, ... in the order ``critic_verdicts``
@@ -536,7 +537,7 @@ def build_meta_critic_messages(
         f"USER QUESTION:\n{question.strip()}",
         f"\nPLANNER'S PLAN:\n{plan.strip()}",
     ]
-    parts.extend(_research_parts(research_rounds, pager=False))
+    parts.extend(_research_parts(research_rounds, pager=False, lanes=lanes))
     if not critic_verdicts:
         parts.append(
             "\n(no critic verdicts — meta-critic invoked with no "
@@ -712,14 +713,16 @@ _ADVERSARY_STRICTNESS_DIRECTIVE = {
 
 def build_adversary_messages(question: str, final_answer: str, plan: str,
                              research_rounds: list[str], *,
-                             strictness: str = "normal") -> list[dict]:
+                             strictness: str = "normal",
+                             lanes=None) -> list[dict]:
     parts = [
         f"USER QUESTION:\n{question.strip()}",
         f"\nPLANNER'S PLAN:\n{(plan or '').strip()}",
     ]
+    tags = report_tags(len(research_rounds), lanes)
     for i, r in enumerate(research_rounds, start=1):
         if isinstance(r, str) and r.strip():
-            parts.append(f"\nRESEARCHER REPORT (round {i}):\n{r.strip()}")
+            parts.append(f"\nRESEARCHER REPORT {i}{tags[i - 1]}:\n{r.strip()}")
     parts.append(f"\nFINAL ANSWER TO REFUTE:\n{final_answer.strip()}")
     parts.append(
         "\n" + _ADVERSARY_STRICTNESS_DIRECTIVE.get(
@@ -869,15 +872,37 @@ def build_researcher_messages(question: str, plan: str,
     return msgs
 
 
-def _research_parts(reports: list[str], *, pager: bool) -> list[str]:
-    """The researcher reports as prompt parts. Reports that fit the plan
-    D8 budget render exactly as before; past it, an index of every report,
-    whole reports while they fit, the rest named (``lane_digest``)."""
+def report_tags(n: int, lanes=None) -> list[str]:
+    """`` (lane L, round R)`` per report when ``research_lanes`` lines up
+    with the reports, else ``""`` each (plan G3: the old ``(round i)`` was
+    the report's index, not its round)."""
+    lanes = list(lanes or [])
+    if len(lanes) != n:
+        return [""] * n
+    out = []
+    for tag in lanes:
+        tag = tag if isinstance(tag, dict) else {}
+        bits = []
+        if tag.get("lane") is not None:
+            bits.append(f"lane {tag['lane']}")
+        if tag.get("round"):
+            bits.append(f"round {tag['round']}")
+        out.append(f" ({', '.join(bits)})" if bits else "")
+    return out
+
+
+def _research_parts(reports: list[str], *, pager: bool,
+                    lanes=None) -> list[str]:
+    """The researcher reports as prompt parts, numbered (``report N``, the
+    number corrections and challenges cite) and attributed to their lane
+    and round when known. Past the plan D8 budget: an index of every
+    report, whole reports while they fit, the rest named (``lane_digest``)."""
     from consultants.engine import lane_digest
     digest = lane_digest.render(list(reports), pager=pager)
     if digest is not None:
         return digest
-    return [f"\nRESEARCHER REPORT (round {i}):\n{r.strip()}"
+    tags = report_tags(len(reports), lanes)
+    return [f"\nRESEARCHER REPORT {i}{tags[i - 1]}:\n{r.strip()}"
             for i, r in enumerate(reports, start=1)]
 
 
@@ -887,12 +912,13 @@ def build_critic_messages(question: str, plan: str,
                           additional_context=None,
                           strictness: str = "normal",
                           adversarial_focus: str = "",
-                          pager: bool = False) -> list[dict]:
+                          pager: bool = False,
+                          lanes=None) -> list[dict]:
     parts = [
         f"USER QUESTION:\n{question.strip()}",
         f"\nPLANNER'S PLAN:\n{plan.strip()}",
     ]
-    parts.extend(_research_parts(research_rounds, pager=pager))
+    parts.extend(_research_parts(research_rounds, pager=pager, lanes=lanes))
     extra = _additional_context_block(additional_context)
     if extra:
         parts.append("\n" + extra)
@@ -921,12 +947,13 @@ def build_synthesizer_messages(question: str, plan: str,
                                additional_context=None,
                                coder_artifacts: Optional[list] = None,
                                pager: bool = False,
-                               wrap_up: bool = False) -> list[dict]:
+                               wrap_up: bool = False,
+                               lanes=None) -> list[dict]:
     parts = [
         f"USER QUESTION:\n{question.strip()}",
         f"\nPLANNER'S PLAN:\n{plan.strip()}",
     ]
-    parts.extend(_research_parts(research_rounds, pager=pager))
+    parts.extend(_research_parts(research_rounds, pager=pager, lanes=lanes))
     if critique:
         parts.append(f"\nCRITIC'S VERDICT:\n{critique.strip()}")
     # M10: surface coder lane outputs (when present) so the
@@ -1077,6 +1104,139 @@ ROUTE_SYNTHESIZER = "synthesizer"
 ROUTE_RESEARCHER = "researcher"
 
 
+#: Plan G5 (xOllama ``fc27088dd``): a follow-up is routed by one tiny call
+#: before anything runs. Route-only beat a full-JSON decision there (86/100
+#: against 70/100, 0 malformed against 4); it fails toward ``research``.
+FOLLOW_UP_ROUTES = ("synthesize", "research", "fresh")
+FOLLOW_UP_ROUTE_TOKENS = 32
+FOLLOW_UP_ROUTE_SYSTEM = (
+    "You route a follow-up question for a research council that already "
+    "answered an earlier question. Reply with one JSON object and nothing "
+    "else: {\"route\": \"synthesize\"} when the earlier answer's evidence "
+    "already answers the follow-up (a rephrasing, a summary, a narrower or "
+    "differently ordered view); {\"route\": \"research\"} when it needs facts "
+    "the earlier research did not gather; {\"route\": \"fresh\"} when it is a "
+    "different question altogether.")
+_ROUTE_RX = re.compile(r'"?route"?\s*[:=]\s*"?(synthesize|research|fresh)\b',
+                       re.IGNORECASE)
+
+
+def parse_follow_up_route(text: str) -> str:
+    """The route word, or ``research`` for anything else."""
+    m = _ROUTE_RX.search(text or "")
+    return m.group(1).lower() if m else "research"
+
+
+def follow_up_route_node(state: dict, *, chat_client, model: str,
+                         prior_messages: Optional[list[dict]] = None,
+                         recorder=None) -> dict:
+    """Plan G5: decide a follow-up's route in one call (thinking off, a
+    16-token reply) from the question and the parent's answer. Any
+    failure routes to ``research``, today's path."""
+    earlier = next((str(m.get("content") or "") for m in
+                    reversed(prior_messages or [])
+                    if m.get("role") == "assistant" and m.get("content")), "")
+    if not earlier.strip():
+        return {"follow_up_route": "research"}
+    from claude_hooks.decision_client import bound_text
+    msgs = [{"role": "system", "content": FOLLOW_UP_ROUTE_SYSTEM},
+            {"role": "user", "content": (
+                f"EARLIER ANSWER:\n{bound_text(earlier)}\n\n"
+                f"FOLLOW-UP QUESTION:\n{(state.get('question') or '').strip()}")}]
+    try:
+        text, pt, ct = _single_shot(
+            chat_client, model, msgs, think=False, recorder=recorder,
+            role="synthesizer:route",
+            # The route is ~16 tokens; the cap leaves room for a model
+            # that says a word before the JSON.
+            knobs=budget.Knobs(output_ceiling=FOLLOW_UP_ROUTE_TOKENS,
+                               announce=False))
+    except Exception as e:  # noqa: BLE001 — routing never fails a follow-up
+        log.warning("follow-up route call failed (%s); researching", e)
+        return {"follow_up_route": "research"}
+    route = parse_follow_up_route(text)
+    if recorder is not None and hasattr(recorder, "record_event"):
+        try:
+            recorder.record_event(kind="follow_up_route", role="synthesizer",
+                                  round=None, lane_idx=None,
+                                  payload={"route": route, "reply": text[:200]})
+        except Exception:  # pragma: no cover
+            log.debug("record_event raised; ignored", exc_info=True)
+    return {"follow_up_route": route,
+            "total_prompt_tokens": pt, "total_completion_tokens": ct}
+
+
+#: Plan G5: what the asking assistant already tried, given to every role
+#: with its outputs verbatim so the council does not redo it.
+ALREADY_TRIED_HEADER = (
+    "ALREADY TRIED (by the assistant that asked, before this council; the "
+    "outputs are verbatim). Do not repeat these; build on what they show:")
+TRIED_MAX_ITEMS = 20
+
+
+def parse_tried(raw) -> list[dict]:
+    """``[{"what": str, "output": str}]`` from an ``ask`` body's
+    ``tried``; ``[]`` for none. A wrong shape raises ``ValueError`` (the
+    route answers 400) rather than being dropped."""
+    if raw in (None, "", []):
+        return []
+    if not isinstance(raw, list) or len(raw) > TRIED_MAX_ITEMS:
+        raise ValueError(f"tried must be a list of at most {TRIED_MAX_ITEMS} "
+                         "{what, output} objects")
+    out = []
+    for i, item in enumerate(raw, start=1):
+        if not isinstance(item, dict) or not isinstance(item.get("what"), str) \
+                or not item["what"].strip() \
+                or not isinstance(item.get("output", ""), str):
+            raise ValueError(f"tried[{i}] needs a non-empty string `what` "
+                             "and a string `output`")
+        out.append({"what": item["what"].strip(),
+                    "output": item.get("output") or ""})
+    return out
+
+
+def render_tried(items: list[dict]) -> str:
+    parts = [ALREADY_TRIED_HEADER]
+    for i, it in enumerate(items, start=1):
+        parts.append(f"{i}. {it['what']}")
+        if it.get("output"):
+            parts.append("   output:\n" + "\n".join(
+                "   " + ln for ln in it["output"].splitlines()))
+    return "\n".join(parts)
+
+
+#: Plan G5 (xOllama ``stuck.go``): rounds in a row that cite nothing new
+#: before the critic's re-route is overruled.
+STALL_ROUNDS = 2
+
+
+def barren_rounds(reports, lanes) -> int:
+    """Trailing research rounds, after the first, whose reports cite no
+    ``path:line`` an earlier round had not. A round that adds no new cite
+    has closed no gap with evidence either. 0 when ``research_lanes`` does
+    not line up with the reports (the rounds are then unknown)."""
+    from consultants.engine.citation_linter import extract_citations
+    reports, lanes = list(reports or []), list(lanes or [])
+    if not reports or len(lanes) != len(reports):
+        return 0
+    by_round: dict[int, set] = {}
+    for rep, tag in zip(reports, lanes):
+        rnd = (tag or {}).get("round") if isinstance(tag, dict) else None
+        if not isinstance(rnd, int):
+            return 0
+        by_round.setdefault(rnd, set()).update(
+            (path, start) for _m, path, start, _e in extract_citations(str(rep)))
+    seen: set = set()
+    barren = 0
+    for i, rnd in enumerate(sorted(by_round)):
+        new = by_round[rnd] - seen
+        seen |= by_round[rnd]
+        if i == 0:
+            continue
+        barren = 0 if new else barren + 1
+    return barren
+
+
 def route_after_critic(state: dict) -> str:
     """Decide whether to loop back to researcher or fall through to
     synthesizer. Pure function of the state — LangGraph's conditional
@@ -1120,6 +1280,13 @@ def route_after_critic(state: dict) -> str:
             reroutes_used, max_reroutes,
         )
         return ROUTE_SYNTHESIZER
+    if (state.get("runtime_control") or {}).get("typed_protocol"):
+        stalled = barren_rounds(state.get("research"),
+                                state.get("research_lanes"))
+        if stalled >= STALL_ROUNDS:
+            log.info("route_after_critic: %d rounds cited nothing new; "
+                     "-> synthesizer", stalled)
+            return ROUTE_SYNTHESIZER
     if rounds_used >= max_rounds:
         log.info(
             "route_after_critic: researcher round cap hit (%d >= %d); "
@@ -1658,8 +1825,11 @@ def _with_claims_framing(messages: list[dict], state: dict) -> list[dict]:
     return out
 
 
-def _render_result_call(name: Optional[str], final: dict) -> Optional[str]:
-    """The rendered record when a tool loop ended on ``name``'s call."""
+def _render_result_call(name: Optional[str], final: dict, *,
+                        roots=None) -> Optional[str]:
+    """The rendered record when a tool loop ended on ``name``'s call. A
+    ``council_report`` is checked claim by claim against ``roots`` first
+    (plan G4, ``typed_results.verify_claims``)."""
     if not name:
         return None
     call = (final or {}).get("_result_call") or {}
@@ -1670,6 +1840,11 @@ def _render_result_call(name: Optional[str], final: dict) -> Optional[str]:
     if rec is None:
         log.warning("typed record %s did not validate; prose fallback", name)
         return None
+    if name == typed_results.REPORT and roots:
+        try:
+            rec = typed_results.verify_claims(rec, roots)
+        except Exception:  # pragma: no cover — checks never sink a report
+            log.exception("typed claim checks raised; rendered unchecked")
     return typed_results.render(name, rec)
 
 
@@ -2046,7 +2221,7 @@ _ROLE_TOOL_DIRECTIVE: dict[str, str] = {
         "report claimed, that discrepancy IS your finding — do not "
         "quietly use the right value and call the report accurate. "
         "Report it, attributed to the report it came from by the "
-        "`RESEARCHER REPORT (round N)` header above it, in a block "
+        "`RESEARCHER REPORT N` header above it, in a block "
         "after your justification:\n"
         "  CORRECTIONS:\n"
         "  - report N: claimed <X> — actual <Y> (`path:line`)\n"
@@ -3361,7 +3536,13 @@ def researcher_node(state: dict, *,
             )],
         }
     dt = time.monotonic() - t0
-    text = _render_result_call(result_name, final) or _extract_text(final)
+    # Plan G4: a typed report is checked field by field as it is
+    # rendered, which replaces the regex linter's proximity check below.
+    _typed = _render_result_call(
+        result_name, final,
+        roots=[r for r in [cwd] + list(state.get("extra_roots") or ())
+               if isinstance(r, str) and r])
+    text = _typed or _extract_text(final)
     pt, ct = _usage_from(final)
 
     # Defensive fallback: if the loop hit max_iterations while the
@@ -3478,8 +3659,10 @@ def researcher_node(state: dict, *,
                     duration_ms=int(dt * 1000), ok=True,
                     stop_reason=stop_reason, failure_class=failure_class)
     # #204: v1 inline-loop researcher exit — same lint pattern as the
-    # M6 REPORT and PLAN-empty branches.
-    linted_text = _lint_research_text(text)
+    # M6 REPORT and PLAN-empty branches. A typed report was checked as it
+    # was rendered (G4); linting it again would re-judge rendered fields.
+    linted_text = text if _typed is not None and text == _typed \
+        else _lint_research_text(text)
     _record_finding_to_store(linted_text)
     return {
         "research": [linted_text],
@@ -3534,6 +3717,13 @@ def _with_cited_comments(msgs: list[dict], state: dict, reports, *, cwd: str,
     return with_cited_comments(
         msgs, [str(r) for r in reports or []], roots,
         max(16_000, int(w * COMMENTS_WINDOW_SHARE * budget.CHARS_PER_TOKEN)))
+
+
+def _with_evidence_tool(state, tool_specs, tool_executor):
+    """Plan G4, typed protocol only: a judge with tools can read the bytes
+    a lane read (``read_evidence``). Unchanged otherwise."""
+    from consultants.engine.read_evidence import with_evidence
+    return with_evidence(state, tool_specs, tool_executor)
 
 
 def _with_judge_shell_note(msgs: list[dict], tool_specs) -> list[dict]:
@@ -3608,6 +3798,8 @@ def critic_node(state: dict, *, chat_client, model: str,
     _reports = list(state.get("research") or [])
     tool_specs, tool_executor = lane_digest.with_pager(
         _reports, tool_specs, tool_executor)
+    tool_specs, tool_executor = _with_evidence_tool(
+        state, tool_specs, tool_executor)
     msgs = build_critic_messages(
         state["question"], state["plan"], _reports,
         additional_context=extra_ctx_critic,
@@ -3615,6 +3807,7 @@ def critic_node(state: dict, *, chat_client, model: str,
         pager=bool(tool_specs) and any(
             (t.get("function") or {}).get("name") == lane_digest.PAGER_TOOL
             for t in tool_specs),
+        lanes=state.get("research_lanes"),
     )
     msgs = _with_claims_framing(msgs, state)
     msgs = _with_known(msgs, state, "critic")
@@ -3779,11 +3972,14 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
     # M4: thread the same live critic dial into the meta-critic so the
     # x-tier consolidation honors a sharpened strictness / focus too.
     _mc_strict, _mc_focus = _read_critic_dial(state)
+    tool_specs, tool_executor = _with_evidence_tool(
+        state, tool_specs, tool_executor)
     msgs = build_meta_critic_messages(
         state["question"], state.get("plan", ""),
         state.get("research") or [],
         critic_verdicts,
         strictness=_mc_strict, adversarial_focus=_mc_focus,
+        lanes=state.get("research_lanes"),
     )
     msgs = _with_claims_framing(msgs, state)
     msgs = _with_known(msgs, state, "meta_critic")
@@ -4146,7 +4342,7 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
         user_parts = ["FOLLOW-UP QUESTION:\n" + follow_up_q]
         for i, rep in enumerate(new_research, start=1):
             user_parts.append(
-                f"\nNEW RESEARCHER REPORT (this follow-up, round {i}):"
+                f"\nNEW RESEARCHER REPORT {i} (this follow-up):"
                 f"\n{rep.strip()}",
             )
         if state.get("critique"):
@@ -4176,6 +4372,8 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
         _reports = list(state.get("research") or [])
         tool_specs, tool_executor = lane_digest.with_pager(
             _reports, tool_specs, tool_executor)
+        tool_specs, tool_executor = _with_evidence_tool(
+            state, tool_specs, tool_executor)
         msgs = build_synthesizer_messages(
             state["question"], state.get("plan", ""),
             _reports,
@@ -4189,6 +4387,7 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
             pager=any((t.get("function") or {}).get("name")
                       == lane_digest.PAGER_TOOL for t in tool_specs or []),
             wrap_up=wrap_up,
+            lanes=state.get("research_lanes"),
         )
         msgs = _with_claims_framing(msgs, state)
     # 2026-05-07: serial fallback chain. The synthesizer always tries
@@ -4558,7 +4757,7 @@ def adversary_node(state: dict, *, chat_client, model: str,
     msgs = build_adversary_messages(
         state.get("question") or "", final_answer,
         state.get("plan", ""), state.get("research") or [],
-        strictness=strictness,
+        strictness=strictness, lanes=state.get("research_lanes"),
     )
     msgs = _with_claims_framing(msgs, state)
     t0 = time.monotonic()

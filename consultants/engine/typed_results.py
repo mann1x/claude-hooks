@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Optional
 
 log = logging.getLogger("consultants.engine.typed_results")
@@ -304,6 +305,95 @@ CUT_OR_INVALID = ("Your {name} call was {what}. Call {name} again, smaller: "
                   "shorter fields and fewer items. Nothing else.")
 
 
+# ------------------------------------------------------------ verification
+
+#: Lines either side of a claim's ``line`` searched for its ``symbol`` and
+#: its ``quote`` (xOllama's ``readShows`` window, ``quote.go``).
+NEAR_LINES = 3
+
+
+def _squash(text: str) -> str:
+    return " ".join(str(text or "").replace("`", "").split())
+
+
+def _symbol_near(path, lines: list[str], symbol: str,
+                 line: Optional[int]) -> bool:
+    from consultants.engine import citation_linter as cl
+    sym = symbol.strip().strip("`").split("(")[0].split(".")[-1].strip()
+    if not sym:
+        return True
+    if line is None:
+        return bool(re.search(rf"\b{re.escape(sym)}\b", "\n".join(lines)))
+    if cl._symbol_appears_in_range(path, sym, line, None, slack=NEAR_LINES):
+        return True
+    if str(path).endswith(".py"):
+        return cl._enclosing_symbol_at_line(path, line) == sym
+    return False
+
+
+def _quote_at(lines: list[str], quote: str, line: Optional[int]
+              ) -> tuple[bool, Optional[int]]:
+    """``(near, found_at)``: whether the quote is within :data:`NEAR_LINES`
+    of ``line`` (anywhere when there is no line), else the first line it
+    starts on elsewhere, or ``None``."""
+    q = _squash(quote)
+    if not q:
+        return True, None
+    def window(lo, hi):
+        return _squash(" ".join(lines[max(0, lo):hi]))
+    if line is None:
+        return (q in _squash(" ".join(lines))), None
+    if q in window(line - 1 - NEAR_LINES, line + NEAR_LINES):
+        return True, None
+    span = max(1, len(quote.splitlines()))
+    for i in range(len(lines)):          # the line the quote starts on
+        if q in window(i, i + span):
+            return False, i + 1
+    return False, None
+
+
+def verify_claims(rec: dict, allowed_roots) -> dict:
+    """Plan G4: every ``council_report`` claim checked field by field at the
+    source before it is rendered — the file exists under the roots, the
+    line is inside it, the ``symbol`` is at (or encloses) that line and the
+    ``quote`` is in the file there. A field that fails puts its reason in
+    the claim's ``unverified``; nothing is dropped. Replaces the linter's
+    proximity check for typed reports, which on rendered JSON went silent
+    for any claim over ~65 characters."""
+    from consultants.engine import citation_linter as cl
+    roots = [r for r in (allowed_roots or ()) if r]
+    if not roots:
+        return rec
+    out = []
+    for c in rec.get("claims") or []:
+        c = dict(c)
+        notes: list[str] = []
+        line = c.get("line")
+        path = cl._resolve_path(c["path"], roots)
+        if path is None:
+            iss = cl.verify_citation(c["path"], line or 1, None,
+                                     allowed_roots=roots)
+            notes.append(iss.replacement.split("[unverified — ", 1)[-1]
+                         .rstrip("]") if iss else "file not found")
+        else:
+            lines = cl._load_file_lines(path) or []
+            if line is not None and line > len(lines):
+                notes.append(f"file has {len(lines)} lines")
+            else:
+                if c.get("symbol") and not _symbol_near(path, lines,
+                                                       c["symbol"], line):
+                    notes.append(f"`{c['symbol']}` is not at that line")
+                if c.get("quote"):
+                    near, at = _quote_at(lines, c["quote"], line)
+                    if not near:
+                        notes.append(f"the quote is at line {at}" if at
+                                     else "the quote is not in the file")
+        if notes:
+            c["unverified"] = "; ".join(notes)
+        out.append(c)
+    return {**rec, "claims": out}
+
+
 # ------------------------------------------------------------ rendering
 
 def _cite(c: Optional[str]) -> str:
@@ -320,7 +410,9 @@ def render(name: str, rec: dict) -> str:
             loc = f"{c['path']}:{c['line']}" if c.get("line") else c["path"]
             sym = f" [`{c['symbol']}`]" if c.get("symbol") else ""
             quote = f" — reads: `{c['quote']}`" if c.get("quote") else ""
-            lines.append(f"- {c['claim']} (`{loc}`){sym}{quote}")
+            bad = (f" [unverified — {c['unverified']}]"
+                   if c.get("unverified") else "")
+            lines.append(f"- {c['claim']} (`{loc}`{bad}){sym}{quote}")
         gaps = rec.get("gaps") or []
         if gaps:
             lines.append("Evidence insufficient:")

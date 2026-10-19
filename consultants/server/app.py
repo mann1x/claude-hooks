@@ -810,6 +810,12 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                 status_code=400,
                 detail="trace must be a bool",
             )
+        # Plan G5: what the asking assistant already tried, verbatim.
+        from consultants.engine.council import parse_tried
+        try:
+            tried = parse_tried(body.get("tried"))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from None
 
         runner_input = {
             "config": cfg,
@@ -827,6 +833,8 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         }
         if shell:
             runner_input["shell"] = shell
+        if tried:
+            runner_input["tried"] = tried
 
         inflight.register({
             "sid": sid, "kind": "consult",

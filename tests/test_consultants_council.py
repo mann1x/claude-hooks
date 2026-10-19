@@ -293,10 +293,40 @@ class TestPromptBuilders:
             "q", "p", ["report1", "report2"],
         )
         body = msgs[-1]["content"]
-        assert "RESEARCHER REPORT (round 1)" in body
-        assert "RESEARCHER REPORT (round 2)" in body
-        assert "report1" in body
-        assert "report2" in body
+        assert "RESEARCHER REPORT 1:\nreport1" in body
+        assert "RESEARCHER REPORT 2:\nreport2" in body
+        assert "(round" not in body          # the index is not a round
+
+    def test_reports_are_labelled_by_lane_and_round(self):
+        """Plan G3: the old ``(round i)`` was the report's index. With
+        ``research_lanes`` aligned, each report names its lane and round;
+        the number stays, since corrections and challenges cite it."""
+        lanes = [{"lane": 0, "round": 1}, {"lane": 1, "round": 1},
+                 {"lane": 100, "round": 2}]
+        body = council.build_critic_messages(
+            "q", "p", ["a", "b", "c"], lanes=lanes)[-1]["content"]
+        assert "RESEARCHER REPORT 1 (lane 0, round 1):\na" in body
+        assert "RESEARCHER REPORT 3 (lane 100, round 2):\nc" in body
+        for build in (council.build_meta_critic_messages,):
+            assert "REPORT 2 (lane 1, round 1)" in build(
+                "q", "p", ["a", "b", "c"], [], lanes=lanes)[-1]["content"]
+        syn = council.build_synthesizer_messages(
+            "q", "p", ["a", "b", "c"], None, lanes=lanes)[-1]["content"]
+        adv = council.build_adversary_messages(
+            "q", "ans", "p", ["a", "b", "c"], lanes=lanes)[-1]["content"]
+        assert "REPORT 3 (lane 100, round 2)" in syn
+        assert "REPORT 3 (lane 100, round 2)" in adv
+        # A length mismatch (a follow-up seeded parent reports) labels
+        # nothing rather than misattributing.
+        body = council.build_critic_messages(
+            "q", "p", ["a", "b"], lanes=lanes[:1])[-1]["content"]
+        assert "RESEARCHER REPORT 1:\na" in body and "(lane" not in body
+
+    def test_lane_tags_carry_the_round(self):
+        from consultants.engine.graph import _with_lane_tags
+        out = _with_lane_tags({"lane_idx": 2, "research_rounds_used": 1},
+                              {"research": ["r"]})
+        assert out["research_lanes"] == [{"lane": 2, "round": 2}]
 
     def test_synthesizer_includes_critique_when_present(self):
         msgs = council.build_synthesizer_messages(
