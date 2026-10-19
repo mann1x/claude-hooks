@@ -215,6 +215,21 @@ def caps_fields_from_show(data: dict) -> dict:
         "budget_message": budget_message_from_show(data),
         "capabilities": tuple(str(c) for c in caps) if isinstance(caps, list) else (),
     }
+    # ``thinking: {"values": [false, true], "default": false}`` — the values
+    # the model takes. gemma4:31b-cloud declares only on/off, takes no level
+    # and, since 2026-09, silently ignores one ("high" thinks not at all),
+    # so a model not in the recommendations must be read from here.
+    thinking = data.get("thinking")
+    if isinstance(thinking, dict):
+        from claude_hooks.ollama_account import _thinking_value
+        values = thinking.get("values")
+        if isinstance(values, list):
+            vals = tuple(v for v in map(_thinking_value, values) if v)
+            if vals:
+                out["thinking_values"] = vals
+        default = _thinking_value(thinking.get("default"))
+        if default:
+            out["thinking_default"] = default
     for key in ("remote_host", "remote_model"):
         if data.get(key):
             out[key] = str(data[key])

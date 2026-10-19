@@ -89,6 +89,21 @@ def test_show_parsing_reads_modelfile_facts():
     assert "thinking" in f["capabilities"]
 
 
+def test_thinking_values_are_read_from_show_when_no_recommendation_names_them():
+    # gemma4:31b-cloud: in no recommendation, /api/show declares on/off only.
+    # Without this the client sent think="high", which the service ignores.
+    show = {**SHOW_LOCAL, "thinking": {"values": [False, True], "default": False}}
+    srv = _server(**{"/api/show": (200, show)})
+    caps = provider_caps.ollama_caps("http://h", "gemma4:31b-cloud", fetch=srv)
+    assert caps.thinking_values == ("off", "on")
+    assert caps.thinking_default == "off"
+    levels = {**SHOW_LOCAL, "thinking": {"values": ["low", "medium", "high"],
+                                         "default": "medium"}}
+    f = provider_caps.caps_fields_from_show(levels)
+    assert f["thinking_values"] == ("low", "medium", "high")
+    assert "thinking_values" not in provider_caps.caps_fields_from_show(SHOW_LOCAL)
+
+
 def test_local_model_caps():
     srv = _server()
     caps = provider_caps.ollama_caps("http://h", "qwen3:8b", fetch=srv)
