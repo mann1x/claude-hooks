@@ -165,6 +165,8 @@ def test_learned_output_ceiling_retries_once_and_is_remembered():
 @pytest.mark.parametrize("code,body,fault", [
     (404, '{"error":"model \'nope\' not found"}', cc.MODEL_MISSING),
     (400, "prompt is too long for the context window", cc.CONTEXT_OVERFLOW),
+    (400, '{"error":"request (100732 tokens) exceeds the available '
+          'context size (99716 tokens), try increasing it"}', cc.CONTEXT_OVERFLOW),
     (401, "unauthorized", cc.BAD_REQUEST),
 ])
 def test_final_failures_carry_their_fault_class(code, body, fault):

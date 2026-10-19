@@ -186,7 +186,10 @@ _MODEL_MISSING_RX = re.compile(
     r"model\s+['\"]?[^'\"]*['\"]?\s+not found|not found, try pulling|"
     r"no such model|model not found|pull model manifest", re.I)
 _OVERFLOW_RX = re.compile(
-    r"context[ _]length|context[ _]window|exceeds? the (?:maximum )?context|"
+    # "exceeds the available context size" is llama.cpp / Ollama runner's
+    # wording when the loaded window is below the declared one.
+    r"context[ _]length|context[ _]window|"
+    r"exceeds? the (?:maximum |available )?context|"
     r"too many tokens|prompt is too long|context_window_exceeded", re.I)
 
 
