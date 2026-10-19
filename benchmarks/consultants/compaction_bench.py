@@ -1,11 +1,26 @@
 """Milestone C exit bench: fix-rate by compaction count (plan §3, Exit C).
 
-A capable local model (qwen3.6 27B on eleven2go by default: a weak
-model's failure says nothing about compaction), pinned to a 32,768-token
-window) runs the researcher's production tool loop — the real
-``_loop_payload_budgeter``, ``compaction.compact`` and the builtin
-read-only tools — over a generated project that is several windows
-long. Every trial therefore folds its history several times.
+A capable model (qwen3.6 27B on eleven2go by default: a weak model's
+failure says nothing about compaction) runs the researcher's production
+tool loop — the real ``_loop_payload_budgeter``, ``compaction.compact``
+and the builtin read-only tools — over a generated project sized to fold
+its history at least ``--folds`` times.
+
+The window is the model's own (``--window auto``, the default): resolved
+exactly as production resolves it, so the trigger, target and output cap
+are the ones a council gets. ``--window 32768`` pins it on both sides of
+the wire — a stress setting, at 1/8 of the budgets a 256k model gets, and
+never the default again (the 32k pin ran compaction at production's
+fixed-size parts with an eighth of its room). The project grows to fit by
+adding modules of the 32k task's size (``scale_for()``), never by making
+modules bigger: a model reads ~6 modules per turn as parallel calls, and
+at 9k tokens a module one turn added ~55k and jumped the prompt past a
+131k window before any check could fire (smoke, 2026-10-19).
+
+Task v4 (2026-10-19): modules are read in the stated order (``InOrder``),
+or a model at a production window reads what the symptom points at and
+never folds; the extra modules that size the project carry real-looking
+names and are interleaved (``modules_for``).
 
 Task v2 (2026-10-14). Every fact the fix needs can be learned once only,
 so it has to survive the folds — v1 let the model re-read the file it had
@@ -62,7 +77,11 @@ from claude_hooks.caliber_proxy.tools import (  # noqa: E402
 from claude_hooks.get_advice.chat_client import ChatClient  # noqa: E402
 from consultants.engine import budget, compaction, council  # noqa: E402
 
-WINDOW = 32_768
+#: The stress window (``--window 32768``); production is ``auto``.
+STRESS_WINDOW = 32_768
+#: Funcs per module: the 32k task's module size (~1.7k tokens), kept at
+#: every window so one turn's parallel reads stay a small share of it.
+FUNCS = 7
 FORK_BASELINE = {0: 0.85, 1: 0.63, 2: 0.50, 3: 0.25}  # fixed by compactions
 
 # --------------------------------------------------------------------------- #
@@ -146,11 +165,40 @@ def _filler(rng: random.Random, module: str, n_funcs: int) -> str:
     return "".join(out)
 
 
-def build_project(dest: Path, *, seed: int = 7, funcs: int = 7) -> list[str]:
+_PACKAGES = sorted({m.split("/")[0] for m in MODULES} | {
+    "replica", "audit", "admin", "cluster", "ingest", "cli", "plugins",
+    "storage", "schedule", "telemetry"})
+_STEMS = ("router manager registry handler adapter loader writer reader "
+          "planner tracker resolver encoder decoder monitor broker gateway "
+          "builder sweeper keeper merger splitter watcher scanner policy "
+          "session catalog snapshot rollup quota limiter").split()
+
+
+def modules_for(extra: int, seed: int = 11) -> list[str]:
+    """:data:`MODULES` plus ``extra`` modules named like the real ones and
+    spread among them (``config/limits`` stays first, ``net/backoff``
+    last). Named ``ext/part_NNN`` and grouped, they read as filler: the
+    model skipped all 127 and read 28 of 155 (smoke, 2026-10-19)."""
+    rng = random.Random(seed)
+    names: set[str] = set(MODULES)
+    fill = []
+    while len(fill) < extra:
+        a, b = rng.sample(_WORDS, 1)[0], rng.choice(_STEMS)
+        name = f"{rng.choice(_PACKAGES)}/{a}_{b}"
+        if name not in names:
+            names.add(name)
+            fill.append(name)
+    middle = MODULES[1:-1] + fill
+    rng.shuffle(middle)
+    return MODULES[:1] + middle + MODULES[-1:]
+
+
+def build_project(dest: Path, *, seed: int = 7, funcs: int = 7,
+                  extra: int = 0) -> list[str]:
     """Write the project; returns the reading order (paths under src/)."""
     rng = random.Random(seed)
     order = []
-    for mod in MODULES:
+    for mod in modules_for(extra):
         path = dest / "src" / f"{mod}.py"
         path.parent.mkdir(parents=True, exist_ok=True)
         head = f'"""ledgerd {mod.replace("/", ".")} module."""\n\nimport time\n'
@@ -171,7 +219,7 @@ def build_project(dest: Path, *, seed: int = 7, funcs: int = 7) -> list[str]:
 # Grading
 # --------------------------------------------------------------------------- #
 
-TASK_VERSION = 3
+TASK_VERSION = 4
 TICKET = "LDG-4471"
 FOLLOWUP_AFTER = 8
 FOLLOWUP = (f"One more thing from the on-call lead: whatever you find, the "
@@ -244,6 +292,62 @@ class OnceReadable:
         return out
 
 
+class InOrder:
+    """Modules are read in the stated order (task v4).
+
+    At a production window a model that reads only what the symptom points
+    at never fills the window, so the trial measures nothing about
+    compaction: on a 131k window qwen read 13 of 155 modules, went straight
+    to ``net/backoff`` and listed the rest unread (smoke, 2026-10-19). A
+    read past the next unread module is refused naming that module; a
+    module already read may be read again; ``grep`` shows no line of a
+    module not yet reached."""
+
+    def __init__(self, inner, order: list[str]):
+        self.inner = inner
+        self.order = list(order)
+        self.next = 0
+        self.refused = 0
+
+    @staticmethod
+    def _path(args) -> str:
+        try:
+            v = (json.loads(args) if isinstance(args, str)
+                 else dict(args or {})).get("path") or ""
+        except (TypeError, ValueError, AttributeError):
+            v = ""
+        return str(v).lstrip("./")
+
+    def _unread(self) -> set[str]:
+        return set(self.order[self.next:])
+
+    def __call__(self, name, args, cwd):
+        if name == "read_file":
+            target = self._path(args)
+            idx = next((i for i, m in enumerate(self.order)
+                        if target.endswith(m)), None)
+            if idx is not None and idx > self.next:
+                self.refused += 1
+                return (f"error: this audit reads the modules in order; "
+                        f"read {self.order[self.next]} next (module "
+                        f"{self.next + 1} of {len(self.order)})")
+            out = self.inner(name, args, cwd)
+            if idx == self.next and not str(out).startswith("error"):
+                self.next += 1
+            return out
+        out = self.inner(name, args, cwd)
+        if name == "grep" and isinstance(out, str):
+            hidden = self._unread()
+            kept = [ln for ln in out.split("\n")
+                    if not any(ln.startswith((m + ":", m + "-"))
+                               for m in hidden)]
+            if len(kept) != out.count("\n") + 1:
+                kept.append("(modules not yet reached in the audit order "
+                            "are not shown)")
+            out = "\n".join(kept)
+        return out
+
+
 def with_followup(prepare, *, after: int = FOLLOWUP_AFTER):
     """``prepare`` plus one typed user follow-up once ``after`` tool
     results are in the history — a typed prompt, not a harness note, so
@@ -280,6 +384,31 @@ def with_followup(prepare, *, after: int = FOLLOWUP_AFTER):
 # --------------------------------------------------------------------------- #
 # One trial
 # --------------------------------------------------------------------------- #
+
+def scale_for(*, trigger: int, target: int, folds: int,
+              margin: float = 1.25) -> tuple[int, int, int]:
+    """``(funcs, extra_modules, read_tokens)`` for a project whose reads
+    reach the trigger ``folds`` times: the first fill to the trigger, then
+    ``trigger - target`` per later fold, times ``margin``. Modules keep
+    :data:`FUNCS`; the count grows."""
+    from claude_hooks import token_calib
+    need = int(margin * (trigger + (folds - 1) * max(1, trigger - target)))
+    with __import__("tempfile").TemporaryDirectory() as d:
+        order = build_project(Path(d), funcs=FUNCS)
+        per_module = token_calib.estimate_tokens(
+            sum(len((Path(d) / p).read_text()) for p in order), "") / len(order)
+    extra = max(0, int(need / per_module) + 1 - len(MODULES))
+    return FUNCS, extra, need
+
+
+def resolved_budget(client, model: str, knobs) -> "budget.Budget":
+    """The budget production gives this model's researcher, sized on the
+    loop's own fixed prompt (system + question + tool schemas)."""
+    msgs = [{"role": "system", "content": council.RESEARCHER_SYSTEM},
+            {"role": "user", "content": QUESTION.format(order="")}]
+    return budget.plan(client, model, msgs, tools=openai_tool_specs(),
+                       knobs=knobs)
+
 
 class PinnedClient(ChatClient):
     """A chat client whose window is pinned on both sides of the wire."""
@@ -325,16 +454,23 @@ class Recorder:
             self.tools.append((name, path))
 
 
+def make_client(base: str, window: Optional[int]):
+    """The production client (``window`` None), or the pinned stress one."""
+    if window:
+        return PinnedClient(base, window)
+    return ChatClient(base, timeout_s=900.0)
+
+
 def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
-              order: list[str], max_iterations: int, think: bool) -> dict:
+              order: list[str], max_iterations: int, think: bool,
+              window: Optional[int] = None) -> dict:
     flow, placement = arm.split("/")
-    client = PinnedClient(base, WINDOW)
+    client = make_client(base, window)
     rec = Recorder()
-    # The window is pinned in the budget too, not only on the wire: a cloud
-    # model's own window (cloud recommendations) outranks the client's, and
-    # gemma4:31b-cloud ran to 56k prompt tokens on a "32k" window with no
-    # compaction at all.
-    knobs = budget.Knobs(num_ctx=WINDOW,
+    # A pinned window is pinned in the budget too, not only on the wire: a
+    # cloud model's own window outranks the client's, and gemma4:31b-cloud
+    # ran to 56k prompt tokens on a "32k" window with no compaction at all.
+    knobs = budget.Knobs(num_ctx=window,
                          compaction=compaction.Settings(flow=flow,
                                                         placement=placement))
     budgeter = council._loop_payload_budgeter(
@@ -359,7 +495,8 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
                        request=req, response=resp, prompt_tokens=pt,
                        completion_tokens=ct, duration_ms=ms)
 
-    executor = OnceReadable(make_executor((str(project),)))
+    ordered = InOrder(make_executor((str(project),)), order)
+    executor = OnceReadable(ordered)
     t0 = time.monotonic()
     error = None
     answer = ""
@@ -380,7 +517,8 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
     reads = [p for n, p in rec.tools if n == "read_file" and p]
     distinct = set(reads)
     return {
-        "arm": arm, "trial": idx, "model": model, "window": WINDOW,
+        "arm": arm, "trial": idx, "model": model,
+        "window": window or resolved_budget(client, model, knobs).context_length,
         "error": error, "seconds": round(time.monotonic() - t0, 1),
         "compactions": len(folds),
         "fold_reports": [{k: f.get(k) for k in
@@ -399,6 +537,7 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
         "unit_carried": [prepare.carried[g] for g in sorted(prepare.carried)],
         "limits_reads": executor.reads, "limits_refused": executor.refused,
         "limits_scrubbed": executor.scrubbed,
+        "modules_reached": ordered.next, "out_of_order_refused": ordered.refused,
         "stop_reason": (final.get("_stop_reason") if error is None
                         and isinstance(final, dict) else None),
         "answer": answer, **grade(answer, order),
@@ -420,9 +559,13 @@ def _pct(x):
 def render_report(trials: list[dict], meta: dict) -> str:
     arms = list(dict.fromkeys(t["arm"] for t in trials))
     lines = [f"# Compaction bench — {meta['date']}", "",
-             f"Model `{meta['model']}` at `{meta['base']}`, window pinned to "
-             f"{WINDOW:,} tokens, think={meta['think']}, "
+             f"Model `{meta['model']}` at `{meta['base']}`, "
+             f"{meta['window_note']}, think={meta['think']}, "
              f"{meta['trials']} trials per arm, commit `{meta['commit']}`.",
+             "", f"Project: {meta['modules']} modules × {meta['funcs']} "
+             f"functions, ~{meta['read_tokens']:,} tokens of reads, sized "
+             f"for {meta['folds']} folds (trigger {meta['trigger']:,}, "
+             f"target {meta['target']:,}, output cap {meta['cap']:,}).",
              "", "## By arm", "",
              "| arm | n | answered | fixed (of answered) | "
              "compactions (mean / min–max) | "
@@ -440,7 +583,7 @@ def render_report(trials: list[dict], meta: dict) -> str:
             f"{sum(r['compaction_calls'] for r in rows) / len(rows):.1f} | "
             f"{sum(r['compaction_seconds'] for r in rows) / len(rows):.0f} | "
             f"{sum(r['distinct_reads'] for r in rows) / len(rows):.1f}"
-            f"/{len(MODULES)} | "
+            f"/{meta['modules']} | "
             f"{sum(r['re_reads'] for r in rows) / len(rows):.1f} | "
             f"{sum(r['module_coverage'] for r in rows) / len(rows):.2f} | "
             f"{sum(1 for r in rows if r['error'])} |")
@@ -490,12 +633,48 @@ def main(argv: Optional[list[str]] = None) -> int:
                                      "full/system,full/user,basic/system")
     p.add_argument("--trials", type=int, default=4)
     p.add_argument("--concurrency", type=int, default=2)
-    p.add_argument("--max-iterations", type=int, default=48)
+    p.add_argument("--max-iterations", type=int, default=0,
+                   help="0 = modules + 20.")
+    p.add_argument("--window", default="auto",
+                   help="auto (the model's own, as production resolves it) "
+                        "or a token count to pin (stress: 32768).")
+    p.add_argument("--folds", type=int, default=3,
+                   help="Size the project to fold at least this often.")
+    p.add_argument("--funcs", type=int, default=0,
+                   help="Override the functions per module (0 = scale).")
+    p.add_argument("--extra-modules", type=int, default=-1,
+                   help="Override the filler modules (-1 = scale).")
+    p.add_argument("--plan-only", action="store_true",
+                   help="Print the resolved window and project size; run "
+                        "nothing.")
     p.add_argument("--think", action="store_true")
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--report-only", action="store_true")
     args = p.parse_args(argv)
 
+    window = None if args.window == "auto" else int(args.window)
+    probe = make_client(args.base, window)
+    plan = resolved_budget(probe, args.model, budget.Knobs(num_ctx=window))
+    target = budget.compaction_target_tokens(
+        plan.context_length, overhead_tokens=plan.prompt_tokens,
+        trigger_tokens=plan.trigger_tokens)
+    funcs, extra, need = scale_for(trigger=plan.trigger_tokens or 0,
+                                   target=target, folds=args.folds)
+    if args.funcs:
+        funcs = args.funcs
+    if args.extra_modules >= 0:
+        extra = args.extra_modules
+    n_modules = len(MODULES) + extra
+    max_iterations = args.max_iterations or n_modules + 20
+    window_note = (f"window pinned to {window:,} tokens (stress)" if window
+                   else f"window {plan.context_length:,} "
+                        f"({plan.window_source}, as production resolves it)")
+    print(f"{args.model}: {window_note}; trigger {plan.trigger_tokens:,}, "
+          f"target {target:,}, cap {plan.output_tokens:,}; project "
+          f"{n_modules} modules x {funcs} funcs (~{need:,} tok of reads), "
+          f"max_iterations {max_iterations}", flush=True)
+    if args.plan_only:
+        return 0
     date = dt.date.today().isoformat()
     out = args.out or (ROOT / "benchmarks/consultants/results" / date
                        / f"compaction-v{TASK_VERSION}")
@@ -505,14 +684,19 @@ def main(argv: Optional[list[str]] = None) -> int:
                             capture_output=True, text=True).stdout.strip()
     meta = {"date": date, "task_version": TASK_VERSION,
             "model": args.model, "base": args.base,
-            "window": WINDOW, "think": args.think, "trials": args.trials,
+            "window": window or plan.context_length,
+            "window_source": "pinned" if window else plan.window_source,
+            "window_note": window_note, "trigger": plan.trigger_tokens,
+            "target": target, "cap": plan.output_tokens, "folds": args.folds,
+            "funcs": funcs, "modules": n_modules, "read_tokens": need,
+            "think": args.think, "trials": args.trials,
             "arms": args.arms.split(","), "commit": commit,
-            "max_iterations": args.max_iterations,
+            "max_iterations": max_iterations,
             "fork_baseline": FORK_BASELINE}
 
     if not args.report_only:
         project = out / "project"
-        order = build_project(project)
+        order = build_project(project, funcs=funcs, extra=extra)
         done = set()
         if trials_path.exists():
             for line in trials_path.read_text().splitlines():
@@ -524,8 +708,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         with cf.ThreadPoolExecutor(args.concurrency) as pool:
             futs = {pool.submit(run_trial, base=args.base, model=args.model,
                                 arm=arm, idx=i, project=project, order=order,
-                                max_iterations=args.max_iterations,
-                                think=args.think): (arm, i)
+                                max_iterations=max_iterations,
+                                think=args.think, window=window): (arm, i)
                     for arm, i in jobs}
             for fut in cf.as_completed(futs):
                 t = fut.result()
