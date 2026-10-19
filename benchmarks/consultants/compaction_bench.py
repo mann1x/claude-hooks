@@ -482,7 +482,7 @@ def make_client(base: str, window: Optional[int]):
 
 
 def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
-              order: list[str], max_iterations: int, think: bool,
+              order: list[str], max_iterations: int, think,
               window: Optional[int] = None) -> dict:
     flow, placement = arm.split("/")
     client = make_client(base, window)
@@ -687,7 +687,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--plan-only", action="store_true",
                    help="Print the resolved window and project size; run "
                         "nothing.")
-    p.add_argument("--think", action="store_true")
+    # Production researchers run think="high" (927 of 927 gemma calls in
+    # the council transcripts); bare --think keeps the old True.
+    p.add_argument("--think", nargs="?", const=True, default=False,
+                   choices=[True, "low", "medium", "high", "max"],
+                   type=lambda v: v if v != "true" else True)
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--report-only", action="store_true")
     args = p.parse_args(argv)

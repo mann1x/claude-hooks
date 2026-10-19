@@ -910,8 +910,11 @@ def plan_cut(messages: list[dict], *, keep_tokens: int,
     body = n - head_end
     count_floor = min(body, max(math.ceil(body * PRESERVE_RECENT_MESSAGES_RATIO),
                                 int(keep_recent or 0)))
+    # A share of the usable input, as the fork takes it (compaction.ts:364,
+    # maxInputTokens − overhead), not of the whole window.
     last_turn_ceiling = (
-        LAST_TURN_CEILING_SHARE * max(0, context_length - overhead_tokens)
+        LAST_TURN_CEILING_SHARE * max(0, max_input_tokens(context_length)
+                                      - overhead_tokens)
         if _positive(context_length) else None)
 
     def pinned_plan(p: int) -> Optional[CutPlan]:

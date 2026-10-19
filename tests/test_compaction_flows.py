@@ -794,3 +794,25 @@ def test_the_writers_key_is_bounded_at_a_tenth_of_its_input():
     assert len(key) <= max(tool_ledger.budget_chars(3_000),
                            int(9_000 * 3 * compaction.KEY_SHARE))
     assert len(key.splitlines()) == 60
+
+
+def test_the_last_turn_ceiling_is_a_share_of_the_usable_input():
+    """Fork compaction.ts:364: 0.66 × (0.9 × window − overhead). A turn
+    between that and 0.66 × the whole window is cut with its prompt pinned,
+    not kept whole."""
+    window = 100_000
+    msgs = [{"role": "system", "content": "s"},
+            {"role": "user", "content": "the task"},
+            {"role": "assistant", "content": "a" * 3000},
+            {"role": "user", "content": "a follow-up"}]
+    for i in range(30):
+        msgs.append({"role": "assistant", "content": "", "tool_calls": [
+            {"id": f"c{i}", "type": "function",
+             "function": {"name": "read_file", "arguments": "{}"}}]})
+        msgs.append({"role": "tool", "tool_call_id": f"c{i}",
+                     "content": "x " * 3000})
+    turn = budget.estimate_messages_tokens(msgs[3:])
+    fork_ceiling = budget.LAST_TURN_CEILING_SHARE * budget.max_input_tokens(window)
+    assert fork_ceiling < turn < budget.LAST_TURN_CEILING_SHARE * window
+    cut = budget.plan_cut(msgs, keep_tokens=20_000, context_length=window)
+    assert cut.reason == "last-turn-ceiling" and cut.pinned_index == 3
