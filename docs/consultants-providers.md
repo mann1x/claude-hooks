@@ -181,8 +181,10 @@ mirrors it on the `llm_call` runtime event.
 3. per backend:
    - opencoti / llama.cpp: `/props` `opencoti.kv.session_ctx_max`, then `n_ctx`;
    - cloud Ollama: the recommendations window, then the trained context;
-   - local Ollama: the Modelfile `num_ctx`, **never** the trained context, which is not what the model loads with;
-   - local xOllama: the Modelfile `num_ctx`, then the window the model is loaded with (`GET /api/ps` `context_length`, cached 60 s), then the default; never sent, never trained;
+   - local Ollama: the Modelfile `num_ctx`, then the trained context — sent as `num_ctx`, so the model loads with it (pin `num_ctx` for less; a 256k KV cache may not fit a small GPU);
+   - local xOllama: the Modelfile `num_ctx`, then the window the model is loaded with (`GET /api/ps` `context_length`, cached 60 s), then the trained context, then the default; never sent;
+   - ollama.com used directly (`[endpoints.X] url = "https://ollama.com"`, `/api` or `/v1`) is cloud by its host: the recommendations window, then the trained context, nothing sent; there the bare name (`gemma4:31b`) is the cloud model — the record ollama.com returns for it is the one a local server returns for `gemma4:31b-cloud` (BF16, 262,144). A `/v1` endpoint without `/props` reads `/api/show` at the same root;
+   - the trained context is `/api/show` `model_info["<arch>.context_length"]`, which Ollama answers for a cloud model that is not pulled (no pull happens; checked 2026-10-19 on xOllama 0.40.3 and eleven2go 0.40.0 for gemma4:31b, minimax-m3, gpt-oss:120b); a retired model is a 410, an unknown one a 404;
 4. 32,768.
 
 Local Ollama is sent the resolved window as `options.num_ctx`, with the

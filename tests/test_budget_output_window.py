@@ -87,9 +87,13 @@ def test_overflow_keeps_its_own_cap_and_flags_compaction():
     # local: the Modelfile window, sent as num_ctx
     (_caps(cloud=False, declared_num_ctx=65_536, trained_ctx=262_144),
      (65_536, "modelfile", 65_536)),
-    # local without one: the default, never the trained context
-    (_caps(cloud=False, trained_ctx=262_144),
+    # local without one: the trained context, sent so the model loads it
+    (_caps(cloud=False, trained_ctx=262_144), (262_144, "trained", 262_144)),
+    # local with nothing declared: the default
+    (_caps(cloud=False),
      (budget.DEFAULT_WINDOW_TOKENS, "default", budget.DEFAULT_WINDOW_TOKENS)),
+    # cloud declaring nothing: the default, nothing sent
+    (_caps(cloud=True), (budget.DEFAULT_WINDOW_TOKENS, "default", None)),
     # opencoti: /props session max, then n_ctx; nothing sent
     (_caps(backend="opencoti", session_ctx_max=2_097_152, declared_num_ctx=8192),
      (2_097_152, "session_ctx_max", None)),
@@ -97,10 +101,27 @@ def test_overflow_keeps_its_own_cap_and_flags_compaction():
     # xOllama: never sent (a num_ctx reloads it)
     (_caps(backend="xollama", cloud=False, declared_num_ctx=32_768),
      (32_768, "modelfile", None)),
+    # xOllama not loaded yet: the trained context, still not sent
+    (_caps(backend="xollama", cloud=False, trained_ctx=131_072),
+     (131_072, "trained", None)),
 ])
 def test_window_resolution_per_backend(caps, expect):
     w = budget.resolve_window(_Caps(caps), "m")
     assert (w.tokens, w.source, w.send_num_ctx) == expect
+
+
+def test_xollama_prefers_the_loaded_window_to_the_trained_one():
+    c = _Caps(_caps(backend="xollama", cloud=False, trained_ctx=262_144))
+    c.loaded_context = lambda model: 65_536
+    w = budget.resolve_window(c, "m")
+    assert (w.tokens, w.source, w.send_num_ctx) == (65_536, "loaded", None)
+
+
+def test_a_pin_below_the_trained_context_wins_on_local_ollama():
+    pin = budget.knobs_from({"num_ctx": 32_768})
+    w = budget.resolve_window(
+        _Caps(_caps(cloud=False, trained_ctx=262_144)), "m", pin)
+    assert (w.tokens, w.source, w.send_num_ctx) == (32_768, "pinned", 32_768)
 
 
 def test_pinned_window_is_sent_only_to_local_ollama():

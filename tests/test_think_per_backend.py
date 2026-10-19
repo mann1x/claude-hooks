@@ -314,7 +314,7 @@ def test_streamed_final_chunk_keeps_the_enforced_budget():
     assert out["timings"]["cached_prompt_tokens"] == 12
 
 
-def test_xollama_window_is_the_loaded_one_never_trained():
+def test_xollama_window_is_the_loaded_one_then_trained():
     from consultants.engine import budget
 
     class _C:
@@ -330,8 +330,9 @@ def test_xollama_window_is_the_loaded_one_never_trained():
             return self.loaded
     w = budget.resolve_window(_C(32_768), "m")
     assert (w.tokens, w.source, w.send_num_ctx) == (32_768, "loaded", None)
+    # Not loaded yet: the trained context (owner, 2026-10-19), never sent.
     w = budget.resolve_window(_C(None), "m")
-    assert (w.tokens, w.source) == (budget.DEFAULT_WINDOW_TOKENS, "default")
+    assert (w.tokens, w.source, w.send_num_ctx) == (262_144, "trained", None)
 
 
 def test_loaded_context_reads_api_ps_and_caches_briefly():

@@ -227,3 +227,61 @@ def test_account_cli_prints_status(monkeypatch, capsys):
     out = _json.loads(capsys.readouterr().out)
     assert out["account"]["plan"] == "pro"
     assert seen == {"url": "http://h", "models": ["a:cloud"]}
+
+
+# --- the trained window, ollama.com direct (2026-10-19) ------------------ #
+
+def test_a_failed_show_is_never_cached_even_when_the_catalog_answered():
+    """A transient /api/show failure cached a record without its trained
+    window, pinning an ollama.com model to the 32,768 default."""
+    class Flaky(FakeServer):
+        def __call__(self, url, **kw):
+            if url.endswith("/api/show"):
+                self.calls.append(url)
+                raise urllib.error.URLError("timed out")
+            return super().__call__(url, **kw)
+    srv = Flaky(_server().routes)
+    caps = provider_caps.ollama_caps("http://h", "qwen3:8b", fetch=srv)
+    assert caps.trained_ctx is None
+    assert provider_caps.cached("http://h", "qwen3:8b") is None
+
+
+def test_a_definite_no_from_show_is_cached():
+    srv = _server(**{"/api/show": (404, {"error": "not found"})})
+    provider_caps.ollama_caps("http://h", "gone:1b", fetch=srv)
+    assert provider_caps.cached("http://h", "gone:1b") is not None
+    assert provider_caps.probe_show("http://h", "gone:1b", fetch=srv) == {}
+    five = _server(**{"/api/show": (503, None)})
+    assert provider_caps.probe_show("http://h", "m", fetch=five) is None
+
+
+def test_ollama_com_is_the_cloud_by_its_host_not_the_name():
+    """There ``gemma4:31b`` is the cloud model; locally that name is the
+    downloadable quant. Measured 2026-10-19: ollama.com /api/show answers
+    unauthenticated, BF16, 262,144."""
+    srv = _server(**{"/api/show": (200, {"model_info": {
+        "gemma4.context_length": 262144}})})
+    caps = provider_caps.ollama_caps("https://ollama.com", "gemma4:31b",
+                                     fetch=srv)
+    assert caps.cloud is True and caps.trained_ctx == 262144
+    assert provider_caps.is_cloud_service("https://ollama.com/v1")
+    assert not provider_caps.is_cloud_service("http://notollama.com:11434")
+    local = provider_caps.ollama_caps("http://h", "gemma4:31b", fetch=_server())
+    assert local.cloud is False
+
+
+def test_a_v1_endpoint_without_props_reads_the_ollama_window():
+    """ollama.com's /v1 has no /props: the window came out None and the
+    role never compacted."""
+    srv = _server(**{"/api/show": (200, {"model_info": {
+        "glm5_next.context_length": 1048576}})})
+    caps = provider_caps.openai_compat_caps("https://ollama.com/v1",
+                                            "glm-5.3-flash", fetch=srv)
+    assert caps.trained_ctx == 1048576 and caps.cloud is True
+    assert caps.base_url == "https://ollama.com/v1"
+    # A llama.cpp server with /props keeps its own window.
+    lc = FakeServer({"/props": (200, {"default_generation_settings": {
+        "n_ctx": 65536}})})
+    caps = provider_caps.openai_compat_caps("http://l/v1", "m", fetch=lc)
+    assert caps.backend == provider_caps.LLAMACPP
+    assert caps.declared_num_ctx == 65536

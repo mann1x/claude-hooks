@@ -227,9 +227,14 @@ def resolve_window(chat_client: Any, model: str,
     2. a pinned ``num_ctx``;
     3. per backend: opencoti/llama.cpp ``/props`` (session max, then
        ``n_ctx``); cloud Ollama recommendations, then trained context;
-       local Ollama the Modelfile ``num_ctx`` — never the trained
-       context, which is not what the model loads with;
-    4. :data:`DEFAULT_WINDOW_TOKENS`.
+       local Ollama the Modelfile ``num_ctx``, then the trained context
+       (sent, so the model loads with it); local xOllama the Modelfile,
+       then the loaded window, then the trained context;
+    4. :data:`DEFAULT_WINDOW_TOKENS`, only when nothing is declared.
+
+    The trained context is the council's default window: it is what a
+    model is built for, and an operator who wants less pins ``num_ctx``
+    (``[budget]`` / ``[role.X.models."<m>"]``).
 
     Local Ollama is sent the resolved window as ``options.num_ctx``, the
     same value on every call so the model never reloads; nothing else is
@@ -264,19 +269,22 @@ def resolve_window(chat_client: Any, model: str,
         ctx = context_length_of(chat_client, model)
         return Window(ctx, "probe" if ctx else "unknown")
     if local:
-        if _positive(caps.declared_num_ctx):
-            n = int(caps.declared_num_ctx)
-            return Window(n, "modelfile", n)
+        for src, v in (("modelfile", caps.declared_num_ctx),
+                       ("trained", caps.trained_ctx)):
+            if _positive(v):
+                return Window(int(v), src, int(v))
         return Window(DEFAULT_WINDOW_TOKENS, "default", DEFAULT_WINDOW_TOKENS)
     if caps.backend == "xollama" and caps.cloud is False:
         # Never sent a num_ctx (it reloads), so the window is what the
         # server loaded the model with: the Modelfile's, else the one
-        # /api/ps reports, else the default — never the trained context.
+        # /api/ps reports; before it is loaded, the trained context.
         if _positive(caps.declared_num_ctx):
             return Window(int(caps.declared_num_ctx), "modelfile")
         loaded = _loaded_context_of(chat_client, model)
         if loaded:
             return Window(loaded, "loaded")
+        if _positive(caps.trained_ctx):
+            return Window(int(caps.trained_ctx), "trained")
         return Window(DEFAULT_WINDOW_TOKENS, "default")
     order = ((("context_length", caps.context_length),
               ("trained", caps.trained_ctx))

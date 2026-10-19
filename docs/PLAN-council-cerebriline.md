@@ -209,7 +209,7 @@ Deadlines are re-validated against the measured decode rates (B1). The parity co
 - `budget.plan` always budgets against the window the backend **actually** gives:
   - granted window first;
   - then the resolved knob;
-  - never the trained ctx for a local model.
+  - then the trained ctx (the default since 2026-10-19, owner decision; a pin asks for less).
 
 ### B3. Thinking — per backend, level fixed per (role, model)
 

@@ -34,6 +34,7 @@ import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Optional
@@ -296,6 +297,16 @@ def _request(url: str, *, data: Optional[dict] = None,
 Fetch = Callable[..., tuple[int, Any]]
 
 
+def is_cloud_service(base_url: str) -> bool:
+    """Whether ``base_url`` is Ollama's own cloud service (ollama.com, its
+    ``/api`` and ``/v1`` used directly, no local server). Decided by the
+    host, never by a model's name: there ``gemma4:31b`` is the cloud
+    model, while on a local server the same name is the downloadable
+    quant and the cloud one is ``gemma4:31b-cloud``."""
+    host = urllib.parse.urlsplit(base_url or "").hostname or ""
+    return host == "ollama.com" or host.endswith(".ollama.com")
+
+
 def probe_xollama(base_url: str, *, fetch: Fetch = _request,
                   headers: Optional[dict] = None) -> Optional[tuple[str, ...]]:
     """xOllama's feature list, ``()`` for a stock Ollama (404), ``None``
@@ -312,6 +323,10 @@ def probe_xollama(base_url: str, *, fetch: Fetch = _request,
 
 def probe_show(base_url: str, model: str, *, fetch: Fetch = _request,
                headers: Optional[dict] = None) -> Optional[dict]:
+    """The model's ``/api/show`` record; ``{}`` when the server answered
+    without one (a 404 for an unknown model, a 410 for a retired one);
+    ``None`` when it could not be asked (network failure or a 5xx), which
+    must never be cached: the window it would have carried defaults."""
     try:
         status, body = fetch(f"{base_url}/api/show", data={"model": model},
                              headers=headers)
@@ -319,7 +334,13 @@ def probe_show(base_url: str, model: str, *, fetch: Fetch = _request,
         log.info("provider_caps: /api/show failed for %s at %s: %s",
                  model, base_url, e)
         return None
-    return body if status == 200 and isinstance(body, dict) else None
+    if status == 200 and isinstance(body, dict):
+        return body
+    if 400 <= status < 500:
+        return {}
+    log.info("provider_caps: /api/show answered %s for %s at %s",
+             status, model, base_url)
+    return None
 
 
 def probe_props(base_url: str, *, fetch: Fetch = _request,
@@ -407,6 +428,8 @@ def ollama_caps(base_url: str, model: str, *,
             fields["family"] = entry["family"]
     elif "cloud" not in fields:
         fields["cloud"] = model.endswith(":cloud") or model.endswith("-cloud")
+    if is_cloud_service(base_url):
+        fields["cloud"] = True
     rec = ollama_account.recommendation_for(
         base_url, model, remote_model=fields.get("remote_model"),
         fetch=fetch, headers=headers)
@@ -419,9 +442,11 @@ def ollama_caps(base_url: str, model: str, *,
             fields["thinking_values"] = tuple(rec["thinking_values"])
     caps = ProviderCaps(base_url=base_url, model=model, backend=backend,
                         **fields)
-    # Only a definite answer is worth keeping: a server that could not be
-    # asked at all is asked again next time.
-    if show is not None or features is not None or entry is not None:
+    # Only a definite answer is worth keeping. ``/api/show`` carries the
+    # trained window, so a record built while it could not be asked is
+    # asked again next time, whatever else answered: cached, a transient
+    # failure pinned an ollama.com model to the 32,768 default.
+    if show is not None:
         _store(caps)
     return caps
 
@@ -471,6 +496,16 @@ def openai_compat_caps(base_url: str, model: str, *,
             return hit
     props = probe_props(base_url, fetch=fetch, headers=headers)
     fields = caps_fields_from_props(props) if props else {}
+    if not (fields.get("session_ctx_max") or fields.get("declared_num_ctx")):
+        # No /props window: an Ollama-protocol server (ollama.com, Ollama's
+        # own /v1) declares its windows through /api/show and the
+        # recommendations at the same root. Without this a /v1 endpoint at
+        # ollama.com had no window at all and never compacted.
+        root = re.sub(r"/v1/?$", "", base_url.rstrip("/"))
+        oc = ollama_caps(root, model, fetch=fetch, headers=headers,
+                         refresh=refresh)
+        if oc.trained_ctx or oc.context_length:
+            return _store(replace(oc, base_url=base_url, boot_id=boot_id))
     backend = OPENCOTI if (props and (
         "opencoti" in props or any("polykv" in f or "elastic" in f
                                    for f in fields.get("features", ())))) \
