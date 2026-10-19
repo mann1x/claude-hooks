@@ -367,6 +367,8 @@ def with_followup(prepare, *, after: int = FOLLOWUP_AFTER):
     #: generation -> whether that generation's marker carries the unit,
     #: read from the history each call is actually sent with.
     carried: dict[int, bool] = {}
+    #: generation -> that marker's text, as sent (why a fact was lost).
+    markers: dict[int, str] = {}
 
     def wrapped(payload):
         msgs = payload.get("messages") or []
@@ -381,8 +383,11 @@ def with_followup(prepare, *, after: int = FOLLOWUP_AFTER):
         wrapped.last = list(sent_msgs)
         for m in sent_msgs:
             if m.get("_compaction_marker"):
-                text = str(m.get("content") or "").lower()
-                carried[int(m.get("_compaction_generation") or 1)] = (
+                raw = str(m.get("content") or "")
+                text = raw.lower()
+                gen = int(m.get("_compaction_generation") or 1)
+                markers[gen] = raw
+                carried[gen] = (
                     "decisecond" in text or "tenths of a second" in text)
         return out
 
@@ -391,6 +396,7 @@ def with_followup(prepare, *, after: int = FOLLOWUP_AFTER):
             setattr(wrapped, attr, getattr(prepare, attr))
     wrapped.sent = sent
     wrapped.carried = carried
+    wrapped.markers = markers
     wrapped.last = []
     return wrapped
 
@@ -563,6 +569,7 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
         "followup_sent": prepare.sent["done"],
         #: per generation, in order: did that digest carry the unit?
         "unit_carried": [prepare.carried[g] for g in sorted(prepare.carried)],
+        "marker_texts": [prepare.markers[g] for g in sorted(prepare.markers)],
         "limits_reads": executor.reads, "limits_refused": executor.refused,
         "limits_scrubbed": executor.scrubbed,
         "modules_reached": ordered.next, "out_of_order_refused": ordered.refused,
