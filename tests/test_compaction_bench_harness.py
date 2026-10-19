@@ -19,30 +19,6 @@ def _inner(name, args, cwd):
     return "content of " + str(args)
 
 
-def test_reads_are_refused_past_the_next_module():
-    ex = cb.InOrder(_inner, ["src/a.py", "src/b.py", "src/c.py"])
-    out = ex("read_file", '{"path": "src/c.py"}', ".")
-    assert out.startswith("error") and "src/a.py next" in out
-    assert ex.refused == 1 and ex.next == 0
-    assert "content" in ex("read_file", '{"path": "src/a.py"}', ".")
-    assert ex.next == 1
-    # A module already read may be read again; it does not advance.
-    assert "content" in ex("read_file", '{"path": "./src/a.py"}', ".")
-    assert ex.next == 1
-
-
-def test_grep_shows_no_line_of_a_module_not_yet_reached():
-    ex = cb.InOrder(_inner, ["src/a.py", "src/b.py"])
-    assert "src/" not in ex("grep", '{"pattern": "x"}', "."
-                            ).replace("(modules", "")
-    ex("read_file", '{"path": "src/a.py"}', ".")
-    out = ex("grep", '{"pattern": "x"}', ".")
-    assert "src/a.py:1" in out and "src/b.py" not in out
-    assert "not yet reached" in out
-    ex("read_file", '{"path": "src/b.py"}', ".")
-    assert "src/b.py:2" in ex("grep", '{"pattern": "x"}', ".")
-
-
 def test_filler_is_named_like_the_project_and_interleaved():
     mods = cb.modules_for(127)
     assert len(mods) == len(set(mods)) == len(cb.MODULES) + 127
@@ -62,10 +38,53 @@ def test_the_project_grows_by_modules_never_by_module_size():
     assert small[0] == cb.FUNCS and small[1] < extra
 
 
-def test_a_report_before_every_module_is_sent_back_once_naming_the_next():
-    ex = cb.InOrder(_inner, ["src/a.py", "src/b.py"])
-    ex("read_file", '{"path": "src/a.py"}', ".")
-    note = ex.report_check([])
-    assert "1 of 2" in note and "src/b.py" in note
-    ex("read_file", '{"path": "src/b.py"}', ".")
-    assert ex.report_check([]) is None
+class _Rec:
+    def __init__(self):
+        self.events = []
+
+
+def test_reads_are_never_refused_and_note_their_read_phase():
+    rec = _Rec()
+    ex = cb.ReadLog(_inner, rec)
+    assert "content" in ex("read_file", '{"path": "src/net/backoff.py"}', ".")
+    rec.events.append({"kind": "compaction"})
+    assert "content" in ex("read_file", '{"path": "./src/a.py"}', ".")
+    assert "content" in ex("read_file", '{"path": "src/net/backoff.py"}', ".")
+    assert ex.phase == {"src/net/backoff.py": 0, "src/a.py": 1}
+    ex("read_file", '{"path": "src/config/limits.py"}', ".")
+    ex("read_file", '{"path": "src/config/limits.py"}', ".")
+    assert ex.limits_reads == 2 and ex.limits_rereads_after_fold == 1
+
+
+def test_the_table_is_graded_per_module_by_read_phase():
+    purposes = {"src/a/lease_router.py": "evict",
+                "src/b/shard_keeper.py": "reconcile",
+                "src/c/span_loader.py": "flush"}
+    phases = {"src/a/lease_router.py": 0, "src/b/shard_keeper.py": 1}
+    answer = ("| src/a/lease_router.py | evicts stale leases |\n"
+              "| src/b/shard_keeper.py | keeps shards |\n"
+              "| src/c/span_loader.py | flushing spans |")
+    assert cb.grade_table(answer, purposes, phases) == {
+        "0": [1, 1], "1": [0, 1], "unread": [1, 1]}
+    # A bare word in another module's row is not this module's row.
+    assert cb.grade_table("| src/b/shard_keeper.py | evicts the lease_router |",
+                          {"src/a/lease_router.py": "evict"},
+                          {"src/a/lease_router.py": 0}) == {"0": [0, 1]}
+    # The module's own name never counts as its purpose.
+    assert cb.grade_table("| src/x/evict_router.py | routes |",
+                          {"src/x/evict_router.py": "evict"},
+                          {"src/x/evict_router.py": 0}) == {"0": [0, 1]}
+
+
+def test_modules_say_what_they_do_and_names_never_give_it_away(tmp_path):
+    order, purposes = cb.build_project(tmp_path, extra=60)
+    assert "src/config/limits.py" not in purposes
+    assert "src/net/backoff.py" not in purposes
+    assert len({p.rsplit("/", 1)[-1] for p in order}) == len(order)
+    for path, verb in purposes.items():
+        text = (tmp_path / path).read_text()
+        assert f"def {verb}_" in text  # the operation is in the code
+        assert cb.verb_stem(verb) not in path.lower()
+    # No word salad, no decoy echoing the bug.
+    joined = " ".join(order)
+    assert "window" not in joined and "retry" not in joined
