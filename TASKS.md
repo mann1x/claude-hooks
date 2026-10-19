@@ -8,7 +8,7 @@
 
 - [ch-13](.claude-hooks/tasks/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 8h
 - [ch-14](.claude-hooks/tasks/ch-14.md) **H** `consultants.compaction` Compaction: the writer is never shown the task (bug-1087) — port the fork's pinned-prompt rule, re-bench — 1m
-- [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 7h
+- [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 8h
 - [ch-12](.claude-hooks/tasks/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 8h
 
 ## Ready (2)

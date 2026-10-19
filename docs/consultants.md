@@ -1622,8 +1622,11 @@ with less to work from.
 **Reservations follow what turns cost.** `num_predict` is a ceiling, not
 a forecast. Before a run has turns to measure, a quarter of the window
 is held back; after two, the reservation follows their high-water mark
-×1.5. This is why the same model can show a different trigger point on
-two different questions.
+×1.5, never more than the model's declared room — its published output
+ceiling, else a quarter of the window — and never the per-turn cap
+(0.75 × window), which is the most a turn may spend, not what it is
+expected to. This is why the same model can show a different trigger
+point on two different questions.
 
 ### Thinking is condensed, not discarded
 
@@ -1654,8 +1657,9 @@ pre-existing behaviour of re-deriving. Set
 
 ### Compaction — how a long lane keeps working
 
-When a role's history reaches the trigger (0.9 of the window less the
-reply reserve), the span between the question and the recent tail is
+When a role's history reaches the trigger (the smaller of 0.9 of the
+usable input — itself 0.9 of the window — and the window less the reply
+reserve; Cerebriline's rule), the span between the question and the recent tail is
 folded into one message. Everything about that fold is in
 `consultants/engine/compaction.py`; the cut is planned by
 `budget.plan_cut()`.
@@ -1717,8 +1721,9 @@ the output-budget ladder keys on it.
 `placement` decides whether that message is a mid-history `system`
 marker or a `user` turn (the fork's and xOllama's order).
 
-**Sizing.** The target is 25% of the free window (window less system
-prompt and tool schemas), always below the trigger. The reply reserve is
+**Sizing.** The target is 25% of the free input (0.9 × window less
+system prompt and tool schemas), always below the trigger. At 32k / 128k
+/ 256k the cold-start trigger is 24,576 / 98,304 / 196,608. The reply reserve is
 measured from the transcript: the largest of the newest three turns, or
 the second-largest once there are four samples, never below
 `output_room_min` (8,000). The cut never folds the question, the newest

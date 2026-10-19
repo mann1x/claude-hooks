@@ -402,9 +402,41 @@ PRESERVE_RECENT_WINDOW_EXPONENT = 2 / 3
 #: leaves the summary nothing to be written into.
 PRESERVE_RECENT_TARGET_SHARE = 0.6
 
-#: Fraction of the usable window a prompt may reach before compaction
+#: Fraction of the usable input a prompt may reach before compaction
 #: (plan C3, the fork's 0.9). ``[budget] trigger_ratio``.
 COMPACTION_TRIGGER_RATIO = 0.9
+
+#: The usable input share when only a window is known (fork
+#: ``CONTEXT_WINDOW_INPUT_RATIO``, ``resolveEffectiveMaxInputTokens``,
+#: compaction-shared.ts:24/:705). The ratio trigger and the compaction
+#: target are shares of this, not of the whole window; the room left for
+#: a reply is measured against the window itself.
+CONTEXT_WINDOW_INPUT_RATIO = 0.9
+
+#: The output share a model that publishes no ceiling is assumed to
+#: declare, for the trigger's output room only: 32,000 per 128,000 (fork
+#: ``resolveDefaultMaxOutputTokens``, gateway.ts:96). The per-turn cap is
+#: :func:`resolve_output_budget` (0.75 × window); the trigger reserves
+#: against the declared room, never against that cap (fork
+#: compaction-shared.ts:441-465, mail #1729).
+DECLARED_OUTPUT_WINDOW_SHARE = 32_000 / 128_000
+DECLARED_OUTPUT_MIN_TOKENS = 1_024
+
+
+def max_input_tokens(context_length: int) -> float:
+    """The usable input of a window known only by its size. Unrounded, as
+    in the fork: shares are taken of it before anything is floored."""
+    return context_length * CONTEXT_WINDOW_INPUT_RATIO
+
+
+def declared_output_tokens(context_length: int,
+                           model_max_output: Optional[int] = None) -> int:
+    """The output room a window declares to the trigger: the model's own
+    ceiling when it publishes one, else a quarter of the window."""
+    if _positive(model_max_output):
+        return int(model_max_output)
+    return max(DECLARED_OUTPUT_MIN_TOKENS,
+               int(context_length * DECLARED_OUTPUT_WINDOW_SHARE))
 
 #: Floor on the trigger as a share of the window. Output room is
 #: subtracted from the window, and on a small window a large cap can eat
@@ -531,10 +563,17 @@ def compaction_trigger_tokens(*, context_length: int,
     that is what :func:`plan` caps the answer at. Without it the cap fell
     below ``room_min`` ~3k tokens before the trigger on a 32k window, and
     the starved-cap latch fired on every descent instead of the trigger.
+
+    Fork ``resolveCompactionTriggerTokens`` (compaction-shared.ts:467): the
+    ratio applies to the usable input (:func:`max_input_tokens`, 0.9 × the
+    window), the room to the window itself. ``model_max_tokens`` is the
+    model's *published* output ceiling, never the session's per-turn cap:
+    without one the declared room is :func:`declared_output_tokens`, a
+    quarter of the window. Passing the 0.75 × window cap here held three
+    quarters of a 32k window back once a run's turns grew.
     """
-    ratio_trigger = context_length * ratio
-    declared_room = (int(model_max_tokens) if _positive(model_max_tokens)
-                     else MAX_OUTPUT_TOKENS)
+    ratio_trigger = max_input_tokens(context_length) * ratio
+    declared_room = declared_output_tokens(context_length, model_max_tokens)
     if _positive(observed_output):
         output_room = min(
             declared_room,
@@ -660,8 +699,13 @@ def plan(chat_client: Any, model: str, messages: list[dict], *,
                              "silently rule", **common)
 
     observed = observed_output_tokens(messages, model=model)
+    # The trigger reserves against the model's declared room (its published
+    # ceiling, else a quarter of the window), not against ``ask``: the
+    # session cap is the most a turn may spend, not what it is expected to.
     trigger = compaction_trigger_tokens(
-        context_length=ctx, model_max_tokens=ask, observed_output=observed,
+        context_length=ctx,
+        model_max_tokens=model_max_output_of(chat_client, model),
+        observed_output=observed,
         ratio=float(knobs.trigger_ratio), room_min=int(knobs.output_room_min),
         reserve_share=float(knobs.reserve_share),
         reserve_min=int(knobs.reserve_min))
@@ -920,13 +964,15 @@ def compaction_target_tokens(context_length: Optional[int], *,
                              trigger_tokens: Optional[int] = None,
                              share: float = COMPACTION_TARGET_SHARE) -> int:
     """What a compaction aims the folded history at: ``share`` of the free
-    content (``window - overhead``, overhead = system turns + tool
-    schemas), kept below the trigger so a compaction never lands where it
-    fires again (plan C3 / 02 P1-a)."""
+    content (``max input - overhead``, max input = :func:`max_input_tokens`,
+    overhead = system turns + tool schemas), kept below the trigger so a
+    compaction never lands where it fires again (plan C3 / 02 P1-a; fork
+    ``resolveMessageTargetTokens``)."""
     if not _positive(context_length):
         base = trigger_tokens or 0
         return max(1, int(base * share) if base else 1)
-    target = int(share * max(0, int(context_length) - max(0, overhead_tokens)))
+    target = int(share * max(0, max_input_tokens(int(context_length))
+                             - max(0, overhead_tokens)))
     if _positive(trigger_tokens):
         target = min(target, int(trigger_tokens) - 1)
     return max(1, target)

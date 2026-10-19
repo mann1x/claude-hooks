@@ -321,15 +321,56 @@ def test_requests_carry_across_generations():
 def test_trigger_defaults_follow_the_fork():
     assert budget.COMPACTION_TRIGGER_RATIO == 0.9
     assert budget.MIN_OUTPUT_ROOM_TOKENS == 8_000
+    # The ratio is a share of the usable input (0.9 × window), as in the
+    # fork: 0.5 × 90,000.
     lo = budget.compaction_trigger_tokens(context_length=100_000, ratio=0.5,
                                           observed_output=10)
-    assert lo == 50_000
+    assert lo == 45_000
 
 
 def test_target_is_a_quarter_of_free_content_below_the_trigger():
+    # 0.25 × (0.9 × 32,768 − 2,768) — the fork's resolveMessageTargetTokens.
     assert budget.compaction_target_tokens(32_768, overhead_tokens=2_768,
-                                           trigger_tokens=29_000) == 7_500
+                                           trigger_tokens=29_000) == 6_680
     assert budget.compaction_target_tokens(10_000, trigger_tokens=1_000) == 999
+
+
+@pytest.mark.parametrize("window, cold, measured, target", [
+    # Fork numbers (compaction-shared.ts:441-485, compaction.ts:554):
+    # cold = min(0.81 w, w − min(w/4, w/4)), measured with a 1,000-token
+    # turn = min(0.81 w, w − 8,000), target = (0.9 w − 2,000) / 4.
+    (32_768, 24_576, 24_768, 6_872),
+    (131_072, 98_304, 106_168, 28_991),
+    (262_144, 196_608, 212_336, 58_482),
+])
+def test_trigger_and_target_match_the_fork_at_each_window(
+        window, cold, measured, target):
+    assert budget.compaction_trigger_tokens(context_length=window) == cold
+    assert budget.compaction_trigger_tokens(
+        context_length=window, observed_output=1_000) == measured
+    assert budget.compaction_target_tokens(
+        window, overhead_tokens=2_000, trigger_tokens=cold) == target
+
+
+def test_the_trigger_reserves_the_declared_room_not_the_session_cap():
+    """``plan()`` hands the trigger the model's published ceiling, else a
+    quarter of the window — never the 0.75 × window per-turn cap, which
+    held three quarters of a 32k window back (mail #1729)."""
+    class _C:
+        def context_length(self, model):
+            return 32_768
+
+    msgs = [{"role": "user", "content": "q"}] + [
+        {"role": "assistant", "content": "a" * 120_000}] * 2
+    knobs = budget.Knobs(reserve_share=0.0, reserve_min=0)
+    p = budget.plan(_C(), "m", msgs, knobs=knobs)
+    assert p.role_cap == 24_576                    # 0.75 × 32,768
+    # Declared room = 8,192; the measured turn is large, so the room is
+    # min(8,192, 0.5 w, …) = 8,192 and the trigger 32,768 − 8,192. With
+    # the session cap as the declared room it was the 0.5 w floor.
+    assert p.trigger_tokens == 24_576
+    assert budget.declared_output_tokens(32_768) == 8_192
+    assert budget.declared_output_tokens(32_768, 4_000) == 4_000
 
 
 def test_the_cut_never_opens_the_tail_on_a_tool_result():
