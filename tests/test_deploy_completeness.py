@@ -287,6 +287,61 @@ class TestCouncilSandboxLauncher(unittest.TestCase):
         self.assertIn("escape_smoke", body)
 
 
+class TestEngineHardening(unittest.TestCase):
+    """Plan E8: the engine units get a measured hardening drop-in.
+    ``deploy.py`` never re-renders unit files, so the drop-in is its own
+    artifact: written before the restart, checked by the verifier, and
+    never carrying a property measured to break the council sandbox."""
+
+    def _mod(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_engine_hardening", REPO / "scripts" / "engine_hardening.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_deploy_writes_it_before_services_and_verify_checks_it(self):
+        body = _src(DEPLOY)
+        body = body[body.index("def step_sandbox"):]
+        body = body[:body.index("\ndef ", 1)]
+        self.assertIn("engine_hardening.ensure", body)
+        src = _src(VERIFY)
+        self.assertIn("def check_engine_hardening", src)
+        self.assertIn("check_engine_hardening(r)", src[src.index("def main"):])
+
+    def test_no_refused_property_and_never_strict(self):
+        mod = self._mod()
+        text = mod.dropin_text()
+        keys = [k for k, _ in mod.PROPERTIES]
+        for bad in mod.REFUSED:
+            self.assertNotIn(bad, keys)
+        self.assertNotIn("ProtectSystem=strict", text)
+        self.assertIn("ProtectSystem=full", text)
+        self.assertTrue(text.splitlines()[3] == "[Service]")
+
+    def test_ensure_writes_once_and_problems_clear(self):
+        import tempfile
+        from unittest import mock
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as d:
+            unit = pathlib.Path(d) / mod.UNITS[0]
+            unit.write_text("[Service]\n")
+            with mock.patch.object(mod, "unit_dirs",
+                                   return_value=[(pathlib.Path(d), "user")]), \
+                 mock.patch.object(mod.subprocess, "run") as run:
+                self.assertEqual(len(mod.problems()), 1)
+                self.assertTrue(mod.ensure(dry_run=True)[0].startswith("[dry-run]"))
+                self.assertFalse(mod.dropin_path(unit).exists())
+                self.assertEqual(len(mod.ensure()), 1)
+                self.assertEqual(run.call_args[0][0],
+                                 ["systemctl", "--user", "daemon-reload"])
+                self.assertEqual(mod.problems(), [])
+                self.assertEqual(mod.ensure(), [])        # already fresh
+                mod.dropin_path(unit).write_text("[Service]\nX=1\n")
+                self.assertEqual(len(mod.problems()), 1)  # stale is caught
+
+
 class TestEmbedderRespawn(unittest.TestCase):
     """The respawn must be advisory where the embedder isn't ours, and
     blocking where it is."""

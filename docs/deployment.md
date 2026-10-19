@@ -211,6 +211,13 @@ like* success:
   warning would scroll past — which is how the 21 May copy survived ten
   weeks. `skills not installed` stays a warning: skills are opt-in per
   host and `install.py` is what offers a new one.
+- **`engine hardening`** FAILs when an installed consultants unit
+  (engine or smart-start forwarder) lacks the `hardening.conf` drop-in
+  deploy writes next to it (plan E8, `scripts/engine_hardening.py`).
+  The set is measured against the council sandbox's escape suite, so it
+  is `ProtectSystem=full`, not the daemon's `strict` (which stops the
+  engine), and it never carries `ProtectHostname` (which disables the
+  sandbox). Re-measure before adding a property.
 
 > **Where the store config lives.** Not in `config/claude-hooks.json` —
 > reading `store` from there returns `None` on every host, healthy or

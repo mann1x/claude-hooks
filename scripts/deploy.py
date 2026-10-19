@@ -497,6 +497,15 @@ def step_sandbox(dry: bool) -> Step:
                "launcher could be installed")
     elif status == "unavailable":
         s.note("no launcher installed — council shells use the bwrap chain")
+    # Plan E8: the engine's hardening drop-in, measured against this
+    # sandbox; written here so the restart in step_services applies it.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import engine_hardening
+    try:
+        for msg in engine_hardening.ensure(dry_run=dry):
+            s.note(msg)
+    except OSError as e:
+        s.fail(f"engine hardening drop-in: {e}")
     return s
 
 

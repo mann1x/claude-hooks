@@ -502,6 +502,7 @@ Chosen per root, by what its filesystem supports (probed, never assumed):
 ### E8. Hardening
 
 - Move the consultants unit under systemd hardening (`ProtectSystem=strict` like the daemon), since the engine runs as root today.
+  - **Built 2026-10-19 (measured, not `strict`).** `scripts/engine_hardening.py` holds the set measured on solidpc (systemd 247, user unit) by running the 42-test escape suite inside a transient unit carrying each property: `NoNewPrivileges`, `ProtectSystem=full`, `ProtectKernelTunables` / `-Modules` / `-Logs`, `ProtectControlGroups`, `ProtectClock`, `RestrictSUIDSGID`, `RestrictRealtime`, `LockPersonality`, `SystemCallArchitectures=native` — 42/42 pass and a hardened engine serves `/v1/health`. `ProtectSystem=strict` stops the unit outright (the engine writes session stores under any project root it is asked about), and `ProtectHostname=yes` makes the sandbox preflight refuse, so every shell test skips; both are excluded (`REFUSED`). `deploy.py` never re-renders unit files, so it ships as a drop-in, `<unit>.d/hardening.conf`, written by `step_sandbox` before the restart and checked by `verify_deploy.check_engine_hardening`. Tests: `TestEngineHardening` in `tests/test_deploy_completeness.py`.
 - Landlock stays optional (§11.5). Document the boot parameter that activates it (compiled in but inactive on solidpc). A reboot is scheduled only if the escape suite needs it.
 - An optional VM backend (Firecracker or gVisor) for a `paranoid` mode, later.
 

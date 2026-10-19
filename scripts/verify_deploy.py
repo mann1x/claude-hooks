@@ -560,6 +560,23 @@ def check_shell(r: Results) -> None:
         r.add(PASS, "sandbox views", f"{held} held patch(es), no orphans")
 
 
+def check_engine_hardening(r: Results) -> None:
+    """Plan E8: every installed engine unit carries the measured
+    hardening drop-in deploy writes (``scripts/engine_hardening.py``)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import engine_hardening
+    units = engine_hardening.installed_units()
+    if not units:
+        r.add(PASS, "engine hardening", "no consultants engine unit on this host")
+        return
+    bad = engine_hardening.problems()
+    if bad:
+        r.add(FAIL, "engine hardening", "; ".join(bad))
+    else:
+        r.add(PASS, "engine hardening",
+              f"{engine_hardening.DROPIN} on {len(units)} unit(s)")
+
+
 def check_sandbox(r: Results) -> None:
     """The council-sandbox launcher (plan E2) and a real escape smoke.
 
@@ -788,6 +805,7 @@ def main() -> int:
         check_ollama_upstream(r)
         check_shell(r)
         check_sandbox(r)
+        check_engine_hardening(r)
         check_providers(r)
         check_embedder(r)
         check_lsp_daemons(r)
