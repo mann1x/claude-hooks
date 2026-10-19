@@ -79,6 +79,8 @@ from consultants.engine import budget, compaction, council  # noqa: E402
 
 #: The stress window (``--window 32768``); production is ``auto``.
 STRESS_WINDOW = 32_768
+#: Times a trial that answers before reading every module is resumed.
+MAX_RESUMES = 4
 #: Funcs per module: the 32k task's module size (~1.7k tokens), kept at
 #: every window so one turn's parallel reads stay a small share of it.
 FUNCS = 7
@@ -374,8 +376,10 @@ def with_followup(prepare, *, after: int = FOLLOWUP_AFTER):
             payload["messages"] = msgs
             sent["done"] = True
         out = prepare(payload)
-        for m in ((out if isinstance(out, dict) else payload).get("messages")
-                  or []):
+        sent_msgs = ((out if isinstance(out, dict) else payload).get("messages")
+                     or [])
+        wrapped.last = list(sent_msgs)
+        for m in sent_msgs:
             if m.get("_compaction_marker"):
                 text = str(m.get("content") or "").lower()
                 carried[int(m.get("_compaction_generation") or 1)] = (
@@ -387,6 +391,7 @@ def with_followup(prepare, *, after: int = FOLLOWUP_AFTER):
             setattr(wrapped, attr, getattr(prepare, attr))
     wrapped.sent = sent
     wrapped.carried = carried
+    wrapped.last = []
     return wrapped
 
 
@@ -511,14 +516,27 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
     error = None
     answer = ""
     final = None
+    resumes = 0
     try:
-        final = run_loop(payload, str(project), config=cfg,
-                         tool_specs=openai_tool_specs(),
-                         chat_fn=budgeter.recover(client.chat),
-                         tool_executor=executor, on_iter=on_iter,
-                         on_tool=lambda name, args, *_: rec.record_tool(
-                             name, args))
-        answer = council._extract_text(final)
+        while True:
+            final = run_loop(payload, str(project), config=cfg,
+                             tool_specs=openai_tool_specs(),
+                             chat_fn=budgeter.recover(client.chat),
+                             tool_executor=executor, on_iter=on_iter,
+                             on_tool=lambda name, args, *_: rec.record_tool(
+                                 name, args))
+            answer = council._extract_text(final)
+            note = ordered.report_check([])
+            if note is None or resumes >= MAX_RESUMES or not prepare.last:
+                break
+            # Answered before every module was read, past the loop's one
+            # report check: resume the same history (the budgeter keeps
+            # its compaction state). gemma4:31b-cloud stopped at ~146k of
+            # a 175k trigger twice; a single check moved it 40 -> 57.
+            resumes += 1
+            payload = {**payload, "messages": list(prepare.last) + [
+                {"role": "assistant", "content": answer},
+                {"role": "user", "content": note}]}
     except Exception as e:  # a failed trial is a data point, not a crash
         error = f"{type(e).__name__}: {e}"
     folds = [e for e in rec.events if e.get("kind") == "compaction"]
@@ -548,8 +566,9 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
         "limits_reads": executor.reads, "limits_refused": executor.refused,
         "limits_scrubbed": executor.scrubbed,
         "modules_reached": ordered.next, "out_of_order_refused": ordered.refused,
-        #: Answered before reading every module: not a compaction trial.
-        "abandoned": ordered.next < len(order),
+        #: Answered before reading every module even after MAX_RESUMES
+        #: resumes: not a compaction trial.
+        "abandoned": ordered.next < len(order), "resumes": resumes,
         "stop_reason": (final.get("_stop_reason") if error is None
                         and isinstance(final, dict) else None),
         "answer": answer, **grade(answer, order),
@@ -582,8 +601,8 @@ def render_report(trials: list[dict], meta: dict) -> str:
              "| arm | n | answered | fixed (of answered) | "
              "compactions (mean / min–max) | "
              "fold calls | fold s / trial | files read | re-reads | "
-             "coverage | abandoned | errors |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "coverage | resumes | abandoned | errors |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for arm in arms:
         rows = [t for t in trials if t["arm"] == arm]
         cs = [r["compactions"] for r in rows]
@@ -598,6 +617,7 @@ def render_report(trials: list[dict], meta: dict) -> str:
             f"/{meta['modules']} | "
             f"{sum(r['re_reads'] for r in rows) / len(rows):.1f} | "
             f"{sum(r['module_coverage'] for r in rows) / len(rows):.2f} | "
+            f"{sum(r.get('resumes', 0) for r in rows)} | "
             f"{sum(1 for r in rows if r.get('abandoned'))} | "
             f"{sum(1 for r in rows if r['error'])} |")
     lines += ["", "## Fix-rate by compaction count", "",
