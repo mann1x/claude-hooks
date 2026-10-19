@@ -373,7 +373,9 @@
   },
   "ollama": {
     "_comment": "Ollama server for /consultants, /get-advice and the caliber grounding proxy. Empty = CALIBER_GROUNDING_UPSTREAM, a URL-shaped OLLAMA_HOST, else http://localhost:11434.",
-    "url": ""
+    "url": "",
+    "_comment_api_key_file": "Ollama Cloud direct (url https://ollama.com, no local Ollama): a file holding the key (first line), else OLLAMA_API_KEY. Sent only to ollama.com. Never put the key itself here.",
+    "api_key_file": ""
   },
   "reflect": {
     "enabled": true,

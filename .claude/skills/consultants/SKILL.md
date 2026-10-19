@@ -1276,12 +1276,21 @@ Always surface which scope a change landed in — read
 ### Subflow J — Endpoints
 
 Read the `endpoints` block from `config show` (keys are never shown,
-only `api_key_set`). Sub-actions:
+only `api_key_set` and the `key_file` path). Sub-actions:
 
 - **Add / edit** — ask for the name, URL and backend (`opencoti`,
-  `llamacpp`, `xollama`, `ollama`), optionally a served model and a key,
-  then `claude-consultants config set-endpoint <name> --url <u>
-  --backend <b> [--model <m>] [--api-key <k>]`. A PolyKV server
+  `llamacpp`, `xollama`, `ollama`), optionally a served model and a key
+  file, then `claude-consultants config set-endpoint <name> --url <u>
+  --backend <b> [--model <m>] [--key-file <path>]`. Never ask the user to
+  paste a key into the chat, and never pass `--api-key` (it writes the key
+  into the config); ask for the path of a file holding it.
+- **Ollama Cloud, no local Ollama** — `--url https://ollama.com --backend
+  ollama`, models named as ollama.com lists them (`@cloud/gemma4:31b`, no
+  `-cloud` suffix: there the bare name is the cloud model). With no
+  `--key-file` it uses the host's key: `ollama.api_key_file` in
+  `config/claude-hooks.json`, else `OLLAMA_API_KEY`
+  (`python -m claude_hooks.ollama_upstream --explain` says which is set,
+  never the key). A PolyKV server
   (opencoti) runs `--window dynamic` (the default): no fixed context,
   each lane its own allocation up to the engine's `session_ctx_max`.
   `assured` is refused until Milestone F; say so if the user asks for a

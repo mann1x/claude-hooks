@@ -527,6 +527,17 @@ def _ollama_slots_off(monkeypatch):
     monkeypatch.setenv("CLAUDE_HOOKS_OLLAMA_SLOTS_DISABLE", "1")
 
 
+# The host's Ollama Cloud key (``ollama.api_key_file`` in the real
+# config/claude-hooks.json, or OLLAMA_API_KEY from a shell profile) must
+# never reach a test: a client built for https://ollama.com would carry it
+# into every mocked request. Tests of the key give their own config.
+@pytest.fixture(autouse=True)
+def _no_ollama_cloud_key(monkeypatch):
+    from claude_hooks import ollama_upstream
+    monkeypatch.delenv(ollama_upstream.API_KEY_ENV, raising=False)
+    monkeypatch.setattr(ollama_upstream, "_key_config", lambda: {})
+
+
 # --------------------------------------------------------------------------- #
 # Tests run as the interactive session
 # --------------------------------------------------------------------------- #

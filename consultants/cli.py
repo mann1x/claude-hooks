@@ -704,7 +704,8 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
         # The key is never printed, only whether one is set.
         "endpoints": {
             n: {"url": e.url, "backend": e.backend, "model": e.model,
-                "api_key_set": bool(e.api_key), "window": e.window}
+                "api_key_set": bool(e.api_key), "key_file": e.key_file,
+                "window": e.window}
             for n, e in sorted(cfg.endpoints.items())
         },
         "smart_start": {
@@ -1330,6 +1331,7 @@ def cmd_config_set_endpoint(args, base: str) -> int:
     try:
         cfg = cc.set_endpoint(args.name, url=args.url, backend=args.backend,
                               model=args.model, api_key=args.api_key,
+                              key_file=args.key_file,
                               window=args.window,
                               **_resolve_active_scope(args))
     except ValueError as e:
@@ -3193,7 +3195,13 @@ def build_parser() -> argparse.ArgumentParser:
                           "assured (booked window per agent session) "
                           "arrives with Milestone F.")
     cep.add_argument("--api-key", dest="api_key",
-                     help="Bearer key, if the server wants one ('' clears).")
+                     help="Bearer key written into the config (legacy; "
+                          "prefer --key-file; '' clears).")
+    cep.add_argument("--key-file", dest="key_file",
+                     help="File holding the Bearer key, first line ('' "
+                          "clears). An https://ollama.com endpoint with "
+                          "no key uses the host's Ollama Cloud key "
+                          "(ollama.api_key_file, else OLLAMA_API_KEY).")
     _add_scope_args(cep)
     cep.set_defaults(fn=cmd_config_set_endpoint)
 

@@ -26,6 +26,7 @@ import os
 import time
 from typing import Any, Optional
 
+from claude_hooks import ollama_upstream
 from claude_hooks._chat_retry import (
     ProxyRetryConfig,
     compute_backoff,
@@ -420,7 +421,8 @@ def chat_completions(payload: dict[str, Any],
             resp = client.post(
                 url,
                 json=ollama_payload,
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json",
+                         **ollama_upstream.auth_headers(base)},
             )
         except (httpx.RequestError, httpx.HTTPError) as e:
             # Network-level failure (connection reset, DNS, etc.) —

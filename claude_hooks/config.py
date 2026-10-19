@@ -574,6 +574,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Ollama's own http://localhost:11434. Never ship a host here.
     "ollama": {
         "url": "",
+        # Ollama Cloud used directly (url https://ollama.com): a file
+        # holding the key, else OLLAMA_API_KEY. Never the key itself.
+        "api_key_file": "",
     },
     "reflect": {
         "enabled": True,

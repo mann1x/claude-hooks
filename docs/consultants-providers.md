@@ -339,3 +339,41 @@ one prompt.
 `config/model-sampling.json` templates may also set `num_keep`, `stop`,
 `think_budget` and `think_budget_message` (see
 [`model-sampling.md`](model-sampling.md)).
+
+## Ollama Cloud direct (no local Ollama)
+
+Ollama serves its cloud models directly
+([docs.ollama.com/cloud](https://docs.ollama.com/cloud)): `https://ollama.com/api/chat`
+(or the OpenAI-compatible `/v1`), `Authorization: Bearer <key>`, models
+named as `https://ollama.com/api/tags` lists them — `gemma4:31b`, not
+`gemma4:31b-cloud` (there the bare name is the cloud model; locally that
+name is the downloadable quant).
+
+**The key.** Put it in a file (first line; `chmod 600`, or a user-only ACL
+on Windows) and name it in `config/claude-hooks.json`:
+
+```json
+"ollama": { "url": "...", "api_key_file": "~/.claude/ollama-api-key" }
+```
+
+With no file set, `OLLAMA_API_KEY` is used. A systemd unit or a scheduled
+task never reads a shell profile, so the file is what reaches the engine.
+The key is sent only to ollama.com. Check it without printing it:
+
+```bash
+python -m claude_hooks.ollama_upstream --explain   # URL + where the key comes from
+python scripts/verify_deploy.py                     # "ollama cloud key — …, accepted (plan pro)"
+```
+
+**Using it.** Either the whole engine (`ollama.url = "https://ollama.com"`)
+or per role through an endpoint:
+
+```bash
+claude-consultants config set-endpoint cloud --url https://ollama.com --backend ollama
+claude-consultants config set-role researcher --model @cloud/gemma4:31b
+```
+
+An endpoint may name its own `--key-file`; without one it uses the host's.
+Windows come from ollama.com's public `/api/show` (trained context) and its
+model recommendations; every call takes an account-wide cloud connection
+slot, and the plan is read from `ollama.com/api/me` with the key.

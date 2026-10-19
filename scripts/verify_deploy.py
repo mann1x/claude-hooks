@@ -38,6 +38,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Optional
@@ -511,6 +512,38 @@ def check_ollama_upstream(r: Results) -> None:
         r.add(PASS, f"ollama {url}", f"{source}, version {version}")
     except Exception as e:
         r.add(WARN, f"ollama {url}", f"{source}, not answering ({type(e).__name__})")
+    check_ollama_cloud_key(r, cfg, url)
+
+
+def check_ollama_cloud_key(r: Results, cfg: dict, url: str) -> None:
+    """The Ollama Cloud key (ch-15): where it comes from, and that
+    ollama.com accepts it. Never prints the key. FAIL only when the
+    engines' server is ollama.com itself and no key resolves."""
+    from claude_hooks import ollama_upstream
+    key, source = ollama_upstream.api_key_source(cfg)
+    if not key:
+        if ollama_upstream.is_cloud(url):
+            r.add(FAIL, "ollama cloud key",
+                  f"ollama.url is {url} but no key ({source}) — set "
+                  "ollama.api_key_file in config/claude-hooks.json")
+        elif source != "none":
+            r.add(WARN, "ollama cloud key", source)
+        return
+    req = urllib.request.Request(
+        "https://ollama.com/api/me", data=b"{}", method="POST",
+        headers={"Authorization": f"Bearer {key}",
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read() or b"{}")
+        plan = body.get("Plan") or body.get("plan") or "?"
+        r.add(PASS, "ollama cloud key", f"{source}, accepted (plan {plan})")
+    except urllib.error.HTTPError as e:
+        r.add(FAIL if ollama_upstream.is_cloud(url) else WARN,
+              "ollama cloud key", f"{source}, refused by ollama.com ({e.code})")
+    except Exception as e:
+        r.add(WARN, "ollama cloud key",
+              f"{source}, ollama.com not answering ({type(e).__name__})")
 
 
 def check_shell(r: Results) -> None:

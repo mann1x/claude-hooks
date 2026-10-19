@@ -654,7 +654,12 @@ class ChatClient:
             if self.base_url.endswith(suffix):
                 self.base_url = self.base_url[: -len(suffix)]
         # Sent as a bearer token only when one is configured (ollama.com
-        # direct, a keyed xOllama). A local server needs none.
+        # direct, a keyed xOllama). A local server needs none. Ollama Cloud
+        # itself (https://ollama.com, no local Ollama) falls back to the
+        # host's key (``ollama.api_key_file``, else OLLAMA_API_KEY).
+        if not api_key:
+            from claude_hooks import ollama_upstream
+            api_key = ollama_upstream.api_key(self.base_url)
         self.api_key = api_key or None
         # Set when this client serves a configured endpoint
         # (``@name/model``): the model the server actually knows.
@@ -2146,7 +2151,7 @@ def make_agent_chat_client(
                 f"configured (known: {', '.join(sorted(endpoints or {})) or 'none'})")
         url = _ep_field(ep, "url")
         backend = (_ep_field(ep, "backend") or "opencoti").lower()
-        api_key = _ep_field(ep, "api_key")
+        api_key = endpoint_api_key(ep)
         served = model or _ep_field(ep, "model")
         if backend in ("ollama", "xollama"):
             client = ChatClient(url, api_key=api_key, **kwargs)
@@ -2244,6 +2249,20 @@ def make_role_chat_client(models: list[str], ollama_base_url: str, *,
     if len({route_key(m) for m in models}) <= 1:
         return factory(models[0])
     return ModelRoutingChatClient(models[0], factory)
+
+
+def endpoint_api_key(ep) -> Optional[str]:
+    """An endpoint's key: its ``key_file``, else a legacy inline
+    ``api_key``; ``None`` lets an ollama.com endpoint fall back to the
+    host's Ollama Cloud key (``ollama_upstream.api_key``)."""
+    path = _ep_field(ep, "key_file")
+    if path:
+        from claude_hooks import ollama_upstream
+        key = ollama_upstream.read_key_file(str(path))
+        if key:
+            return key
+        log.warning("endpoint key_file %s is unreadable or empty", path)
+    return _ep_field(ep, "api_key") or None
 
 
 def _ep_field(ep, key: str):

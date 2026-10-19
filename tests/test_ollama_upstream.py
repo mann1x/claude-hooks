@@ -62,7 +62,9 @@ def test_main_prints_for_the_shims(capsys):
     ou.main([])
     assert capsys.readouterr().out.strip() == "http://localhost:11434"
     ou.main(["--explain"])
-    assert capsys.readouterr().out.strip() == "http://localhost:11434  (default)"
+    assert capsys.readouterr().out.splitlines() == [
+        "http://localhost:11434  (default)",
+        "ollama cloud key: not set  (none)"]
 
 
 def test_install_prompt_defaults_to_the_current_value(monkeypatch):

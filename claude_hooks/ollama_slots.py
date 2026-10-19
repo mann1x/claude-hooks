@@ -114,6 +114,11 @@ def _remote_tags(base_url: str) -> Optional[dict]:
 
 
 def is_cloud(base_url: str, model: str) -> bool:
+    from claude_hooks import ollama_upstream
+    # ollama.com used directly: every model there is a cloud call on the
+    # account's connections, whatever its name (``gemma4:31b``).
+    if ollama_upstream.is_cloud(base_url):
+        return True
     table = _remote_tags(base_url)
     if table and model in table:
         return table[model]
@@ -136,9 +141,18 @@ def _fetch_plan() -> Optional[str]:
     """The account's plan: through the local server's ``/api/me`` first,
     else ``ollama.com/api/me`` signed with ``~/.ollama``. That response
     carries personal data; only the plan is read, and only it is kept."""
-    if _plan_server:
-        from claude_hooks import ollama_account
+    from claude_hooks import ollama_account, ollama_upstream
+    if _plan_server and not ollama_upstream.is_cloud(_plan_server):
         acct = ollama_account.whoami(_plan_server)
+        if acct.get("signed_in") and acct.get("plan"):
+            return acct["plan"]
+    # Ollama Cloud's own /api/me with the host's key: the only route when
+    # no local Ollama runs.
+    api_key = ollama_upstream.api_key_source()[0]
+    if api_key:
+        acct = ollama_account.whoami(
+            "https://ollama.com",
+            headers={"Authorization": f"Bearer {api_key}"})
         if acct.get("signed_in") and acct.get("plan"):
             return acct["plan"]
     key = Path.home() / ".ollama" / "id_ed25519"

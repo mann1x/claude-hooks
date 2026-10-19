@@ -1143,7 +1143,12 @@ class EndpointConfig:
     #: The served model when the reference names none; else the first
     #: id the server lists (OpenAI-compatible backends).
     model: Optional[str] = None
+    #: Legacy: a key written in the config itself. Prefer ``key_file``.
     api_key: Optional[str] = None
+    #: A file holding the Bearer key (first line). An ollama.com endpoint
+    #: with neither falls back to the host's Ollama Cloud key
+    #: (``ollama.api_key_file`` in claude-hooks.json, else OLLAMA_API_KEY).
+    key_file: Optional[str] = None
     #: PolyKV window mode (plan B2). ``dynamic``: no fixed context; each
     #: agent's request is its own allocation, up to the engine's
     #: ``session_ctx_max`` (the model's window, more with DCA), and the
@@ -1772,7 +1777,14 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
             base.endpoints[name] = EndpointConfig(
                 url=url.strip().rstrip("/"), backend=backend,
                 model=(ep.get("model") or None),
-                api_key=(ep.get("api_key") or None), window=window)
+                api_key=(ep.get("api_key") or None),
+                key_file=(str(ep.get("key_file")).strip()
+                          if ep.get("key_file") else None),
+                window=window)
+            if ep.get("api_key"):
+                log.warning("consultants config: endpoint %r keeps its key in "
+                            "the config; put it in a file and set key_file",
+                            name)
 
     # roles
     roles = raw.get("role") or {}
@@ -2225,6 +2237,8 @@ def _render(cfg: ConsultantsConfig, *,
                  "context, each agent up to the engine's session_ctx_max")
         if ep.model:
             L.append(f"model = {_toml_str(ep.model)}")
+        if ep.key_file:
+            L.append(f"key_file = {_toml_str(ep.key_file)}")
         if ep.api_key:
             L.append(f"api_key = {_toml_str(ep.api_key)}")
         L.append("")
@@ -2501,12 +2515,13 @@ def set_endpoint(name: str, *, url: Optional[str] = None,
                  backend: Optional[str] = None,
                  model: Optional[str] = None,
                  api_key: Optional[str] = None,
+                 key_file: Optional[str] = None,
                  window: Optional[str] = None,
                  scope: str = "user",
                  cwd: Optional[Path] = None) -> ConsultantsConfig:
     """Add or update ``[endpoints.<name>]``. ``url`` is required for a
     new endpoint; on an update unset arguments keep their value and an
-    empty string clears ``model`` / ``api_key``."""
+    empty string clears ``model`` / ``api_key`` / ``key_file``."""
     if not valid_endpoint_name(name):
         raise ValueError(f"endpoint name {name!r} must match [A-Za-z0-9_.-]+")
     cfg = _load_for_edit(scope, cwd)
@@ -2526,6 +2541,8 @@ def set_endpoint(name: str, *, url: Optional[str] = None,
         ep.model = model.strip() or None
     if api_key is not None:
         ep.api_key = api_key.strip() or None
+    if key_file is not None:
+        ep.key_file = key_file.strip() or None
     if window is not None:
         ep.window = check_endpoint_window(window)
     cfg.endpoints[name] = ep

@@ -213,6 +213,7 @@ def test_endpoint_config_roundtrip_and_cli(tmp_path, monkeypatch, capsys):
     assert out["endpoints"]["bs2"] == {"url": "http://192.168.178.2:8240",
                                        "backend": "opencoti", "model": None,
                                        "api_key_set": True,
+                                       "key_file": None,
                                        "window": "dynamic"}
     assert "secret" not in json.dumps(out)
     cfg = ccfg.load_config(tmp_path)

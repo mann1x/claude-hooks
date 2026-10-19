@@ -13,6 +13,8 @@ import json
 import logging
 import urllib.error
 import urllib.request
+
+from claude_hooks import ollama_upstream
 from typing import Optional
 
 log = logging.getLogger("claude_hooks.get_advice.ctx_probe")
@@ -43,14 +45,20 @@ def probe_max_ctx(model: str, base_url: Optional[str] = None,
     body = json.dumps({"name": model}).encode()
     req = urllib.request.Request(
         url, data=body, method="POST",
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json",
+                 **ollama_upstream.auth_headers(base)},
     )
     try:
         with urllib.request.urlopen(req, timeout=PROBE_TIMEOUT_S) as resp:
             data = json.loads(resp.read())
-    except (urllib.error.URLError, OSError, ValueError) as e:
+    except urllib.error.HTTPError as e:
+        # A definite answer (unknown model): kept.
         log.warning("probe %s: %s", model, e)
         _cache[key] = None
+        return None
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        # Could not ask: never cached, or the default window sticks.
+        log.warning("probe %s: %s", model, e)
         return None
     ctx = _extract_context_length(data)
     _cache[key] = ctx

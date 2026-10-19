@@ -34,7 +34,6 @@ import re
 import threading
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Optional
@@ -303,8 +302,8 @@ def is_cloud_service(base_url: str) -> bool:
     host, never by a model's name: there ``gemma4:31b`` is the cloud
     model, while on a local server the same name is the downloadable
     quant and the cloud one is ``gemma4:31b-cloud``."""
-    host = urllib.parse.urlsplit(base_url or "").hostname or ""
-    return host == "ollama.com" or host.endswith(".ollama.com")
+    from claude_hooks import ollama_upstream
+    return ollama_upstream.is_cloud(base_url)
 
 
 def probe_xollama(base_url: str, *, fetch: Fetch = _request,
