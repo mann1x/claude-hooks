@@ -1,0 +1,87 @@
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/minimax-m3-1-flash-cloud-2026-10-22ft-r3/audit-high.transcript.db
+
+sid: csl-2026-10-22-2115-f841
+status: completed
+total wall: 488.3s
+
+  planner       node=13.5s   (entries) llm=5x=13.5s   tool=5x=1ms     tok=p52508/c761
+      LLM round=1 model=minimax-m3.1-flash:cloud     6.1s  p=19415  c=531   
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.9s  p=19139  c=95    
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.1s  p=9064   c=56    
+      LLM round=1 model=minimax-m3.1-flash:cloud     1.3s  p=3154   c=53    
+      LLM round=1 model=minimax-m3.1-flash:cloud     1.1s  p=1736   c=26    
+      tool read_file          x2       1ms chars=59042
+      tool survey_project     x1       0ms chars=3779
+      tool list_files         x2       0ms chars=247
+
+  researcher    node=12.5m   (2xentries) llm=41x=12.5m   tool=90x=318ms   tok=p2201987/c82615
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     1.4m  p=83406  c=10017 
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     1.0m  p=87070  c=7997  
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud    52.1s  p=85693  c=5922  
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud    47.2s  p=81849  c=5741  
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud    43.3s  p=81309  c=5058  
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud    39.0s  p=73209  c=4217  
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud    28.3s  p=77841  c=2770  
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud    27.8s  p=84015  c=3452  
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud    26.0s  p=54019  c=2830  
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud    24.5s  p=72269  c=2322  
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud    22.8s  p=76016  c=2364  
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud    22.7s  p=64040  c=2751  
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud    22.7s  p=69741  c=2421  
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud    21.0s  p=76214  c=1748  
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud    20.7s  p=56889  c=2395  
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud    17.3s  p=80790  c=1843  
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud    16.7s  p=82368  c=2011  
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud    15.1s  p=49952  c=1825  
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud    15.0s  p=53529  c=1611  
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud    14.3s  p=35519  c=1417  
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud    13.9s  p=51646  c=1675  
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud    13.2s  p=57278  c=1457  
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud    12.3s  p=45896  c=1311  
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud    11.2s  p=50977  c=1085  
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud    10.4s  p=67036  c=983   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     9.1s  p=61671  c=968   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     8.0s  p=43286  c=917   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     6.8s  p=38185  c=798   
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     6.7s  p=32326  c=578   
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     5.8s  p=40880  c=530   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     4.9s  p=47575  c=492   
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     3.0s  p=21979  c=128   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     2.7s  p=34649  c=209   
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     2.6s  p=18834  c=100   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     2.5s  p=28972  c=145   
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     2.4s  p=29081  c=54    
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     2.2s  p=25379  c=107   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     2.1s  p=27462  c=130   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     1.5s  p=17181  c=80    
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     1.4s  p=18727  c=56    
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     1.2s  p=17229  c=100   
+      tool grep               x30    291ms chars=124533
+      tool glob               x6      26ms chars=854
+      tool read_file          x44      1ms chars=336560
+      tool survey_project     x2       0ms chars=7558
+      tool list_files         x8       0ms chars=1885
+
+  critic        node=23.1s   (entries) llm=5x=23.1s   tool=9x=0ms     tok=p71373/c2023
+      LLM round=2 model=minimax-m3.1-flash:cloud    10.1s  p=17660  c=935   
+      LLM round=2 model=minimax-m3.1-flash:cloud     5.1s  p=17323  c=333   
+      LLM round=2 model=minimax-m3.1-flash:cloud     3.3s  p=15827  c=330   
+      LLM round=2 model=minimax-m3.1-flash:cloud     2.3s  p=12344  c=232   
+      LLM round=2 model=minimax-m3.1-flash:cloud     2.3s  p=8219   c=193   
+      tool read_file          x9       0ms chars=34172
+
+  synthesizer   node=1.0m    (entries) llm=5x=1.0m    tool=6x=0ms     tok=p49053/c6224
+      LLM round=1 model=minimax-m3.1-flash:cloud    52.2s  p=11098  c=5659  
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.3s  p=9066   c=134   
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.2s  p=7561   c=151   
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.2s  p=10603  c=133   
+      LLM round=1 model=minimax-m3.1-flash:cloud     1.8s  p=10725  c=147   
+      tool read_file          x6       0ms chars=13806
+
+totals
+  wall                  488.3s
+  sum of node spans     14.1m
+  sum of LLM call time  14.1m  (173.3% of wall)
+  sum of tool call time 319ms
+  total prompt tokens   2374921
+  total completion tok  91623

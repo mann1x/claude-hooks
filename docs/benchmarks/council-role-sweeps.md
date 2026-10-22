@@ -478,3 +478,9 @@ on 22 of 24 calls and the synthesizer on 6 of 6.
   ch-17); minimax's S and C grades want a re-run on the fixed engine.
 - **No change to the council default yet**: no label measured on the
   current engine clears Q3 ≥ B.
+- **Re-run and arms on the fixed engine (2026-10-22 evening):** minimax
+  re-run [`minimax-m3-1-flash-cloud-2026-10-22b`](minimax-m3-1-flash-cloud-2026-10-22b/results.md)
+  PASS / B / C, `P:A R:A C:B S:A` (S:B → A from the fix; Q3 unchanged).
+  Tool-turn and forced-call-thinking arms in
+  [`council-turns-and-forced-think-2026-10-22.md`](council-turns-and-forced-think-2026-10-22.md):
+  keep 3 tool turns and thinking off on the forced call.
