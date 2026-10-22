@@ -469,8 +469,12 @@ on 22 of 24 calls and the synthesizer on 6 of 6.
   Q2 A, every Q3 claim including the one gemma4 never states (`error` /
   `_role_failed` are last-value channels), but the capped fix every time,
   at 3–9× gemma4's wall.
-- **Both planners sometimes return a status report instead of a plan** on
-  Q3 ("verified these files exist, analysis not done") — 2 of 3 gemma4
-  runs, 1 of 3 minimax runs. Under investigation (task ch-17).
+- **A capped role was asked for the wrong thing.** Planner, critic and
+  synthesizer get 4 tool turns; at the cap the forced final call asked for
+  a findings report ("what you found … what is still open", thinking off)
+  instead of the role's plan, verdict or answer. minimax hit it in the
+  planner, critic and synthesizer of every Q2 / Q3 run, gemma4 in the
+  planner of 2 of 3 Q3 runs. Fixed with `LoopConfig.deliverable` (task
+  ch-17); minimax's S and C grades want a re-run on the fixed engine.
 - **No change to the council default yet**: no label measured on the
   current engine clears Q3 ≥ B.

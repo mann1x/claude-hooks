@@ -47,8 +47,13 @@ half-held claims, and no two sessions each holding what the other needs.
 The queue is first come, first served: a claim is granted only when it
 conflicts neither with what is held nor with an earlier claim still
 waiting, so a stream of small shared claims cannot starve an exclusive one.
-Two claims of the same session conflict too (one job per resource); a
-claim blocked only by its own session says so.
+Asking again for what the session already holds is not a second claim:
+`acquire` answers `ALREADY HELD` with the existing one (exit 0). A second
+*job* of the same session — a `run` wrapper or a `--follow-pid` claim,
+which follows its own process — is a separate claim, and conflicts with
+the session's first like anyone else's (one job per resource), so it
+queues behind it. A claim blocked by its own session's same process says
+so: that one is never granted until the first is released.
 
 ## Using it from a session
 

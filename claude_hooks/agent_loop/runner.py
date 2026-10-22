@@ -173,6 +173,13 @@ class LoopConfig:
     # lost ``write_file`` at turn 54 having written nothing, and its
     # calls were refused "tools are off"). The cap still ends the loop.
     keep_after_strip: tuple[str, ...] = ()
+    #: What this loop's answer is ("your plan — …", "your verdict — …").
+    #: Empty: the messages that end a loop (cap warning, cap / tools-off /
+    #: wrap-up report) ask for a findings report, as a researcher owes. A
+    #: role whose answer is something else names it here, or those
+    #: messages replace its plan or verdict with a report of its own
+    #: checks (2026-10-22: every minimax synthesizer answer on the audits).
+    deliverable: str = ""
 
 
 #: Plan D13: every message the harness writes into a conversation opens
@@ -524,6 +531,37 @@ WRAP_UP_FINAL = (
     "being written from the work done so far. Do not call any tool. In this "
     "one reply, report what you found, with its evidence, what you "
     "verified, and what is still open — exactly where you stopped.")
+
+#: The same five messages for a loop whose answer is not a findings report
+#: (``LoopConfig.deliverable``): they ask for that answer, from what the
+#: role already has.
+CAP_WARNING_DELIVERABLE = (
+    "[SYSTEM MESSAGE] This is turn {turn} of the {cap} this task may take. "
+    "Wrap up: finish the step you are on, then write {deliverable}.")
+CAP_FINAL_DELIVERABLE = (
+    "[SYSTEM MESSAGE] Your turn budget is spent. Do not call any tool. In "
+    "this one reply, write {deliverable}, from what you already have; where "
+    "something you meant to check is still unchecked, say so inside it.")
+TOOLS_OFF_ANSWER_DELIVERABLE = (
+    "Not run: your tools are off now. Write {deliverable} from what you "
+    "already have.")
+TOOLS_OFF_FINAL_DELIVERABLE = (
+    "[SYSTEM MESSAGE] Your tools are off and calls are not run. Do not "
+    "call any tool. In this one reply, write {deliverable}, from what you "
+    "already have.")
+WRAP_UP_FINAL_DELIVERABLE = (
+    "[SYSTEM MESSAGE] The operator is wrapping this run up. Do not call any "
+    "tool. In this one reply, write {deliverable}, from the work done so "
+    "far; where something is still unchecked, say so inside it.")
+
+
+def _asks_for(config: "LoopConfig", generic: str, own: str, **fmt) -> str:
+    """``generic`` (a findings report) unless the loop names its own
+    deliverable, then ``own`` asking for it."""
+    deliverable = getattr(config, "deliverable", "") or ""
+    if not deliverable:
+        return generic.format(**fmt) if fmt else generic
+    return own.format(deliverable=deliverable, **fmt)
 
 
 def _wrapping_up(config: "LoopConfig") -> bool:
@@ -1070,8 +1108,9 @@ def run_loop(
             _emit_guard(config, {"guard": "wrap_up", "action": "stop",
                                  "iteration": i})
             payload, final = _forced_report(
-                payload, payload["messages"], WRAP_UP_FINAL, "wrap_up",
-                chat_fn, config, on_iter, i)
+                payload, payload["messages"],
+                _asks_for(config, WRAP_UP_FINAL, WRAP_UP_FINAL_DELIVERABLE),
+                "wrap_up", chat_fn, config, on_iter, i)
             break
         if (config.tools_available and force_after > 0 and i >= force_after
                 and not tools_stripped):
@@ -1097,7 +1136,8 @@ def run_loop(
                 and i > 0 and config.max_iterations - (i + 1)
                 < cap_warning_margin(config.max_iterations, strict=strict)):
             cap_warned = True
-            text = CAP_WARNING.format(turn=i + 1, cap=config.max_iterations)
+            text = _asks_for(config, CAP_WARNING, CAP_WARNING_DELIVERABLE,
+                             turn=i + 1, cap=config.max_iterations)
             last = (payload.get("messages") or [None])[-1]
             if isinstance(last, dict) and last.get("role") == "tool":
                 last["content"] = f"{last.get('content') or ''}\n\n{text}"
@@ -1410,10 +1450,14 @@ def run_loop(
             payload["messages"].extend(
                 {"role": "tool", "tool_call_id": tc.get("id") or "",
                  "name": (tc.get("function") or {}).get("name") or "",
-                 "content": TOOLS_OFF_ANSWER} for tc in tool_calls)
+                 "content": _asks_for(config, TOOLS_OFF_ANSWER,
+                                      TOOLS_OFF_ANSWER_DELIVERABLE)}
+                for tc in tool_calls)
             if tools_off_turns >= 2:
                 payload, final = _forced_report(
-                    payload, payload["messages"], TOOLS_OFF_FINAL,
+                    payload, payload["messages"],
+                    _asks_for(config, TOOLS_OFF_FINAL,
+                              TOOLS_OFF_FINAL_DELIVERABLE),
                     "tools_off", chat_fn, config, on_iter, i)
                 break
             continue
@@ -1497,7 +1541,8 @@ def run_loop(
                                  "iteration": config.max_iterations - 1,
                                  "cap": config.max_iterations})
             payload, final = _forced_report(
-                payload, payload["messages"], CAP_FINAL_REPORT,
+                payload, payload["messages"],
+                _asks_for(config, CAP_FINAL_REPORT, CAP_FINAL_DELIVERABLE),
                 "iteration_cap", chat_fn, config, on_iter,
                 config.max_iterations)
     # Attach the final conversation transcript to the response so

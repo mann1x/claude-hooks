@@ -38,6 +38,8 @@ Cost per run (list price, Appendix A, no cache discount): $0.039–0.042 (median
 
 **Mix string:** `P:A R:B C:B S:A`
 
+**Harness caveat (task ch-17):** the two status-report plans (r1, r3 Q3) are the engine's forced cap report — the planner spent its three tool turns on `survey_project` and two `list_files`, asked for a fourth, and the final call asked it for findings instead of a plan. Fixed by `LoopConfig.deliverable`; the critic and synthesizer were not capped in these runs.
+
 ## Verdict
 
 **EVALUATED-ONLY** — Q3 below B (§4). On 2026-09-23 (no reasoning) the same label was PROD-READY with Q3 B in all three runs.

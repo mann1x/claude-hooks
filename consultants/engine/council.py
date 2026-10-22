@@ -2137,6 +2137,29 @@ ROLE_TOOL_MAX_CALLS_PER_TURN = 4
 #: Strip tools after this many iterations so a role always produces text.
 ROLE_TOOL_FORCE_ANSWER_AFTER = 3
 
+#: What each tooled role's answer is, for the messages that end its loop
+#: (``LoopConfig.deliverable``). Without it a capped planner, critic or
+#: synthesizer was asked for "what you found, what is still open" and
+#: delivered that in place of its plan, verdict or answer (2026-10-22: the
+#: synthesizer on every minimax audit, the planner on 2 of 3 gemma4 Q3s).
+#: A role not named here (a cross-examined lane) owes a findings report.
+ROLE_DELIVERABLES = {
+    "planner": ("your plan: the numbered list of investigation steps your "
+                "instructions ask for, each naming its file, symbol or "
+                "check — a target you could not confirm becomes a step "
+                "that checks it"),
+    "critic": ("your verdict in the format your instructions give, "
+               "starting with its `DECISION:` line"),
+    "meta_critic": ("your verdict in the format your instructions give, "
+                    "starting with its `DECISION:` line"),
+    "critic:ruling": "your rulings, in the format your instructions give",
+    "synthesizer": ("your final answer to the question, in the shape your "
+                    "instructions ask for — the answer itself, not a report "
+                    "of your own checks"),
+    "adversary": ("your `REFUTATION:` block, in the format your "
+                  "instructions give"),
+}
+
 
 def judge_iters(tool_specs) -> tuple[int, int]:
     """``(max_iterations, force_answer_after)`` for a critic or
@@ -2502,6 +2525,7 @@ def _role_turn(chat_client, model: str, messages: list[dict],
             reasoning_replay=_reasoning_replay(chat_client, model, knobs),
             on_guard=guard_sink(recorder, role=role, round=round,
                                  lane_idx=lane_idx),
+            deliverable=ROLE_DELIVERABLES.get(role or "", ""),
         )
         loop_kwargs = dict(config=cfg, tool_specs=tool_specs,
                            chat_fn=_budgeter.recover(chat_client.chat),
