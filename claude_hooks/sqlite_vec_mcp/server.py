@@ -424,6 +424,7 @@ class McpServer:
         self._initialized = False
         self._mailbox_tools: Any = _UNSET
         self._task_tools: Any = _UNSET
+        self._resource_tools: Any = _UNSET
         self._finding_tools: Any = _UNSET
 
     def handle(self, msg: dict) -> Optional[dict]:
@@ -487,6 +488,11 @@ class McpServer:
                 tool_catalog as finding_catalog,
             )
             tools = tools + finding_catalog()
+        if self._resources() is not None:
+            from claude_hooks.resources.tools import (
+                tool_catalog as resource_catalog,
+            )
+            tools = tools + resource_catalog()
         return tools
 
     def _mailbox(self):
@@ -530,7 +536,29 @@ class McpServer:
                 self._finding_tools = None
         return self._finding_tools
 
+    def _resources(self):
+        """Resource claims (hosts, GPUs, pods, cloud). Their store is the
+        shared Postgres when the host has one, else a local file, so they
+        are offered everywhere; ``hooks.resources.enabled: false`` turns
+        them off."""
+        if self._resource_tools is _UNSET:
+            try:
+                from claude_hooks.resources.tools import (
+                    ResourceTools, resources_enabled,
+                )
+                self._resource_tools = (ResourceTools()
+                                        if resources_enabled() else None)
+            except Exception:
+                log.warning("resources unavailable", exc_info=True)
+                self._resource_tools = None
+        return self._resource_tools
+
     def _dispatch_tool(self, name: str, args: dict) -> str:
+        if name.startswith("resource-"):
+            rt = self._resources()
+            if rt is None:
+                return "Resource claims are turned off on this host."
+            return rt.call(name, args)
         if name.startswith("finding-"):
             ft = self._findings()
             if ft is None:

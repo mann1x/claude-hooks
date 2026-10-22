@@ -897,6 +897,10 @@ class TestCliWrappersAndHookMatchers(unittest.TestCase):
         self.assertIn("def check_cli_and_hooks", src)
         self.assertIn("check_cli_and_hooks(r)", src)
         self.assertIn("def check_tasks", src)
+        self.assertIn("check_resources(r)", src)
+        self.assertIn("def check_resources", src)
+        self.assertTrue((REPO / "bin" / "claude-hooks-res").is_file())
+        self.assertTrue((REPO / "bin" / "claude-hooks-res.cmd").is_file())
 
     def test_stale_matcher_is_reconciled_and_others_left(self):
         sys.path.insert(0, str(REPO))

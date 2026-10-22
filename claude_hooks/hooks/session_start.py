@@ -225,6 +225,11 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         event=event, config=config, providers=providers)
     if tasks_block:
         parts.append(tasks_block)
+    # Resource claims: how to claim, and what is held / queued now.
+    from claude_hooks.resources import hook as _resources
+    resources_block = _resources.session_block(event=event, config=config)
+    if resources_block:
+        parts.append(resources_block)
     if not parts:
         return None
 

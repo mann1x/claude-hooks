@@ -38,6 +38,36 @@ log = logging.getLogger("claude_hooks.hooks.pre_tool_use")
 
 
 def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[dict]:
+    result = _handle(event=event, config=config, providers=providers)
+    return with_resource_note(result, event, config)
+
+
+def with_resource_note(result: Optional[dict], event: dict,
+                       config: dict) -> Optional[dict]:
+    """Add the resource note (another session holds what this command
+    reaches) to whatever the other stages answered. Never on a denial:
+    the command is not running."""
+    out = (result or {}).get("hookSpecificOutput") or {}
+    if out.get("permissionDecision") == "deny":
+        return result
+    try:
+        from claude_hooks.resources.hook import pre_tool_note
+        note = pre_tool_note(event=event, config=config)
+    except Exception:
+        log.debug("resource note failed", exc_info=True)
+        note = None
+    if not note:
+        return result
+    result = dict(result or {})
+    hso = dict(result.get("hookSpecificOutput") or
+               {"hookEventName": "PreToolUse"})
+    prev = hso.get("additionalContext")
+    hso["additionalContext"] = f"{prev}\n\n{note}" if prev else note
+    result["hookSpecificOutput"] = hso
+    return result
+
+
+def _handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[dict]:
     hook_cfg = (config.get("hooks") or {}).get("pre_tool_use") or {}
     tool_name = event.get("tool_name", "")
     tool_input = event.get("tool_input") or {}

@@ -167,6 +167,8 @@ class TestToolsList:
         # So do the findings tools (docs/PLAN-council-memory.md).
         from claude_hooks.findings.tools import TOOL_NAMES as FINDING_TOOLS
         expected |= set(FINDING_TOOLS)
+        from claude_hooks.resources.tools import TOOL_NAMES as RESOURCE_TOOLS
+        expected |= set(RESOURCE_TOOLS)
         assert names == expected
 
     def test_each_tool_has_required_fields(self, server):

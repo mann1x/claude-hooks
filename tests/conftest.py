@@ -470,6 +470,19 @@ def _isolated_task_state(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_resources(tmp_path, monkeypatch):
+    """Resource claims go to a per-test SQLite file: the real table is
+    shared by every session on every host, and a test claim on
+    ``solidpc/gpu0`` would hold up real work."""
+    monkeypatch.setenv("CLAUDE_HOOKS_RESOURCES_DB",
+                       str(tmp_path / "claude-hooks-resources.db"))
+    from claude_hooks.resources import api
+    api.reset_store()
+    yield
+    api.reset_store()
+
+
+@pytest.fixture(autouse=True)
 def _isolated_inflight_index(tmp_path, monkeypatch):
     """Every test gets its own consultants in-flight index.
 

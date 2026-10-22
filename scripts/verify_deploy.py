@@ -821,6 +821,34 @@ def check_tasks(r: Results) -> None:
           f"{len(projects)} project(s)")
 
 
+def check_resources(r: Results) -> None:
+    """The resource store answers a real read, and says which one it is:
+    the shared Postgres (every host) or a local file (this host only)."""
+    try:
+        from claude_hooks.resources.store import (
+            ResourceStore, backend_from_config,
+        )
+        from claude_hooks.resources.tools import resources_enabled
+        if not resources_enabled():
+            return
+        dialect, _ = backend_from_config()
+    except Exception as e:
+        r.add(WARN, "resources", f"config unavailable: {type(e).__name__}")
+        return
+    print("resources")
+    try:
+        outs, _, defs = ResourceStore.from_config().status()
+    except Exception as e:
+        r.add(FAIL, "resource store", f"{type(e).__name__}: {e}")
+        return
+    held = sum(1 for o in outs if o.granted)
+    scope = ("shared Postgres, every host" if dialect == "postgres"
+             else "local SQLite, this host only")
+    r.add(PASS if dialect == "postgres" else WARN, "resource store",
+          f"{scope}: {held} held, {len(outs) - held} queued, "
+          f"{len(defs)} defined")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--store", action="store_true", help="store checks only")
@@ -847,6 +875,7 @@ def main() -> int:
         check_mailbox_relay(r)
         check_cli_and_hooks(r)
         check_tasks(r)
+        check_resources(r)
         check_store(r)
 
     failed = r.failed

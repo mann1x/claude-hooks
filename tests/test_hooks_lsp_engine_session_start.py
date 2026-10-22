@@ -45,6 +45,9 @@ def _cfg(lsp_engine: dict | None = None) -> dict:
             # Task tracking is on by default and hints even in a project
             # without a list; covered by tests/test_tasks_hooks.py.
             "tasks": {"enabled": False},
+            # Resource claims likewise always say how to claim; covered by
+            # tests/test_resources_hooks.py.
+            "resources": {"enabled": False},
             "lsp_engine": lsp_engine or {"enabled": False},
         },
     }

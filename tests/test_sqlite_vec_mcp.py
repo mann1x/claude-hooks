@@ -101,8 +101,11 @@ class TestToolsList:
         # Full parity with pgvector-mcp's catalog, task tools included
         # on both (they need no SQL store, so they are always offered).
         from claude_hooks.findings.tools import TOOL_NAMES as FINDING_TOOLS
+        from claude_hooks.resources.tools import TOOL_NAMES as RESOURCE_TOOLS
         from claude_hooks.tasks.tools import TOOL_NAMES
-        assert names - set(TOOL_NAMES) - set(FINDING_TOOLS) == {
+        assert set(RESOURCE_TOOLS) <= names
+        assert names - set(TOOL_NAMES) - set(FINDING_TOOLS) - set(
+            RESOURCE_TOOLS) == {
             "sqlite-vec-find",
             "sqlite-vec-find-hybrid",
             "sqlite-vec-store",
