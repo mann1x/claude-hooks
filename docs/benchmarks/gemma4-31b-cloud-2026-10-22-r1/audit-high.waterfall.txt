@@ -1,0 +1,41 @@
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/gemma4-31b-cloud-2026-10-22-r1/audit-high.transcript.db
+
+sid: csl-2026-10-22-1237-134a
+status: completed
+total wall: 26.6s
+
+  planner       node=8.1s    (entries) llm=5x=8.1s    tool=3x=0ms     tok=p12485/c1552
+      LLM round=1 model=gemma4:31b-cloud             2.1s  p=2556   c=475   
+      LLM round=1 model=gemma4:31b-cloud             2.0s  p=1376   c=338   
+      LLM round=1 model=gemma4:31b-cloud             1.6s  p=2430   c=266   
+      LLM round=1 model=gemma4:31b-cloud             1.3s  p=3096   c=259   
+      LLM round=1 model=gemma4:31b-cloud             1.2s  p=3027   c=214   
+      tool survey_project     x1       0ms chars=3779
+      tool list_files         x2       0ms chars=247
+
+  researcher    node=17.7s   (2xentries) llm=6x=17.7s   tool=12x=3ms     tok=p184851/c2823
+      LLM round=1 lane=1 model=gemma4:31b-cloud             5.8s  p=45883  c=1040  
+      LLM round=1 lane=0 model=gemma4:31b-cloud             4.9s  p=37707  c=879   
+      LLM round=1 lane=1 model=gemma4:31b-cloud             2.6s  p=18644  c=472   
+      LLM round=1 lane=0 model=gemma4:31b-cloud             1.9s  p=18651  c=365   
+      LLM round=1 lane=1 model=gemma4:31b-cloud             1.3s  p=29651  c=44    
+      LLM round=1 lane=0 model=gemma4:31b-cloud             1.2s  p=34315  c=23    
+      tool glob               x2       3ms chars=58
+      tool read_file          x8       0ms chars=140188
+      tool list_files         x2       0ms chars=299
+
+  critic        node=4.1s    (entries) llm=2x=4.1s    tool=3x=0ms     tok=p11717/c785
+      LLM round=2 model=gemma4:31b-cloud             3.0s  p=4919   c=569   
+      LLM round=2 model=gemma4:31b-cloud             1.2s  p=6798   c=216   
+      tool read_file          x3       0ms chars=5478
+
+  synthesizer   node=4.6s    (entries) llm=1x=4.6s    tool=0x=0ms     tok=p4721/c1223
+      LLM round=1 model=gemma4:31b-cloud             4.6s  p=4721   c=1223  
+
+totals
+  wall                  26.6s
+  sum of node spans     34.6s
+  sum of LLM call time  34.6s  (129.8% of wall)
+  sum of tool call time 3ms
+  total prompt tokens   213774
+  total completion tok  6383

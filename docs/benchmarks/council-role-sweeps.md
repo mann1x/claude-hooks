@@ -443,3 +443,34 @@ protocol 1.4). Q1/Q2 grades from before 2026-09-23 carry that caveat.
 - **Nothing on the council changed.** The researcher/critic extra lane
   moved from the retiring deepseek-v4-flash to deepseek-v4.1-flash, its
   direct replacement.
+
+## 2026-10-22 — minimax-m3.1-flash, and gemma4 with reasoning restored
+
+minimax-m3.1-flash (free on Ollama that day) ran as a whole-council label,
+N=3, then gemma4 was re-run on the same engine (`6df99ad` / `8f69cee`,
+identical engine code), eleven2go, ≤ 2 concurrent cloud connections.
+
+**The 2026-09-23 gemma4 label ran without reasoning.** gemma4:31b-cloud
+declares thinking only as on/off, and since 2026-09 the service ignores a
+level (`think: "high"`) silently: 0 of 43 audit-high calls on 09-23 carried
+reasoning. `c148363` sends `think: true`; in the re-run the planner reasoned
+on 22 of 24 calls and the synthesizer on 6 of 6.
+
+| Label | Runs | Smoke | Audit-med | Audit-hi | Roles | $ / run | Verdict |
+|---|---|---|---|---|---|---|---|
+| [`gemma4-31b-cloud-2026-10-22`](gemma4-31b-cloud-2026-10-22/results.md) | 3/3 | PASS | B | C | `P:A R:B C:B S:A` | $0.041 | EVALUATED-ONLY — Q3 C,B,C; median wall 16 / 30 / 46 s |
+| [`minimax-m3-1-flash-cloud-2026-10-22`](minimax-m3-1-flash-cloud-2026-10-22/results.md) | 3/3 | PASS | A | C | `P:A R:A C:B S:B` | unpriced | EVALUATED-ONLY — all four Q3 claims every run; median wall 45 / 136 / 424 s |
+
+- **Reasoning did not lift gemma4.** Q1 and Q2 are unchanged from 09-23
+  (the same four Q2 sites, both test sites missed); Q3 fell from B to C:
+  two of three reasoning runs choose the status relabel that glm-5.3-flash
+  chose on 09-23 and minimax-m3.1-flash chose in all three runs.
+- **minimax-m3.1-flash is the stronger auditor and the weaker fixer** —
+  Q2 A, every Q3 claim including the one gemma4 never states (`error` /
+  `_role_failed` are last-value channels), but the capped fix every time,
+  at 3–9× gemma4's wall.
+- **Both planners sometimes return a status report instead of a plan** on
+  Q3 ("verified these files exist, analysis not done") — 2 of 3 gemma4
+  runs, 1 of 3 minimax runs. Under investigation (task ch-17).
+- **No change to the council default yet**: no label measured on the
+  current engine clears Q3 ≥ B.
