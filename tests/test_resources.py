@@ -201,6 +201,30 @@ class TestStore:
         other = st.request(items("gpu0:x"), owner("A"), reuse=False)
         assert not other.granted and other.self_blocked
 
+    def test_a_job_following_another_process_is_never_reused(self, db):
+        # 2026-10-22: a queued follow-up bench (--follow-pid its own
+        # script) inherited the session id of the bench it queued behind,
+        # was answered ALREADY HELD with the bench's claim, and ran at once.
+        alive = {200: True, 300: True}
+        st = mk(db, alive=lambda pid, started: alive.get(pid, True))
+        st.define("ollama-cloud", capacity=2)
+        bench = st.request(items("ollama-cloud:s:2"), owner("A", pid=200))
+        follow = st.request(items("ollama-cloud:s:2"), owner("A", pid=300))
+        assert bench.granted
+        assert not follow.reused and not follow.granted
+        assert not follow.self_blocked        # ends when pid 200 does
+        alive[200] = False
+        assert st.get(follow.claim.id).granted
+
+    def test_self_blocked_only_behind_the_same_process(self, db):
+        st = mk(db)
+        st.request(items("gpu0:x"), owner("A", pid=200))
+        detached = st.request(items("gpu0:x"), owner("A", pid=300))
+        assert not detached.granted and detached.block.by is not None
+        assert not detached.self_blocked      # pid 200 ends on its own
+        same = st.request(items("gpu0:x"), owner("A", pid=200), reuse=False)
+        assert same.self_blocked
+
     def test_a_claim_on_a_dead_process_is_refused_not_crashed(self, db):
         st = mk(db, alive=lambda pid, started: False)
         with pytest.raises(SpecError):

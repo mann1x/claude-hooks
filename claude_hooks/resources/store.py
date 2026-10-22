@@ -98,11 +98,19 @@ class Outcome:
 
     @property
     def self_blocked(self) -> bool:
-        """Waiting only on a claim of the same session: it will never be
-        granted until that session releases its own claim."""
+        """Waiting only on a claim of the same session that follows the same
+        process: it will never be granted until that claim is released. A
+        blocker following another process (a detached job) ends on its own."""
         by = self.block.by if self.block else None
         return bool(by is not None and self.claim.session_id
-                    and by.session_id == self.claim.session_id)
+                    and by.session_id == self.claim.session_id
+                    and _same_process(by, self.claim.pid,
+                                      self.claim.pid_started))
+
+
+def _same_process(c: Claim, pid: Optional[int],
+                  pid_started: Optional[float]) -> bool:
+    return c.pid == pid and c.pid_started == pid_started
 
 
 def backend_from_config(config: Optional[dict] = None) -> tuple[str, str]:
@@ -347,8 +355,11 @@ class ResourceStore:
                 lease_s: int = DEFAULT_LEASE_S,
                 reuse: bool = True) -> Outcome:
         """Queue a claim and grant it at once if it can be. With ``reuse``,
-        a granted claim of the same session that already covers ``items``
-        is returned instead of queueing a second one behind it."""
+        a granted claim of the same session that follows the same process
+        and already covers ``items`` is returned instead of queueing a
+        second one behind it. A claim following another process (a ``run``
+        or ``--follow-pid`` job) is never reused: it ends with that
+        process, and the new claim would be left holding nothing."""
         items = tuple(items)
         if not items:
             raise model.SpecError("a claim needs at least one resource")
@@ -358,7 +369,9 @@ class ResourceStore:
             if reuse and owner.session_id:
                 for c in live:
                     if (c.state == "granted" and c.session_id == owner.session_id
-                            and c.host == owner.host and model.covers(c, items)):
+                            and c.host == owner.host
+                            and _same_process(c, owner.pid, owner.pid_started)
+                            and model.covers(c, items)):
                         return Outcome(c, True, reused=True)
             now_iso = self._now_iso()
             expires = (iso(datetime.fromtimestamp(self._clock() + ttl_s,
