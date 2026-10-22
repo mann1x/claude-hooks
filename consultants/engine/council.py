@@ -2137,6 +2137,37 @@ ROLE_TOOL_MAX_CALLS_PER_TURN = 4
 #: Strip tools after this many iterations so a role always produces text.
 ROLE_TOOL_FORCE_ANSWER_AFTER = 3
 
+
+def _role_tool_iters() -> tuple[int, int]:
+    """``(max_iterations, force_answer_after)`` for a tooled role.
+
+    ``CONSULTANTS_ROLE_TOOL_TURNS=N`` gives N tool turns and one turn to
+    answer, for one engine process — the measurement arm behind any change
+    to the defaults (the planner used all three turns in ~90% of recorded
+    councils, so the history cannot say how many it would take). Read once
+    at import, like ``CONSULTANTS_FANOUT_MAX_LANES``."""
+    raw = os.environ.get("CONSULTANTS_ROLE_TOOL_TURNS", "").strip()
+    if not raw:
+        return ROLE_TOOL_MAX_ITERATIONS, ROLE_TOOL_FORCE_ANSWER_AFTER
+    try:
+        turns = int(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "CONSULTANTS_ROLE_TOOL_TURNS=%r is not an integer; using %d",
+            raw, ROLE_TOOL_FORCE_ANSWER_AFTER)
+        return ROLE_TOOL_MAX_ITERATIONS, ROLE_TOOL_FORCE_ANSWER_AFTER
+    turns = max(1, turns)
+    return turns + 1, turns
+
+
+ROLE_TOOL_ITERS = _role_tool_iters()
+
+#: ``CONSULTANTS_FORCED_THINK=graceful`` keeps a tooled role's thinking on
+#: the call that writes its deliverable after the cap, tools-off or wrap-up
+#: (``LoopConfig.forced_think``), for one engine process — the A/B arm behind
+#: any change to the think-off default. Read once at import.
+FORCED_THINK = os.environ.get("CONSULTANTS_FORCED_THINK", "").strip().lower() == "graceful"
+
 #: What each tooled role's answer is, for the messages that end its loop
 #: (``LoopConfig.deliverable``). Without it a capped planner, critic or
 #: synthesizer was asked for "what you found, what is still open" and
@@ -2166,11 +2197,11 @@ def judge_iters(tool_specs) -> tuple[int, int]:
     meta-critic: the role caps, plus a lane's shell bonus
     (``max(10, iters // 2)``) when it holds the shell (plan
     council-memory M4: writing and running a check takes turns)."""
+    max_iters, force_after = ROLE_TOOL_ITERS
     if not _offers_shell(tool_specs):
-        return ROLE_TOOL_MAX_ITERATIONS, ROLE_TOOL_FORCE_ANSWER_AFTER
-    bonus = max(10, ROLE_TOOL_MAX_ITERATIONS // 2)
-    return (ROLE_TOOL_MAX_ITERATIONS + bonus,
-            ROLE_TOOL_FORCE_ANSWER_AFTER + bonus)
+        return max_iters, force_after
+    bonus = max(10, max_iters // 2)
+    return max_iters + bonus, force_after + bonus
 
 
 #: Plan council-memory M4: what a judge with the shell is told.
@@ -2510,9 +2541,9 @@ def _role_turn(chat_client, model: str, messages: list[dict],
                                            lane_idx=lane_idx)
         cfg = LoopConfig(
             **result_kw,
-            max_iterations=(iters or (ROLE_TOOL_MAX_ITERATIONS,))[0],
+            max_iterations=(iters or ROLE_TOOL_ITERS)[0],
             max_tool_calls_per_turn=ROLE_TOOL_MAX_CALLS_PER_TURN,
-            force_answer_after=(iters or (0, ROLE_TOOL_FORCE_ANSWER_AFTER))[1],
+            force_answer_after=(iters or ROLE_TOOL_ITERS)[1],
             tools_available=True,
             think=think,
             # These roles are handed a full brief and must be free to
@@ -2526,6 +2557,7 @@ def _role_turn(chat_client, model: str, messages: list[dict],
             on_guard=guard_sink(recorder, role=role, round=round,
                                  lane_idx=lane_idx),
             deliverable=ROLE_DELIVERABLES.get(role or "", ""),
+            forced_think=FORCED_THINK,
         )
         loop_kwargs = dict(config=cfg, tool_specs=tool_specs,
                            chat_fn=_budgeter.recover(chat_client.chat),

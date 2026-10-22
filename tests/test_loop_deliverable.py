@@ -78,6 +78,39 @@ def test_wrap_up_asks_for_the_deliverable():
     assert out["_stop_reason"] == "wrap_up"
 
 
+def test_the_loop_guard_asks_for_the_deliverable():
+    # The same call over and over: the tool-call loop guard ends the loop.
+    sent = []
+
+    def chat_fn(payload):
+        sent.append(dict(payload, messages=[dict(m) for m in payload["messages"]]))
+        if "tools" not in payload and payload["messages"][-1].get("_harness"):
+            return _answer("Plan.")
+        return _tool(0)
+
+    out = runner.run_loop(
+        {"model": "m", "messages": [{"role": "user", "content": "q"}]}, "/tmp",
+        config=runner.LoopConfig(force_first_tool_call=False, deliverable=PLAN,
+                                 max_iterations=20, force_answer_after=0),
+        tool_specs=SPEC, chat_fn=chat_fn, tool_executor=lambda n, a, c: "body")
+    assert out["_stop_reason"] == "loop_guard"
+    last = sent[-1]["messages"][-1]["content"]
+    assert last.endswith("Write your plan: the numbered steps now, from what "
+                         "you have already established.")
+    assert "what you found" not in last
+
+
+def test_reasoning_loop_end_asks_for_the_deliverable():
+    text = runner._asks_for(
+        runner.LoopConfig(deliverable=PLAN), runner.REASONING_LOOP_FINAL,
+        runner.REASONING_LOOP_FINAL_DELIVERABLE, trips=3, diagnosis="cycle")
+    assert PLAN in text and "what you found" not in text
+    assert runner._asks_for(
+        runner.LoopConfig(), runner.REASONING_LOOP_FINAL,
+        runner.REASONING_LOOP_FINAL_DELIVERABLE, trips=3, diagnosis="cycle") \
+        == runner.REASONING_LOOP_FINAL.format(trips=3, diagnosis="cycle")
+
+
 def test_no_deliverable_keeps_the_findings_report():
     _, sent = _run()
     assert sent[-1]["messages"][-1]["content"] == runner.CAP_FINAL_REPORT
@@ -110,3 +143,59 @@ def test_each_tooled_role_names_its_deliverable(monkeypatch):
     assert "REFUTATION:" in seen["adversary"]
     assert seen["critic:ruling"].startswith("your rulings")
     assert seen["researcher:cross_exam"] == ""     # a lane owes a report
+
+
+def _forced(**cfg):
+    out, sent = _run(PLAN if cfg.pop("with_deliverable", True) else "", **cfg)
+    return out, sent[-1]
+
+
+def test_forced_think_keeps_the_roles_thinking_at_the_cap():
+    out, last = _forced(forced_think=True, think="high")
+    assert out["_stop_reason"] == "iteration_cap"
+    assert last["think"] == "high" and last["reasoning_effort"] == "high"
+
+
+def test_think_stays_off_by_default_and_without_a_deliverable():
+    for kw in ({}, {"forced_think": True, "with_deliverable": False}):
+        _, last = _forced(think=True, **kw)
+        assert last["think"] is False and last["reasoning_effort"] == "none"
+
+
+def test_a_guard_stop_answers_with_thinking_off():
+    sent = []
+
+    def chat_fn(payload):
+        sent.append(dict(payload))
+        if "tools" not in payload and payload["messages"][-1].get("_harness"):
+            return _answer("Plan.")
+        return _tool(0)
+
+    out = runner.run_loop(
+        {"model": "m", "messages": [{"role": "user", "content": "q"}]}, "/tmp",
+        config=runner.LoopConfig(force_first_tool_call=False, deliverable=PLAN,
+                                 forced_think=True, think=True,
+                                 max_iterations=20,
+                                 force_answer_after=0),
+        tool_specs=SPEC, chat_fn=chat_fn, tool_executor=lambda n, a, c: "body")
+    assert out["_stop_reason"] == "loop_guard"
+    assert sent[-1]["think"] is False
+
+
+def test_role_turn_passes_forced_think(monkeypatch):
+    monkeypatch.setattr(council, "FORCED_THINK", True)
+    seen = []
+
+    def loop_runner(payload, cwd, *, config, **kw):
+        seen.append(config.forced_think)
+        return _answer("x")
+
+    class Client:
+        def chat(self, payload):  # pragma: no cover — loop_runner is faked
+            return _answer("x")
+
+    council._role_turn(Client(), "m", [{"role": "user", "content": "q"}],
+                       role="synthesizer", tool_specs=SPEC,
+                       tool_executor=lambda *a: "", cwd="/tmp",
+                       loop_runner=loop_runner)
+    assert seen == [True]

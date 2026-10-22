@@ -445,6 +445,24 @@ session start (`runner._seed_runtime_control`).
 
   A follow-up starts with an empty cache.
 
+**Tool turns of the other roles.** A planner, critic, meta-critic,
+synthesizer or adversary with tools gets 3 tool turns and a fourth to
+answer (`ROLE_TOOL_MAX_ITERATIONS` / `ROLE_TOOL_FORCE_ANSWER_AFTER` in
+`consultants/engine/council.py`); a critic with the shell gets 10 more.
+At the limit the role is asked for its own answer — the plan, the
+`DECISION:` verdict, the final answer (`ROLE_DELIVERABLES`) — with
+tools and thinking off. In recorded councils up to 2026-10-22 the planner
+used all three turns in ~90% of runs on every model; the critic in 17%
+of gemma4 runs and 86% on other models; the synthesizer never on gemma4
+and in 61% on others. `CONSULTANTS_ROLE_TOOL_TURNS=N` gives these roles
+N tool turns for one engine process — the measurement arm for changing
+the default. It is read when the engine starts.
+`CONSULTANTS_FORCED_THINK=graceful` keeps the role's own thinking on that
+last call when the role ran out of turns, had its tools taken away or was
+wrapped up (`LoopConfig.forced_think`, `GRACEFUL_STOPS`); a loop a guard
+ended (reasoning loop, repeated call, mistakes, struggle) always answers
+with thinking off. It is the A/B arm for the think-off default.
+
 ### Engine restarts — councils are suspended and resumed
 
 Since 2026-10-01 an engine restart (deploy, `systemctl restart`, crash)

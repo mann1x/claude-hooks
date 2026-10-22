@@ -180,6 +180,16 @@ class LoopConfig:
     #: messages replace its plan or verdict with a report of its own
     #: checks (2026-10-22: every minimax synthesizer answer on the audits).
     deliverable: str = ""
+    #: Keep the role's own thinking on the forced call that ends a loop
+    #: gracefully (``GRACEFUL_STOPS``) when the loop has a ``deliverable``:
+    #: that call writes the plan, verdict or answer itself. Off by default;
+    #: a loop a guard ended (reasoning loop, repeated call, mistakes,
+    #: struggle) always answers with thinking off.
+    forced_think: bool = False
+
+
+#: Stops where the role was working normally and ran out of turns or time.
+GRACEFUL_STOPS = frozenset({"iteration_cap", "tools_off", "wrap_up"})
 
 
 #: Plan D13: every message the harness writes into a conversation opens
@@ -532,9 +542,10 @@ WRAP_UP_FINAL = (
     "one reply, report what you found, with its evidence, what you "
     "verified, and what is still open — exactly where you stopped.")
 
-#: The same five messages for a loop whose answer is not a findings report
+#: The same messages for a loop whose answer is not a findings report
 #: (``LoopConfig.deliverable``): they ask for that answer, from what the
-#: role already has.
+#: role already has. ``LOOP_GUARD_FINAL_DELIVERABLE`` and
+#: ``REASONING_LOOP_FINAL_DELIVERABLE`` sit beside their originals below.
 CAP_WARNING_DELIVERABLE = (
     "[SYSTEM MESSAGE] This is turn {turn} of the {cap} this task may take. "
     "Wrap up: finish the step you are on, then write {deliverable}.")
@@ -579,6 +590,9 @@ LOOP_GUARD_FINAL = (
     "[SYSTEM MESSAGE] The harness is ending this task: {why} Tools are off. "
     "Write your report now from what you have already established: what "
     "you found, with its evidence, and what is still open.")
+LOOP_GUARD_FINAL_DELIVERABLE = (
+    "[SYSTEM MESSAGE] The harness is ending this task: {why} Tools are off. "
+    "Write {deliverable} now, from what you have already established.")
 
 
 class ToolGuards:
@@ -766,6 +780,11 @@ REASONING_LOOP_FINAL = (
     "Write your report now from what you have already established: what "
     "you found, with its evidence, and what is still open. Keep any "
     "reasoning short.")
+REASONING_LOOP_FINAL_DELIVERABLE = (
+    "[SYSTEM MESSAGE] Your reasoning has looped {trips} turns in a row "
+    "({diagnosis}), so the harness is ending this task. Tools are off. "
+    "Write {deliverable} now, from what you have already established. "
+    "Keep any reasoning short.")
 
 
 def reasoning_loop_verdict(response: dict) -> Optional[dict]:
@@ -985,12 +1004,17 @@ def _forced_report(payload: dict, history: list, instruction: str,
                    on_iter: Optional["OnIter"], iteration: int
                    ) -> tuple[dict, dict]:
     """The named terminal action (plan D): one tool-less, think-off report
-    asked of the lane, marked ``_stop_reason`` / ``_failure_class``."""
+    asked of the lane, marked ``_stop_reason`` / ``_failure_class``. With
+    ``LoopConfig.forced_think`` a graceful stop of a loop with a
+    deliverable keeps the payload's own thinking."""
     payload = dict(payload)
     payload.pop("tools", None)
     payload.pop("tool_choice", None)
-    payload["think"] = False
-    payload["reasoning_effort"] = "none"
+    if not (getattr(config, "forced_think", False)
+            and getattr(config, "deliverable", "")
+            and stop_reason in GRACEFUL_STOPS):
+        payload["think"] = False
+        payload["reasoning_effort"] = "none"
     payload["messages"] = list(history) + [
         harness_note(instruction)]
     t0 = time.monotonic()
@@ -1261,7 +1285,9 @@ def run_loop(
                 history.append({"role": "assistant", "content": partial})
             if loop_trips >= limit:
                 payload, final = _forced_report(
-                    payload, history, REASONING_LOOP_FINAL.format(
+                    payload, history, _asks_for(
+                        config, REASONING_LOOP_FINAL,
+                        REASONING_LOOP_FINAL_DELIVERABLE,
                         trips=loop_trips, diagnosis=diagnosis),
                     "reasoning_loop", chat_fn, config, on_iter, i)
                 final["_reasoning_loop"] = verdict
@@ -1486,7 +1512,8 @@ def run_loop(
             stop = guards.stop
             payload, final = _forced_report(
                 payload, payload["messages"],
-                LOOP_GUARD_FINAL.format(why=stop["why"]),
+                _asks_for(config, LOOP_GUARD_FINAL,
+                          LOOP_GUARD_FINAL_DELIVERABLE, why=stop["why"]),
                 stop["stop_reason"], chat_fn, config, on_iter, i)
             if stop.get("call"):
                 final["_loop_call"] = stop["call"]
@@ -1510,7 +1537,8 @@ def run_loop(
                                  "budget_turns": len(supervisor.spent)})
             if action == "stop":
                 payload, final = _forced_report(
-                    payload, payload["messages"], LOOP_GUARD_FINAL.format(
+                    payload, payload["messages"], _asks_for(
+                        config, LOOP_GUARD_FINAL, LOOP_GUARD_FINAL_DELIVERABLE,
                         why=struggle_supervisor.describe_stop(
                             why, supervisor.spent_after_nudge())),
                     "struggle", chat_fn, config, on_iter, i)
