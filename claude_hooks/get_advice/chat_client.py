@@ -338,6 +338,34 @@ def _is_empty_reply(data: dict) -> bool:
     return (data.get("done_reason") or "stop") == "stop"
 
 
+#: A turn ended for length after using less than this share of the output
+#: it was allowed is the server out of context, not an answer that ran
+#: long. Measured 2026-10-23 on qwen 27B @ eleven2go, two lanes on one KV
+#: pool: 1 and 262 tokens of ~77k allowed, no content, at ~49k prompt.
+EARLY_CUT_SHARE = 0.05
+
+
+def _early_length_cut(data: dict, body: dict) -> Optional[str]:
+    """Why ``data`` is a turn the server cut far below its allowance, or
+    ``None``. Only a turn with no content and no tool call counts: those
+    are what a continuation (tools stripped) would turn into an answer."""
+    if (data.get("done_reason") or "") != "length":
+        return None
+    msg = data.get("message") or {}
+    if (msg.get("content") or "").strip() or msg.get("tool_calls"):
+        return None
+    opts = body.get("options") if isinstance(body.get("options"), dict) else {}
+    allowed = opts.get("num_predict", body.get("max_tokens"))
+    used = data.get("eval_count")
+    if (not isinstance(allowed, int) or isinstance(allowed, bool)
+            or allowed <= 0 or not isinstance(used, int)
+            or used >= EARLY_CUT_SHARE * allowed):
+        return None
+    return (f"cut for length after {used} of {allowed} output tokens with "
+            f"no content at {data.get('prompt_eval_count')} prompt tokens; "
+            f"the server ran out of context")
+
+
 def _timings(data: dict, *, wall_s: float, queue_s: float,
              ttft_s: Optional[float], attempts: int, empty_retries: int,
              headers=None) -> dict:
@@ -1180,6 +1208,13 @@ class ChatClient:
                     time.sleep(EMPTY_RETRY_DELAY_S)
                     attempts.hold()
                     continue
+                early = _early_length_cut(data, body)
+                if early:
+                    # Resending the same request hits the same wall: the
+                    # caller compacts (``context_overflow``), as for a
+                    # provider's own too-long refusal.
+                    raise ChatFault(f"{what}: {model_tag} {early}",
+                                    fault_class=CONTEXT_OVERFLOW)
                 # Inference-time accounting: ONLY the successful
                 # attempt's duration counts. Prior failed attempts
                 # (timeouts, retryable 5xx, network resets) and the
