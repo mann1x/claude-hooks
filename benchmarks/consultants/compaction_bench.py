@@ -468,6 +468,12 @@ def grade(answer: str, order: list[str]) -> dict:
             "module_coverage": round(modules / len(order), 3)}
 
 
+def answered_text(turns: list[str], final: str) -> str:
+    """Everything the lane answered: earlier answer turns (a report the
+    unread-modules nudge sent back), then the final answer."""
+    return "\n\n".join([t for t in turns if t.strip()] + [final or ""]).strip()
+
+
 def _norm(args) -> str:
     try:
         v = (json.loads(args) if isinstance(args, str)
@@ -716,7 +722,15 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
                              council.RESEARCHER_SYSTEM},
                             {"role": "user", "content": question}]}
 
+    #: Every answer turn's text, in order: after the unread-modules nudge a
+    #: lane may reply "my previous response is complete", and grading only
+    #: that reply graded nothing (2026-10-23 smoke, basic/system).
+    answer_turns: list[str] = []
+
     def on_iter(_i, req, resp, ms):
+        msg = ((resp or {}).get("choices") or [{}])[0].get("message") or {}
+        if not msg.get("tool_calls") and (msg.get("content") or "").strip():
+            answer_turns.append(msg["content"])
         pt, ct = council._usage_from(resp)
         rec.record_llm(role="researcher", round=0, lane_idx=idx, model=model,
                        request=req, response=resp, prompt_tokens=pt,
@@ -734,6 +748,10 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
                          on_tool=lambda name, args, *_: rec.record_tool(
                              name, args))
         answer = council._extract_text(final)
+        # A continuation's parts are already joined in the final answer.
+        if answer_turns and answer_turns[-1] in answer:
+            answer_turns.pop()
+        answer = answered_text(answer_turns, answer)
     except Exception as e:  # a failed trial is a data point, not a crash
         error = f"{type(e).__name__}: {e}"
     folds = [e for e in rec.events if e.get("kind") == "compaction"]

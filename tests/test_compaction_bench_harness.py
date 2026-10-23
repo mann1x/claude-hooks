@@ -145,3 +145,11 @@ def test_modules_say_what_they_write_and_names_never_give_it_away(tmp_path):
         assert f1 not in path and f2 not in path
     joined = " ".join(order)
     assert "window" not in joined and "retry" not in joined
+
+
+def test_an_answer_sent_back_by_the_nudge_is_still_graded():
+    table = "| src/a/lease_router.py | tier, codec |"
+    text = cb.answered_text([table], "My previous response is complete.")
+    assert cb.grade_table(text, {"src/a/lease_router.py": ("tier", "codec")},
+                          {}) == {"unread": [1, 1]}
+    assert cb.answered_text([], "final") == "final"
