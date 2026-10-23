@@ -350,6 +350,20 @@ def _answer_text(response: dict) -> str:
     return (choices[0].get("message") or {}).get("content") or ""
 
 
+def _prepare(config: "LoopConfig", payload: dict, where: str) -> None:
+    """``LoopConfig.prepare_payload`` for a call outside the loop's own
+    turn (an answer continuation, a forced report): those carry the same
+    history plus more, so they need the same compaction and output
+    allowance (bug-1101 / bug-1102)."""
+    if getattr(config, "prepare_payload", None) is None:
+        return
+    try:
+        config.prepare_payload(payload)
+    except Exception:
+        log.exception("prepare_payload raised on the %s; sending the "
+                      "payload unprepared", where)
+
+
 def _continue_truncated_answer(final: dict, payload: dict, chat_fn: ChatFn,
                                config: "LoopConfig",
                                on_iter: "Optional[OnIter]",
@@ -395,17 +409,23 @@ def _continue_truncated_answer(final: dict, payload: dict, chat_fn: ChatFn,
         if note:
             instruction = (CONTINUE_ANSWER_INSTRUCTION + "\n\n"
                            + capped_thinking.as_discarded_turn_note(note))
-        messages = messages + [
-            {"role": "assistant", "content": "".join(parts)},
-            harness_note(instruction),
-        ]
+        # The partial so far replaces the previous continuation's pair,
+        # never joins it: appending sent part 1 twice from the second
+        # continuation on (bug-1101).
+        tail = [{"role": "assistant", "content": "".join(parts)},
+                harness_note(instruction)]
         cont_payload = dict(payload)
-        cont_payload["messages"] = messages
+        cont_payload["messages"] = messages + tail
         # Tools stay off for a continuation: the model already decided
         # it was answering, and re-offering tools invites it to restart
         # the investigation instead of finishing the sentence.
         cont_payload.pop("tools", None)
         cont_payload.pop("tool_choice", None)
+        _prepare(config, cont_payload, "answer continuation")
+        sent = cont_payload.get("messages") or []
+        if len(sent) >= 2 and sent[-2:] == tail:
+            # Keep what the budgeter compacted for the next continuation.
+            messages = list(sent[:-2])
         t0 = time.monotonic()
         result = chat_fn(cont_payload)
         _notify_response(config, cont_payload, result)
@@ -1017,6 +1037,7 @@ def _forced_report(payload: dict, history: list, instruction: str,
         payload["reasoning_effort"] = "none"
     payload["messages"] = list(history) + [
         harness_note(instruction)]
+    _prepare(config, payload, "forced report")
     t0 = time.monotonic()
     final = chat_fn(payload)
     _notify_response(config, payload, final)
