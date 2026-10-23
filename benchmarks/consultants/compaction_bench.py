@@ -42,6 +42,19 @@ when it names both: no name gives them away. Before the answer is accepted
 the loop asks once (``report_check``, as production does on shell runs) how
 many modules are still unread; nothing is ever refused.
 
+Task v7 (2026-10-23): v6's question had no single answer — each module's
+``_<verb>_one`` copied every incoming field (``out.update``) and then
+rewrote f1 to what that had already set, so "the two fields it writes
+besides version" was every field; gemma named one field plus ``version``
+and scored 0 (bug-1100). Now it writes exactly f1 and f2. The table is
+graded per module by what the answer call still held of it
+(:func:`read_status`): ``folded`` (read, its result no longer verbatim in
+the history — what the compaction had to keep), ``kept`` (still verbatim),
+``grep`` (never read, seen only in grep output) and ``unread``. v6 split by
+folds before the first read, which counted modules still verbatim in the
+kept tail as "before the fold". A row naming several graded modules
+counts for none of them.
+
 Task v4: the extra modules that size the project carry real-looking names
 and are interleaved (``modules_for``).
 
@@ -192,7 +205,8 @@ _VERBS = [
 
 
 #: Record fields a module's main operation writes, two per module. Only its
-#: code says which: they are what the table is graded on (task v6).
+#: code says which: they are what the table is graded on (task v6; v7
+#: writes only these two, besides ``version``).
 _FIELDS = ("owner_shard sealed_epoch replica_count checksum_kind tier "
            "quarantine_reason source_region compaction_level hold_epoch "
            "priority_class origin_node codec parent_span lineage "
@@ -229,11 +243,7 @@ def {verb}_{n}s(store, {n}s, *, limit=None):
 def _{verb}_one(current, {n}):
     """{third} one {n}: the stored copy updated by the incoming one."""
     out = dict(current)
-    out.update({{k: v for k, v in {n}.items() if v is not None}})
-    if {n}.get("{f1}") is not None:
-        out["{f1}"] = {n}["{f1}"]
-    else:
-        out["{f1}"] = current.get("{f1}")
+    out["{f1}"] = {n}.get("{f1}", current.get("{f1}"))
     out["{f2}"] = max(current.get("{f2}") or 0, {n}.get("{f2}") or 0)
     out["version"] = current.get("version", 0) + 1
     return out
@@ -378,7 +388,7 @@ def build_project(dest: Path, *, seed: int = 7, funcs: int = FUNCS,
 # Grading
 # --------------------------------------------------------------------------- #
 
-TASK_VERSION = 6
+TASK_VERSION = 7
 TICKET = "LDG-4471"
 FOLLOWUP_AFTER = 8
 FOLLOWUP = (f"One more thing from the on-call lead: whatever you find, the "
@@ -391,29 +401,52 @@ _CONVERSION = re.compile(
     r"|//\s*1e8|45[_,]?000\b", re.I)
 
 
+STATUSES = ("folded", "kept", "grep", "unread")
+
+
+def read_status(path: str, read: "set[str] | dict", verbatim: "set[str]",
+                grepped: "set[str]") -> str:
+    """Where the answer call stood on ``path`` (task v7): ``folded`` = read,
+    its result gone from the history (a compaction had to keep it),
+    ``kept`` = still there verbatim, ``grep`` = never read but seen in a
+    grep result, ``unread``."""
+    if path in read:
+        return "kept" if path in verbatim else "folded"
+    return "grep" if path in grepped else "unread"
+
+
+def _module_names(path: str) -> "re.Pattern":
+    base = Path(path).stem.lower()
+    pkg = Path(path).parent.name.lower()
+    # A row names the module as `<base>.py` or `<pkg>/<base>`; a bare word
+    # ("queue") may sit in another module's row.
+    return re.compile(rf"\b{re.escape(base)}\.py\b|"
+                      rf"\b{re.escape(pkg)}/{re.escape(base)}\b")
+
+
 def grade_table(answer: str, purposes: dict[str, tuple[str, str]],
-                phases: dict[str, int]) -> dict:
-    """Per graded module: does a line naming it also name both fields its
-    main operation writes? Split by read phase (folds run before its first
-    read; ``unread`` = never read). Returns ``{phase: [right, total]}``."""
+                status: dict[str, str]) -> dict:
+    """Per graded module: does a line naming it, and no other graded
+    module, also name both fields its main operation writes? Split by
+    :func:`read_status` (missing = ``unread``). Returns
+    ``{status: [right, total]}``."""
     lines = (answer or "").lower().splitlines()
+    names = {p: _module_names(p) for p in purposes}
+    # A line naming two modules gives its fields to neither (bug-1100's
+    # grader half: "queue.py and journal.py | weight lineage" scored both).
+    named = [(ln, [p for p, rx in names.items() if rx.search(ln)])
+             for ln in lines]
     by: dict[str, list[int]] = {}
     for path, fields in purposes.items():
-        base = Path(path).stem.lower()
-        pkg = Path(path).parent.name.lower()
-        # A row names the module as `<base>.py` or `<pkg>/<base>`; a bare
-        # word ("queue") may sit in another module's row.
-        names = re.compile(rf"\b{re.escape(base)}\.py\b|"
-                           rf"\b{re.escape(pkg)}/{re.escape(base)}\b")
-        right = any(all(f in names.sub("", ln.replace(path.lower(), ""))
+        rx = names[path]
+        right = any(all(f in rx.sub("", ln.replace(path.lower(), ""))
                         for f in fields)
-                    for ln in lines if names.search(ln))
-        ph = phases.get(path)
-        key = "unread" if ph is None else str(ph)
+                    for ln, hits in named if hits == [path])
+        key = status.get(path, "unread")
         cell = by.setdefault(key, [0, 0])
         cell[0] += int(right)
         cell[1] += 1
-    return dict(sorted(by.items()))
+    return {k: by[k] for k in STATUSES if k in by}
 
 
 def grade(answer: str, order: list[str]) -> dict:
@@ -461,6 +494,8 @@ class ReadLog:
         self.phase: dict[str, int] = {}
         self.limits_reads = 0
         self.limits_rereads_after_fold = 0
+        #: modules named in a grep result (task v7's ``grep`` rows).
+        self.grepped: set[str] = set()
 
     def report_check(self, _messages) -> Optional[str]:
         """Asked once before the answer is accepted (the loop's
@@ -488,7 +523,29 @@ class ReadLog:
                 self.limits_reads += 1
                 if self.limits_reads > 1 and folds > 0:
                     self.limits_rereads_after_fold += 1
+        elif name == "grep" and not str(out).lower().startswith("error"):
+            for m in _GREP_HIT.finditer(str(out)):
+                self.grepped.add(_norm({"path": m.group(1)}))
         return out
+
+
+#: A grep match or context line: ``path:N:`` / ``path-N-``.
+_GREP_HIT = re.compile(r"^(\S+?\.py)[:-]\d+[:-]", re.M)
+
+
+def verbatim_reads(messages: list) -> set[str]:
+    """Modules whose ``read_file`` result is still in ``messages`` as sent:
+    the assistant call and its tool answer both present."""
+    calls = {}
+    for m in messages:
+        for tc in (m.get("tool_calls") or []) if isinstance(m, dict) else []:
+            fn = tc.get("function") or {}
+            if fn.get("name") == "read_file":
+                calls[tc.get("id")] = _norm(fn.get("arguments"))
+    return {calls[m.get("tool_call_id")] for m in messages
+            if isinstance(m, dict) and m.get("role") == "tool"
+            and m.get("tool_call_id") in calls
+            and not str(m.get("content") or "").lower().startswith("error")}
 
 
 def with_followup(prepare, *, after: int = FOLLOWUP_AFTER):
@@ -592,9 +649,25 @@ class Recorder:
 
     def record_llm(self, *, role, round, lane_idx, model, request, response,
                    prompt_tokens, completion_tokens, duration_ms, **_):
+        msg, done = {}, None
+        if isinstance(response, dict):
+            ch = (response.get("choices") or [{}])[0]
+            msg = ch.get("message") or {}
+            done = (response.get("done_reason") or ch.get("finish_reason")
+                    or (response.get("timings") or {}).get("done_reason"))
+        reasoning = (msg.get("reasoning") or msg.get("reasoning_content")
+                     or msg.get("thinking") or "")
+        sent = request.get("options") if isinstance(request, dict) else None
         with self._lock:
-            self.llm.append({"role": role, "pt": prompt_tokens,
-                             "ct": completion_tokens, "ms": duration_ms})
+            self.llm.append({
+                "role": role, "pt": prompt_tokens, "ct": completion_tokens,
+                "ms": duration_ms, "done": done,
+                "content": len(msg.get("content") or ""),
+                "reasoning": len(reasoning),
+                "tool_calls": len(msg.get("tool_calls") or []),
+                "num_predict": (sent or {}).get("num_predict"),
+                "think": (request or {}).get("think")
+                if isinstance(request, dict) else None})
 
     def record_tool(self, name, args):
         path = ""
@@ -668,6 +741,10 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
     comp_calls = [c for c in rec.llm if c["role"].endswith(":compaction")]
     reads = [p for n, p in rec.tools if n == "read_file" and p]
     distinct = set(reads)
+    # What the answer call held: the history the last call was sent with.
+    held = verbatim_reads(prepare.last)
+    status = {p: read_status(p, executor.phase, held, executor.grepped)
+              for p in (purposes or {})}
     return {
         "arm": arm, "trial": idx, "model": model,
         "window": window or resolved_budget(client, model, knobs).context_length,
@@ -678,6 +755,12 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
                            "target", "trigger", "rescue", "calls",
                            "invalid_citations", "digest", "cut")} for f in folds],
         "researcher_calls": len(calls), "tool_calls": len(rec.tools),
+        #: per researcher call: tokens, done_reason, what came back (why a
+        #: lane ended where it did).
+        "calls": [{k: c.get(k) for k in ("pt", "ct", "ms", "done", "content",
+                                         "reasoning", "tool_calls",
+                                         "num_predict", "think")}
+                  for c in calls],
         "reads": len(reads), "distinct_reads": len(distinct),
         "re_reads": len(reads) - len(distinct),
         "read_order": reads,
@@ -692,8 +775,9 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
         "limits_rereads_after_fold": executor.limits_rereads_after_fold,
         "modules_read": sum(1 for p in order if p in executor.phase),
         "read_phase": executor.phase,
-        #: {phase: [right, total]} of the module table (task v5).
-        "table": grade_table(answer, purposes or {}, executor.phase),
+        "status": status,
+        #: {status: [right, total]} of the module table (task v7).
+        "table": grade_table(answer, purposes or {}, status),
         "stop_reason": (final.get("_stop_reason") if error is None
                         and isinstance(final, dict) else None),
         "answer": answer, **grade(answer, order),
@@ -742,17 +826,17 @@ def render_report(trials: list[dict], meta: dict) -> str:
             f"/{meta['modules']} | "
             f"{sum(r['re_reads'] for r in rows) / len(rows):.1f} | "
             f"{sum(1 for r in rows if r['error'])} |")
-    lines += ["", "## Module table by read phase", "",
-              "Share of graded modules whose table row names both fields its "
-              "main operation writes, by how many folds had run when it was "
-              "first read "
-              "(0 = before the first fold). What a flow keeps across a fold "
-              "shows as the gap between phase 0 and the last phase.", ""]
-    phases = sorted({k for t in trials for k in (t.get("table") or {})},
-                    key=lambda k: (k == "unread", k))
-    lines += ["| arm | " + " | ".join(
-        "unread" if k == "unread" else f"phase {k}" for k in phases) + " |",
-        "|---|" + "---|" * len(phases)]
+    lines += ["", "## Module table by what the answer still held", "",
+              "Share of graded modules whose row (naming no other module) "
+              "names both fields its main operation writes. **folded**: read, "
+              "its result compacted away before the answer — what the flow "
+              "kept. **kept**: still verbatim in the history (the control). "
+              "**grep**: never read, seen only in grep output. **unread**: "
+              "neither.", ""]
+    present = {k for t in trials for k in (t.get("table") or {})}
+    phases = [k for k in STATUSES if k in present]
+    lines += ["| arm | " + " | ".join(phases) + " |",
+              "|---|" + "---|" * len(phases)]
     for arm in arms:
         rows = [t for t in trials if t["arm"] == arm]
         cells = []
@@ -845,7 +929,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         extra = args.extra_modules
     n_modules = len(MODULES) + extra
     max_iterations = args.max_iterations or n_modules + 20
-    window_note = (f"window pinned to {window:,} tokens (stress)" if window
+    window_note = (f"window pinned to {window:,} tokens ("
+                   + ("stress" if window <= STRESS_WINDOW else
+                      "a stated pin, below the model's own") + ")" if window
                    else f"window {plan.context_length:,} "
                         f"({plan.window_source}, as production resolves it)")
     print(f"{args.model}: {window_note}; trigger {plan.trigger_tokens:,}, "

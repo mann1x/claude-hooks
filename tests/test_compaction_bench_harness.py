@@ -56,20 +56,72 @@ def test_reads_are_never_refused_and_note_their_read_phase():
     assert ex.limits_reads == 2 and ex.limits_rereads_after_fold == 1
 
 
-def test_the_table_is_graded_per_module_by_read_phase():
+def test_the_table_is_graded_per_module_by_what_the_answer_held():
     purposes = {"src/a/lease_router.py": ("tier", "codec"),
                 "src/b/shard_keeper.py": ("lineage", "weight"),
                 "src/c/span_loader.py": ("tenant_id", "fence_token")}
-    phases = {"src/a/lease_router.py": 0, "src/b/shard_keeper.py": 1}
+    status = {"src/a/lease_router.py": "folded",
+              "src/b/shard_keeper.py": "kept"}
     answer = ("| src/a/lease_router.py | tier, codec |\n"
               "| src/b/shard_keeper.py | lineage only |\n"
               "| src/c/span_loader.py | `tenant_id`, `fence_token` |")
-    assert cb.grade_table(answer, purposes, phases) == {
-        "0": [1, 1], "1": [0, 1], "unread": [1, 1]}
+    assert cb.grade_table(answer, purposes, status) == {
+        "folded": [1, 1], "kept": [0, 1], "unread": [1, 1]}
     # A bare word in another module's row is not this module's row.
     assert cb.grade_table("| src/b/shard_keeper.py | tier, codec; lease_router |",
                           {"src/a/lease_router.py": ("tier", "codec")},
-                          {"src/a/lease_router.py": 0}) == {"0": [0, 1]}
+                          {"src/a/lease_router.py": "kept"}) == {"kept": [0, 1]}
+
+
+def test_a_row_naming_two_modules_counts_for_neither():
+    purposes = {"src/a/queue.py": ("weight", "lineage"),
+                "src/b/journal.py": ("weight", "lineage")}
+    assert cb.grade_table("queue.py and journal.py | weight lineage",
+                          purposes, {}) == {"unread": [0, 2]}
+    assert cb.grade_table("queue.py | weight lineage\njournal.py | weight, "
+                          "lineage", purposes, {}) == {"unread": [2, 2]}
+
+
+def test_read_status_tells_folded_from_kept_and_grep_from_unread():
+    read = {"src/a.py": 0, "src/b.py": 1}
+    held = {"src/b.py"}
+    got = {p: cb.read_status(p, read, held, {"src/c.py", "src/a.py"})
+           for p in ("src/a.py", "src/b.py", "src/c.py", "src/d.py")}
+    assert got == {"src/a.py": "folded", "src/b.py": "kept",
+                   "src/c.py": "grep", "src/d.py": "unread"}
+
+
+def test_verbatim_reads_are_the_read_results_still_in_the_history():
+    def call(i, path):
+        return {"role": "assistant", "content": "", "tool_calls": [
+            {"id": f"c{i}", "type": "function", "function": {
+                "name": "read_file", "arguments": f'{{"path": "{path}"}}'}}]}
+    msgs = [{"role": "user", "content": "q"},
+            {"role": "user", "content": "digest", "_compaction_marker": True},
+            call(2, "./src/b.py"),
+            {"role": "tool", "tool_call_id": "c2", "content": "body"},
+            call(3, "src/c.py"),
+            {"role": "tool", "tool_call_id": "c3", "content": "error: no"},
+            {"role": "tool", "tool_call_id": "g1", "content": "src/e.py:1:x"},
+            call(4, "src/d.py")]                 # answer not in yet
+    assert cb.verbatim_reads(msgs) == {"src/b.py"}
+
+
+def test_grep_results_note_the_modules_they_show():
+    ex = cb.ReadLog(_inner, _Rec())
+    ex("grep", '{"pattern": "x"}', ".")
+    assert ex.grepped == {"src/a.py", "src/b.py"}
+    assert ex.phase == {}
+
+
+def test_the_main_operation_writes_exactly_two_fields(tmp_path):
+    order, purposes = cb.build_project(tmp_path, extra=10)
+    path, (f1, f2) = next(iter(purposes.items()))
+    text = (tmp_path / path).read_text()
+    assert "out.update" not in text
+    body = text[text.index("def _"):text.index("return out")]
+    written = set(__import__("re").findall(r'out\["(\w+)"\] =', body))
+    assert written == {f1, f2, "version"}
 
 
 def test_one_nudge_names_the_unread_modules_and_never_refuses():
