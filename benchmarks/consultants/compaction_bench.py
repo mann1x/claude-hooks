@@ -48,12 +48,29 @@ rewrote f1 to what that had already set, so "the two fields it writes
 besides version" was every field; gemma named one field plus ``version``
 and scored 0 (bug-1100). Now it writes exactly f1 and f2. The table is
 graded per module by what the answer call still held of it
-(:func:`read_status`): ``folded`` (read, its result no longer verbatim in
-the history — what the compaction had to keep), ``kept`` (still verbatim),
-``grep`` (never read, seen only in grep output) and ``unread``. v6 split by
-folds before the first read, which counted modules still verbatim in the
-kept tail as "before the fold". A row naming several graded modules
+(:func:`status_from_history`). A row naming several graded modules
 counts for none of them.
+
+Grader v2 (2026-10-23): a row's status is read from **what the model had in
+front of it**, never from which tool touched the module. The v1 grader
+called a module ``folded`` whenever it had been read and its read result
+was gone, even when a grep result still in the history showed both fields
+on its ``out["<field>"] =`` lines — one grep lists every module's answer,
+so the "folded" column could be answered without compaction (the
+``compaction-v7-seq`` run, not re-gradable: v1 saved no history). Now:
+
+- every LLM call's full request and reply is saved with the trial
+  (``histories/<arm>-<trial>.jsonl.gz``); ``--regrade <dir>`` recomputes
+  every status and table from those files with no model;
+- ``carried``: both fields were in front of the model raw at some call,
+  and in **no** answering call's history outside a compaction marker —
+  only what the flow kept can supply them; ``visible``: raw in an
+  answering call's history (a read result, a grep line naming the module,
+  the lane's own earlier text), the control; ``unseen``: never raw, the
+  guessing floor;
+- the report opens with validity checks (history for every trial, unseen
+  rows never right, the visible control ≥ 90%, enough carried rows) and
+  says FAIL rather than print a table nobody can rely on.
 
 Task v4: the extra modules that size the project carry real-looking names
 and are interleaved (``modules_for``).
@@ -389,6 +406,8 @@ def build_project(dest: Path, *, seed: int = 7, funcs: int = FUNCS,
 # --------------------------------------------------------------------------- #
 
 TASK_VERSION = 7
+#: How rows are classified (see the module docstring).
+GRADER_VERSION = 2
 TICKET = "LDG-4471"
 FOLLOWUP_AFTER = 8
 FOLLOWUP = (f"One more thing from the on-call lead: whatever you find, the "
@@ -401,18 +420,138 @@ _CONVERSION = re.compile(
     r"|//\s*1e8|45[_,]?000\b", re.I)
 
 
-STATUSES = ("folded", "kept", "grep", "unread")
+STATUSES = ("carried", "visible", "unseen")
+
+#: A module path as tool output spells it (grep ``src/x/y.py:20:``, an
+#: absolute path, a glob listing), for giving a line to a module.
+_PATH_IN_LINE = re.compile(r"(src/[\w./-]+?\.py)\b")
+#: The first line of a ``read_file`` result.
+_READ_HEADER = re.compile(r"\A\s*(\S*?src/[\w./-]+?\.py):\d+-\d+\b")
 
 
-def read_status(path: str, read: "set[str] | dict", verbatim: "set[str]",
-                grepped: "set[str]") -> str:
-    """Where the answer call stood on ``path`` (task v7): ``folded`` = read,
-    its result gone from the history (a compaction had to keep it),
-    ``kept`` = still there verbatim, ``grep`` = never read but seen in a
-    grep result, ``unread``."""
-    if path in read:
-        return "kept" if path in verbatim else "folded"
-    return "grep" if path in grepped else "unread"
+def evidence_in(messages: list, purposes: dict[str, tuple[str, str]]
+                ) -> dict[str, str]:
+    """Modules whose two graded fields are both in front of the model, raw,
+    in ``messages``, with where they are: ``read`` (that module's
+    ``read_file`` result), ``tool`` (lines of any other tool result naming
+    its path — a grep), ``text`` (lines of any other message naming it: the
+    lane's own earlier answer, a note). A compaction marker never counts:
+    what it holds is what the flow carried, the thing being measured."""
+    found: dict[str, dict[str, set]] = {}
+
+    def note(path, text, where):
+        fields = purposes.get(path)
+        if not fields:
+            return
+        low = text.lower()
+        hit = {f for f in fields if f.lower() in low}
+        if hit:
+            found.setdefault(path, {}).setdefault(where, set()).update(hit)
+
+    names = {p: _module_names(p) for p in purposes}
+    reads = {}
+    for m in messages:
+        for tc in (m.get("tool_calls") or []) if isinstance(m, dict) else []:
+            fn = tc.get("function") or {}
+            if fn.get("name") == "read_file":
+                reads[tc.get("id")] = _norm(fn.get("arguments"))
+    for m in messages:
+        if not isinstance(m, dict) or m.get("_compaction_marker"):
+            continue
+        text = str(m.get("content") or "")
+        if m.get("role") == "tool":
+            # A read result by its call, and by the header ``read_file``
+            # opens it with (``src/x.py:1-164 (file has …)``), so a read
+            # whose call or path argument does not map is never missed.
+            head = _READ_HEADER.match(text)
+            owner = (reads.get(m.get("tool_call_id"))
+                     or (_norm({"path": head.group(1)}) if head else None))
+            if owner:
+                note(owner, text, "read")
+                continue
+        for line in text.splitlines():
+            low = line.lower()
+            if m.get("role") == "tool":
+                for hit in _PATH_IN_LINE.findall(line):
+                    note(_norm({"path": hit}), line, "tool")
+            else:
+                for path, rx in names.items():
+                    if rx.search(low):
+                        note(path, line, "text")
+    out = {}
+    for path, by in found.items():
+        for where in ("read", "tool", "text"):
+            if set(purposes[path]) <= {f for f in by.get(where, ())}:
+                out[path] = where
+                break
+        else:  # both fields raw, from different places
+            if set(purposes[path]) <= set().union(*by.values()):
+                out[path] = "mixed"
+    return out
+
+
+def status_from_history(calls: list[dict], purposes: dict[str, tuple[str, str]]
+                        ) -> tuple[dict[str, str], dict[str, str]]:
+    """``(status, where)`` per graded module from a trial's saved
+    researcher calls (each ``{"messages": [...], "answer": bool}``):
+    ``visible`` when both fields are raw in an answering call's history
+    (``where`` says how), ``carried`` when they were raw at some call and in
+    no answering call's, ``unseen`` otherwise."""
+    seen: dict[str, str] = {}
+    held: dict[str, str] = {}
+    for c in calls:
+        ev = evidence_in(c.get("messages") or [], purposes)
+        for p, w in ev.items():
+            seen.setdefault(p, w)
+            if c.get("answer"):
+                held.setdefault(p, w)
+    status, where = {}, {}
+    for p in purposes:
+        if p in held:
+            status[p], where[p] = "visible", held[p]
+        elif p in seen:
+            status[p], where[p] = "carried", seen[p]
+        else:
+            status[p] = "unseen"
+    return status, where
+
+
+def validity(trials: list[dict]) -> list[tuple[str, str]]:
+    """``(PASS|WARN|FAIL, what)`` checks a report must open with: a table
+    that fails one of these is not a measurement."""
+    out = []
+    if not trials:
+        return [("FAIL", "the run has no trials")]
+    missing = [f"{t['arm']}#{t['trial']}" for t in trials
+               if not t.get("history")]
+    out.append(("FAIL" if missing else "PASS",
+                "every trial saved its history"
+                + (f" (missing: {', '.join(missing)})" if missing else "")))
+    if any(t.get("grader") != GRADER_VERSION for t in trials):
+        out.append(("FAIL", f"every trial graded by grader v{GRADER_VERSION} "
+                            "(regrade with --regrade)"))
+    unseen = [sum((t.get("table") or {}).get("unseen", [0, 0])[i]
+                  for t in trials) for i in (0, 1)]
+    out.append(("FAIL" if unseen[0] else "PASS",
+                f"no unseen row is right ({unseen[0]} of {unseen[1]}): a "
+                "right row the model never saw means the answer leaks"))
+    for arm in dict.fromkeys(t["arm"] for t in trials):
+        rows = [t for t in trials if t["arm"] == arm]
+        vr, vt = (sum((t.get("table") or {}).get("visible", [0, 0])[i]
+                      for t in rows) for i in (0, 1))
+        cr = sum((t.get("table") or {}).get("carried", [0, 0])[1] for t in rows)
+        if vt:
+            out.append(("PASS" if vr >= 0.9 * vt else "FAIL",
+                        f"{arm}: the visible control is ≥ 90% "
+                        f"({vr}/{vt}); below it the grader or the copy fails"))
+        out.append(("PASS" if cr >= MIN_CARRIED else "WARN",
+                    f"{arm}: {cr} carried rows (≥ {MIN_CARRIED} to read the "
+                    "column)"))
+    return out
+
+
+#: Carried rows an arm needs before its column means anything.
+MIN_CARRIED = 20
 
 
 def _module_names(path: str) -> "re.Pattern":
@@ -428,7 +567,7 @@ def grade_table(answer: str, purposes: dict[str, tuple[str, str]],
                 status: dict[str, str]) -> dict:
     """Per graded module: does a line naming it, and no other graded
     module, also name both fields its main operation writes? Split by
-    :func:`read_status` (missing = ``unread``). Returns
+    :func:`status_from_history` (missing = ``unseen``). Returns
     ``{status: [right, total]}``."""
     lines = (answer or "").lower().splitlines()
     names = {p: _module_names(p) for p in purposes}
@@ -442,7 +581,7 @@ def grade_table(answer: str, purposes: dict[str, tuple[str, str]],
         right = any(all(f in rx.sub("", ln.replace(path.lower(), ""))
                         for f in fields)
                     for ln, hits in named if hits == [path])
-        key = status.get(path, "unread")
+        key = status.get(path, "unseen")
         cell = by.setdefault(key, [0, 0])
         cell[0] += int(right)
         cell[1] += 1
@@ -500,8 +639,6 @@ class ReadLog:
         self.phase: dict[str, int] = {}
         self.limits_reads = 0
         self.limits_rereads_after_fold = 0
-        #: modules named in a grep result (task v7's ``grep`` rows).
-        self.grepped: set[str] = set()
 
     def report_check(self, _messages) -> Optional[str]:
         """Asked once before the answer is accepted (the loop's
@@ -529,29 +666,7 @@ class ReadLog:
                 self.limits_reads += 1
                 if self.limits_reads > 1 and folds > 0:
                     self.limits_rereads_after_fold += 1
-        elif name == "grep" and not str(out).lower().startswith("error"):
-            for m in _GREP_HIT.finditer(str(out)):
-                self.grepped.add(_norm({"path": m.group(1)}))
         return out
-
-
-#: A grep match or context line: ``path:N:`` / ``path-N-``.
-_GREP_HIT = re.compile(r"^(\S+?\.py)[:-]\d+[:-]", re.M)
-
-
-def verbatim_reads(messages: list) -> set[str]:
-    """Modules whose ``read_file`` result is still in ``messages`` as sent:
-    the assistant call and its tool answer both present."""
-    calls = {}
-    for m in messages:
-        for tc in (m.get("tool_calls") or []) if isinstance(m, dict) else []:
-            fn = tc.get("function") or {}
-            if fn.get("name") == "read_file":
-                calls[tc.get("id")] = _norm(fn.get("arguments"))
-    return {calls[m.get("tool_call_id")] for m in messages
-            if isinstance(m, dict) and m.get("role") == "tool"
-            and m.get("tool_call_id") in calls
-            and not str(m.get("content") or "").lower().startswith("error")}
 
 
 def with_followup(prepare, *, after: int = FOLLOWUP_AFTER):
@@ -647,6 +762,9 @@ class Recorder:
         self.events: list[dict] = []
         self.llm: list[dict] = []
         self.tools: list[tuple[str, str]] = []
+        #: every LLM call in full, in order: what each was sent and what it
+        #: answered (grader v2 reads statuses from these).
+        self.history: list[dict] = []
         self._lock = threading.Lock()
 
     def record_event(self, *, kind, role, round, lane_idx, payload):
@@ -664,7 +782,25 @@ class Recorder:
         reasoning = (msg.get("reasoning") or msg.get("reasoning_content")
                      or msg.get("thinking") or "")
         sent = request.get("options") if isinstance(request, dict) else None
+        # A copy now: the loop keeps appending to the lists it sent.
+        full = json.loads(json.dumps({
+            "role": role,
+            "messages": (request or {}).get("messages")
+            if isinstance(request, dict) else None,
+            "tools": [((t.get("function") or {}).get("name"))
+                      for t in ((request or {}).get("tools") or [])]
+            if isinstance(request, dict) else [],
+            "options": sent, "think": (request or {}).get("think")
+            if isinstance(request, dict) else None,
+            "step": (request or {}).get("compaction_step")
+            if isinstance(request, dict) else None,
+            "reply": msg, "done": done,
+            "pt": prompt_tokens, "ct": completion_tokens, "ms": duration_ms,
+            "answer": bool(not msg.get("tool_calls")
+                           and (msg.get("content") or "").strip()),
+        }, default=str))
         with self._lock:
+            self.history.append(full)
             self.llm.append({
                 "role": role, "pt": prompt_tokens, "ct": completion_tokens,
                 "ms": duration_ms, "done": done,
@@ -692,10 +828,144 @@ def make_client(base: str, window: Optional[int]):
     return ChatClient(base, timeout_s=900.0)
 
 
+def history_name(arm: str, idx: int) -> str:
+    return f"histories/{arm.replace('/', '-')}-{idx}.jsonl.gz"
+
+
+def write_history(out: Optional[Path], arm: str, idx: int,
+                  calls: list[dict]) -> Optional[str]:
+    """Save every call of a trial; the path relative to ``out``, or
+    ``None`` when there is nowhere to save (a trial without one fails the
+    report's validity check)."""
+    if out is None:
+        return None
+    import gzip
+    rel = history_name(arm, idx)
+    path = out / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        for i, c in enumerate(calls):
+            f.write(json.dumps({"n": i, **c}) + "\n")
+    return rel
+
+
+def load_history(out: Path, rel: str) -> list[dict]:
+    import gzip
+    with gzip.open(out / rel, "rt", encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def regrade(trial: dict, out: Path, purposes: dict[str, tuple[str, str]]
+            ) -> dict:
+    """``trial`` with its statuses and table recomputed from its saved
+    history by the current grader — no model."""
+    if not trial.get("history"):
+        return trial
+    calls = [c for c in load_history(out, trial["history"])
+             if c.get("role") == "researcher"]
+    status, where = status_from_history(calls, purposes)
+    return {**trial, "grader": GRADER_VERSION, "status": status,
+            "status_where": where,
+            "table": grade_table(trial.get("answer") or "", purposes, status)}
+
+
+class GrepProbe:
+    """The cheapest strategy, no model: grep every package for the writer
+    lines (one package a turn — a grep stops at ``_GREP_MAX_CHARS``, so one
+    over all of ``src/`` shows under half the modules), then a table copied
+    from the greps. The v1 grader had no defence against it."""
+
+    def __init__(self, packages: list[str]):
+        self.packages = list(packages)
+        self.calls = 0
+
+    def context_length(self, model):
+        return 131_072
+
+    @staticmethod
+    def _reply(msg):
+        return {"choices": [{"message": {"role": "assistant", **msg},
+                             "finish_reason": "tool_calls"
+                             if msg.get("tool_calls") else "stop"}],
+                "usage": {"prompt_tokens": 1000, "completion_tokens": 10}}
+
+    def chat(self, payload):
+        self.calls += 1
+        msgs = payload["messages"]
+        done = sum(1 for m in msgs if m.get("role") == "tool")
+        if done < len(self.packages):
+            return self._reply({"content": "", "tool_calls": [
+                {"id": f"g{done}", "type": "function", "function": {
+                    "name": "grep", "arguments": json.dumps(
+                        {"pattern": 'out\\["',
+                         "path": self.packages[done]})}}]})
+        fields: dict = {}
+        for m in msgs:
+            if m.get("role") != "tool":
+                continue
+            for line in str(m.get("content") or "").splitlines():
+                hit = re.match(r'.*?(src/\S+?\.py):\d+:.*out\["(\w+)"\]',
+                               line)
+                if hit and hit.group(2) != "version":
+                    fields.setdefault(hit.group(1), []).append(hit.group(2))
+        table = "\n".join(f"| {p} | {', '.join(f)} |"
+                          for p, f in fields.items())
+        return self._reply({"content": "Root cause in backoff.py.\n" + table})
+
+
+def probe_trial(project: Path, order: list[str],
+                purposes: dict[str, tuple[str, str]], out: Path) -> dict:
+    """One trial of :class:`GrepProbe` through the real loop, executor and
+    grader, its history under ``out/preflight``."""
+    packages = sorted({str(Path(p).parent) for p in order})
+    probe = GrepProbe(packages)
+    global make_client
+    real, make_client = make_client, (lambda base, window: probe)
+    try:
+        return run_trial(base="preflight", model="probe", arm="probe/grep",
+                         idx=0, project=project, order=order,
+                         max_iterations=len(packages) + 6,
+                         think=False, window=131_072, purposes=purposes,
+                         history_dir=out / "preflight")
+    finally:
+        make_client = real
+
+
+def preflight(project: Path, order: list[str],
+              purposes: dict[str, tuple[str, str]], out: Path) -> list[str]:
+    """Problems that make a run's table unreliable, found with no model
+    before any is spent: the cheapest strategy (one grep, a copied table)
+    must score only as ``visible``, its history must be saved and must
+    regrade to the same table. ``[]`` = go."""
+    t = probe_trial(project, order, purposes, out)
+    table = t.get("table") or {}
+    problems = []
+    if t.get("error"):
+        problems.append(f"the probe lane failed: {t['error']}")
+    if (table.get("carried") or [0])[0]:
+        problems.append(f"{table['carried'][0]} rows answered from one grep "
+                        "were credited as carried: the grader measures the "
+                        "task's leak, not compaction")
+    if (table.get("unseen") or [0])[0]:
+        problems.append("rows the probe never saw were right: the answer "
+                        "leaks")
+    if (table.get("visible") or [0])[0] < 0.9 * len(purposes):
+        problems.append(f"the probe got {(table.get('visible') or [0])[0]} of "
+                        f"{len(purposes)} rows from the grep; the grader or "
+                        "the probe is broken")
+    if not t.get("history") or not (out / "preflight" / t["history"]).exists():
+        problems.append("the probe's history was not saved")
+    elif regrade(t, out / "preflight", purposes).get("table") != table:
+        problems.append("the saved history does not regrade to the same "
+                        "table")
+    return problems
+
+
 def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
               order: list[str], max_iterations: int, think,
               window: Optional[int] = None,
-              purposes: Optional[dict[str, tuple[str, str]]] = None) -> dict:
+              purposes: Optional[dict[str, tuple[str, str]]] = None,
+              history_dir: Optional[Path] = None) -> dict:
     flow, placement = arm.split("/")
     client = make_client(base, window)
     rec = Recorder()
@@ -754,15 +1024,14 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
         answer = answered_text(answer_turns, answer)
     except Exception as e:  # a failed trial is a data point, not a crash
         error = f"{type(e).__name__}: {e}"
+    history = write_history(history_dir, arm, idx, rec.history)
     folds = [e for e in rec.events if e.get("kind") == "compaction"]
     calls = [c for c in rec.llm if c["role"] == "researcher"]
     comp_calls = [c for c in rec.llm if c["role"].endswith(":compaction")]
     reads = [p for n, p in rec.tools if n == "read_file" and p]
     distinct = set(reads)
-    # What the answer call held: the history the last call was sent with.
-    held = verbatim_reads(prepare.last)
-    status = {p: read_status(p, executor.phase, held, executor.grepped)
-              for p in (purposes or {})}
+    status, where = status_from_history(
+        [c for c in rec.history if c["role"] == "researcher"], purposes or {})
     return {
         "arm": arm, "trial": idx, "model": model,
         "window": window or resolved_budget(client, model, knobs).context_length,
@@ -793,7 +1062,8 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
         "limits_rereads_after_fold": executor.limits_rereads_after_fold,
         "modules_read": sum(1 for p in order if p in executor.phase),
         "read_phase": executor.phase,
-        "status": status,
+        "grader": GRADER_VERSION, "history": history,
+        "status": status, "status_where": where,
         #: {status: [right, total]} of the module table (task v7).
         "table": grade_table(answer, purposes or {}, status),
         "stop_reason": (final.get("_stop_reason") if error is None
@@ -824,6 +1094,8 @@ def render_report(trials: list[dict], meta: dict) -> str:
              f"functions, ~{meta['read_tokens']:,} tokens of reads, sized "
              f"for {meta['folds']} folds (trigger {meta['trigger']:,}, "
              f"target {meta['target']:,}, output cap {meta['cap']:,}).",
+             "", "## Validity", ""] + [
+                 f"- **{v}** {what}" for v, what in validity(trials)] + [
              "", "## By arm", "",
              "| arm | n | answered | fixed (of answered) | "
              "compactions (mean / min–max) | "
@@ -844,13 +1116,16 @@ def render_report(trials: list[dict], meta: dict) -> str:
             f"/{meta['modules']} | "
             f"{sum(r['re_reads'] for r in rows) / len(rows):.1f} | "
             f"{sum(1 for r in rows if r['error'])} |")
-    lines += ["", "## Module table by what the answer still held", "",
+    lines += ["", "## Module table by what the answer had in front of it", "",
               "Share of graded modules whose row (naming no other module) "
-              "names both fields its main operation writes. **folded**: read, "
-              "its result compacted away before the answer — what the flow "
-              "kept. **kept**: still verbatim in the history (the control). "
-              "**grep**: never read, seen only in grep output. **unread**: "
-              "neither.", ""]
+              "names both fields its main operation writes, read from the "
+              f"saved histories (grader v{GRADER_VERSION}). **carried**: both "
+              "fields were raw in front of the model earlier and in no "
+              "answering call's history outside a compaction marker — only "
+              "what the flow kept can supply them; this is the measurement. "
+              "**visible**: raw in an answering call's history (a read, a "
+              "grep line, the lane's own earlier text) — the control. "
+              "**unseen**: never raw — must be 0% right.", ""]
     present = {k for t in trials for k in (t.get("table") or {})}
     phases = [k for k in STATUSES if k in present]
     lines += ["| arm | " + " | ".join(phases) + " |",
@@ -931,7 +1206,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                    type=lambda v: v if v != "true" else True)
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--report-only", action="store_true")
+    p.add_argument("--regrade", type=Path, default=None, metavar="DIR",
+                   help="Recompute every status and table in DIR from its "
+                        "saved histories with the current grader, rewrite "
+                        "trials.jsonl (old copy kept) and report.md; no model.")
     args = p.parse_args(argv)
+    if args.regrade is not None:
+        return regrade_dir(args.regrade)
 
     window = None if args.window == "auto" else int(args.window)
     probe = make_client(args.base, window)
@@ -980,6 +1261,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not args.report_only:
         project = out / "project"
         order, purposes = build_project(project, funcs=funcs, extra=extra)
+        meta["purposes"] = purposes
+        meta["grader"] = GRADER_VERSION
+        problems = preflight(project, order, purposes, out)
+        for x in problems:
+            print(f"PREFLIGHT FAIL {x}", flush=True)
+        if problems:
+            return 2
+        print("PREFLIGHT PASS the one-grep probe scores only as visible; "
+              "its history saved and regraded identically", flush=True)
+        (out / "metadata.json").write_text(json.dumps(meta, indent=2) + "\n")
         done = set()
         if trials_path.exists():
             for line in trials_path.read_text().splitlines():
@@ -993,7 +1284,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                                 arm=arm, idx=i, project=project, order=order,
                                 max_iterations=max_iterations,
                                 think=args.think, window=window,
-                                purposes=purposes): (arm, i)
+                                purposes=purposes, history_dir=out): (arm, i)
                     for arm, i in jobs}
             for fut in cf.as_completed(futs):
                 t = fut.result()
@@ -1002,15 +1293,56 @@ def main(argv: Optional[list[str]] = None) -> int:
                 tab = t.get("table") or {}
                 right = sum(v[0] for v in tab.values())
                 total = sum(v[1] for v in tab.values())
+                carried = tab.get("carried", [0, 0])
                 print(f"{t['arm']:15s} #{t['trial']} fixed={t['fixed']} "
                       f"folds={t['compactions']} calls={t['researcher_calls']}"
                       f" read={t.get('modules_read')} table={right}/{total}"
+                      f" carried={carried[0]}/{carried[1]}"
+                      f" history={t.get('history')}"
                       f" {t['seconds']}s err={t['error']}", flush=True)
-    trials = [json.loads(x) for x in trials_path.read_text().splitlines()]
-    (out / "metadata.json").write_text(json.dumps(meta, indent=2) + "\n")
+    trials = ([json.loads(x) for x in trials_path.read_text().splitlines()
+               if x.strip()] if trials_path.exists() else [])
+    prev = out / "metadata.json"
+    if "purposes" not in meta and prev.exists():
+        # A report-only pass keeps what the run recorded.
+        old = json.loads(prev.read_text())
+        meta.update({k: old[k] for k in ("purposes", "grader") if k in old})
+    prev.write_text(json.dumps(meta, indent=2) + "\n")
+    return finish(out, trials, meta)
+
+
+def finish(out: Path, trials: list[dict], meta: dict) -> int:
+    """Write the report and print its validity checks; 1 on any FAIL, so
+    a run whose table cannot be relied on never ends looking like one."""
     (out / "report.md").write_text(render_report(trials, meta))
+    checks = validity(trials)
+    for v, what in checks:
+        print(f"{v:4s} {what}")
     print(out / "report.md")
-    return 0
+    return 1 if any(v == "FAIL" for v, _ in checks) else 0
+
+
+def regrade_dir(out: Path) -> int:
+    """``--regrade``: every trial in ``out`` re-graded from its saved
+    history by the current grader; the previous trials.jsonl is kept as
+    ``trials.jsonl.grader-v<N>``."""
+    meta = json.loads((out / "metadata.json").read_text())
+    purposes = {k: tuple(v) for k, v in (meta.get("purposes") or {}).items()}
+    if not purposes:
+        print(f"FAIL {out}: metadata.json has no purposes; this run cannot be "
+              "re-graded (it predates grader v2)")
+        return 1
+    path = out / "trials.jsonl"
+    trials = [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
+    olds = {t.get("grader", 1) for t in trials}
+    backup = out / f"trials.jsonl.grader-v{max(olds)}"
+    if not backup.exists():
+        backup.write_text(path.read_text())
+    trials = [regrade(t, out, purposes) for t in trials]
+    path.write_text("".join(json.dumps(t) + "\n" for t in trials))
+    meta["grader"] = GRADER_VERSION
+    (out / "metadata.json").write_text(json.dumps(meta, indent=2) + "\n")
+    return finish(out, trials, meta)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
-"""The compaction bench's harness (task v4): in-order reads, realistic
-filler, sizing to the production window."""
+"""The compaction bench's harness: project, sizing, reads, and grader v2 —
+statuses read from the saved histories, validity checks, regrade."""
 
 from __future__ import annotations
 
@@ -56,62 +56,171 @@ def test_reads_are_never_refused_and_note_their_read_phase():
     assert ex.limits_reads == 2 and ex.limits_rereads_after_fold == 1
 
 
-def test_the_table_is_graded_per_module_by_what_the_answer_held():
+def test_the_table_is_graded_per_module_by_its_status():
     purposes = {"src/a/lease_router.py": ("tier", "codec"),
                 "src/b/shard_keeper.py": ("lineage", "weight"),
                 "src/c/span_loader.py": ("tenant_id", "fence_token")}
-    status = {"src/a/lease_router.py": "folded",
-              "src/b/shard_keeper.py": "kept"}
+    status = {"src/a/lease_router.py": "carried",
+              "src/b/shard_keeper.py": "visible"}
     answer = ("| src/a/lease_router.py | tier, codec |\n"
               "| src/b/shard_keeper.py | lineage only |\n"
               "| src/c/span_loader.py | `tenant_id`, `fence_token` |")
     assert cb.grade_table(answer, purposes, status) == {
-        "folded": [1, 1], "kept": [0, 1], "unread": [1, 1]}
+        "carried": [1, 1], "visible": [0, 1], "unseen": [1, 1]}
     # A bare word in another module's row is not this module's row.
     assert cb.grade_table("| src/b/shard_keeper.py | tier, codec; lease_router |",
                           {"src/a/lease_router.py": ("tier", "codec")},
-                          {"src/a/lease_router.py": "kept"}) == {"kept": [0, 1]}
+                          {"src/a/lease_router.py": "visible"}) == {"visible": [0, 1]}
 
 
 def test_a_row_naming_two_modules_counts_for_neither():
     purposes = {"src/a/queue.py": ("weight", "lineage"),
                 "src/b/journal.py": ("weight", "lineage")}
     assert cb.grade_table("queue.py and journal.py | weight lineage",
-                          purposes, {}) == {"unread": [0, 2]}
+                          purposes, {}) == {"unseen": [0, 2]}
     assert cb.grade_table("queue.py | weight lineage\njournal.py | weight, "
-                          "lineage", purposes, {}) == {"unread": [2, 2]}
+                          "lineage", purposes, {}) == {"unseen": [2, 2]}
 
 
-def test_read_status_tells_folded_from_kept_and_grep_from_unread():
-    read = {"src/a.py": 0, "src/b.py": 1}
-    held = {"src/b.py"}
-    got = {p: cb.read_status(p, read, held, {"src/c.py", "src/a.py"})
-           for p in ("src/a.py", "src/b.py", "src/c.py", "src/d.py")}
-    assert got == {"src/a.py": "folded", "src/b.py": "kept",
-                   "src/c.py": "grep", "src/d.py": "unread"}
+# --- grader v2: status from what the model had in front of it -------------- #
+
+P = {"src/a/lease_router.py": ("tier", "codec"),
+     "src/b/shard_keeper.py": ("lineage", "weight"),
+     "src/c/span_loader.py": ("tenant_id", "fence_token")}
 
 
-def test_verbatim_reads_are_the_read_results_still_in_the_history():
-    def call(i, path):
-        return {"role": "assistant", "content": "", "tool_calls": [
-            {"id": f"c{i}", "type": "function", "function": {
-                "name": "read_file", "arguments": f'{{"path": "{path}"}}'}}]}
-    msgs = [{"role": "user", "content": "q"},
-            {"role": "user", "content": "digest", "_compaction_marker": True},
-            call(2, "./src/b.py"),
-            {"role": "tool", "tool_call_id": "c2", "content": "body"},
-            call(3, "src/c.py"),
-            {"role": "tool", "tool_call_id": "c3", "content": "error: no"},
-            {"role": "tool", "tool_call_id": "g1", "content": "src/e.py:1:x"},
-            call(4, "src/d.py")]                 # answer not in yet
-    assert cb.verbatim_reads(msgs) == {"src/b.py"}
+def _read(i, path, body):
+    return [{"role": "assistant", "content": "", "tool_calls": [
+                {"id": f"r{i}", "type": "function", "function": {
+                    "name": "read_file", "arguments": f'{{"path": "{path}"}}'}}]},
+            {"role": "tool", "tool_call_id": f"r{i}", "content": body}]
 
 
-def test_grep_results_note_the_modules_they_show():
-    ex = cb.ReadLog(_inner, _Rec())
-    ex("grep", '{"pattern": "x"}', ".")
-    assert ex.grepped == {"src/a.py", "src/b.py"}
-    assert ex.phase == {}
+def _grep(i, body):
+    return [{"role": "assistant", "content": "", "tool_calls": [
+                {"id": f"g{i}", "type": "function", "function": {
+                    "name": "grep", "arguments": '{"pattern": "out"}'}}]},
+            {"role": "tool", "tool_call_id": f"g{i}", "content": body}]
+
+
+A_BODY = 'out["tier"] = x\nout["codec"] = y\nout["version"] = 1'
+HEAD = [{"role": "system", "content": "s"}, {"role": "user", "content": "q"}]
+
+
+def test_each_raw_source_counts_and_the_marker_never_does():
+    grep = ("/abs/project/src/b/shard_keeper.py:20:    out[\"lineage\"] = 1\n"
+            "src/b/shard_keeper.py:21:    out[\"weight\"] = 2\n"
+            "src/c/span_loader.py:20:    out[\"tenant_id\"] = 1")   # one field only
+    msgs = (HEAD + _read(1, "./src/a/lease_router.py", A_BODY) + _grep(2, grep)
+            + [{"role": "user", "_compaction_marker": True,
+                "content": "span_loader.py writes tenant_id and fence_token"}])
+    assert cb.evidence_in(msgs, P) == {"src/a/lease_router.py": "read",
+                                       "src/b/shard_keeper.py": "tool"}
+    own = HEAD + [{"role": "assistant",
+                   "content": "| span_loader.py | tenant_id, fence_token |"}]
+    assert cb.evidence_in(own, P) == {"src/c/span_loader.py": "text"}
+
+
+def test_a_read_is_found_by_its_header_when_its_call_does_not_map():
+    msgs = HEAD + [{"role": "tool", "tool_call_id": "lost", "content":
+                    "src/a/lease_router.py:1-30  (file has 30 lines)\n"
+                    "    20: out[\"tier\"] = x\n    21: out[\"codec\"] = y"}]
+    assert cb.evidence_in(msgs, P) == {"src/a/lease_router.py": "read"}
+
+
+def test_a_superseded_or_cut_read_is_not_raw():
+    msgs = HEAD + _read(1, "src/a/lease_router.py",
+                        "[outdated - see the latest file content]")
+    assert cb.evidence_in(msgs, P) == {}
+
+
+def test_carried_only_when_no_answering_call_has_it_raw():
+    read = HEAD + _read(1, "src/a/lease_router.py", A_BODY)
+    folded = HEAD + [{"role": "user", "_compaction_marker": True,
+                      "content": "lease_router writes tier and codec"}]
+    regrepped = folded + _grep(2, "src/a/lease_router.py:3:out[\"tier\"]\n"
+                                  "src/a/lease_router.py:4:out[\"codec\"]")
+    carried, _ = cb.status_from_history(
+        [{"messages": read}, {"messages": folded, "answer": True}], P)
+    assert carried == {"src/a/lease_router.py": "carried",
+                       "src/b/shard_keeper.py": "unseen",
+                       "src/c/span_loader.py": "unseen"}
+    # Read, folded, then grepped again: the answer had it raw.
+    vis, where = cb.status_from_history(
+        [{"messages": read}, {"messages": regrepped, "answer": True}], P)
+    assert vis["src/a/lease_router.py"] == "visible"
+    assert where["src/a/lease_router.py"] == "tool"
+    # Any answering call holding it raw makes it visible, not only the last.
+    early, _ = cb.status_from_history(
+        [{"messages": read, "answer": True}, {"messages": folded, "answer": True}],
+        P)
+    assert early["src/a/lease_router.py"] == "visible"
+
+
+def _trial(arm="basic/system", hist="h", **table):
+    return {"arm": arm, "trial": 0, "history": hist,
+            "grader": cb.GRADER_VERSION, "table": table}
+
+
+def test_validity_fails_a_leak_a_broken_control_and_a_missing_history():
+    ok = _trial(carried=[20, 25], visible=[30, 30], unseen=[0, 40])
+    assert all(v == "PASS" for v, _ in cb.validity([ok]))
+    leak = _trial(carried=[20, 25], visible=[30, 30], unseen=[3, 40])
+    broken = _trial(carried=[20, 25], visible=[10, 30])
+    nohist = _trial(hist=None, carried=[20, 25], visible=[30, 30])
+    old = {**ok, "grader": 1}
+    for bad in (leak, broken, nohist, old):
+        assert any(v == "FAIL" for v, _ in cb.validity([bad])), bad
+    assert cb.validity([]) == [("FAIL", "the run has no trials")]
+    thin = _trial(carried=[2, 3], visible=[30, 30])
+    assert ("WARN", ) == tuple({v for v, _ in cb.validity([thin])} - {"PASS"})
+
+
+def test_a_history_round_trips_and_regrades_to_the_same_table(tmp_path):
+    calls = [{"role": "researcher", "messages": HEAD + _read(
+                 1, "src/a/lease_router.py", A_BODY), "answer": False},
+             {"role": "researcher:compaction", "messages": [], "answer": True},
+             {"role": "researcher", "answer": True, "messages": HEAD + [
+                 {"role": "user", "_compaction_marker": True, "content": "d"}]}]
+    rel = cb.write_history(tmp_path, "full/system", 0, calls)
+    assert rel == "histories/full-system-0.jsonl.gz"
+    assert [c["role"] for c in cb.load_history(tmp_path, rel)] == [
+        c["role"] for c in calls]
+    trial = {"arm": "full/system", "trial": 0, "history": rel, "grader": 1,
+             "answer": "| lease_router.py | tier, codec |",
+             "status": {"src/a/lease_router.py": "folded"}}
+    out = cb.regrade(trial, tmp_path, P)
+    assert out["grader"] == cb.GRADER_VERSION
+    assert out["status"]["src/a/lease_router.py"] == "carried"
+    assert out["table"]["carried"] == [1, 1]
+    assert cb.write_history(None, "a/b", 0, calls) is None
+
+
+def test_a_lane_answering_from_one_grep_is_never_credited_as_carried(
+        tmp_path):
+    order, purposes = cb.build_project(tmp_path / "project", extra=20)
+    t = cb.probe_trial(tmp_path / "project", order, purposes, tmp_path)
+    assert t["error"] is None, t["error"]
+    table = t["table"]
+    # The probe worked: it got rows right from the grep alone ...
+    assert table["visible"][0] >= 0.9 * len(purposes)
+    # ... and none of them count as what a compaction carried.
+    assert "carried" not in table and "unseen" not in table
+    assert set(t["status_where"].values()) == {"tool"}
+    assert t["history"] and (tmp_path / "preflight" / t["history"]).exists()
+    assert cb.regrade(t, tmp_path / "preflight", purposes)["table"] == table
+    checks = dict((w, v) for v, w in cb.validity([t]))
+    assert any(v == "WARN" and "carried rows" in w for w, v in checks.items())
+    assert cb.preflight(tmp_path / "project", order, purposes, tmp_path) == []
+
+
+def test_the_preflight_refuses_a_grader_that_credits_the_probe(
+        tmp_path, monkeypatch):
+    order, purposes = cb.build_project(tmp_path / "project", extra=20)
+    monkeypatch.setattr(cb, "status_from_history", lambda calls, p: (
+        {k: "carried" for k in p}, {}))
+    problems = cb.preflight(tmp_path / "project", order, purposes, tmp_path)
+    assert any("carried" in x for x in problems)
 
 
 def test_the_main_operation_writes_exactly_two_fields(tmp_path):
@@ -151,5 +260,19 @@ def test_an_answer_sent_back_by_the_nudge_is_still_graded():
     table = "| src/a/lease_router.py | tier, codec |"
     text = cb.answered_text([table], "My previous response is complete.")
     assert cb.grade_table(text, {"src/a/lease_router.py": ("tier", "codec")},
-                          {}) == {"unread": [1, 1]}
+                          {}) == {"unseen": [1, 1]}
     assert cb.answered_text([], "final") == "final"
+
+
+def test_the_recorder_saves_each_call_as_it_was_sent():
+    rec = cb.Recorder()
+    msgs = [{"role": "user", "content": "q"}]
+    rec.record_llm(role="researcher", round=0, lane_idx=0, model="m",
+                   request={"messages": msgs, "tools": [
+                       {"function": {"name": "grep"}}]},
+                   response={"choices": [{"message": {"content": "a"}}]},
+                   prompt_tokens=1, completion_tokens=1, duration_ms=1)
+    msgs.append({"role": "tool", "content": "later"})   # the loop goes on
+    saved = rec.history[0]
+    assert saved["messages"] == [{"role": "user", "content": "q"}]
+    assert saved["tools"] == ["grep"] and saved["answer"] is True
