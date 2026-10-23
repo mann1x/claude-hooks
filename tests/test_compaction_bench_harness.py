@@ -1,5 +1,6 @@
-"""The compaction bench's harness: project, sizing, reads, and grader v2 —
-statuses read from the saved histories, validity checks, regrade."""
+"""The compaction bench's harness: project, sizing, reads, and grader v3 —
+statuses read from the saved histories, the fix read from code only,
+validity checks, regrade."""
 
 from __future__ import annotations
 
@@ -276,3 +277,56 @@ def test_the_recorder_saves_each_call_as_it_was_sent():
     saved = rec.history[0]
     assert saved["messages"] == [{"role": "user", "content": "q"}]
     assert saved["tools"] == ["grep"] and saved["answer"] is True
+
+
+#: The diagnosis every answer shares: it states the unit, and the window in
+#: milliseconds, in prose.
+_DIAG = ("Root cause in `src/net/backoff.py` `should_retry`: `elapsed` is in "
+         "milliseconds but `RETRY_WINDOW` is 450 deciseconds (= 45 seconds = "
+         "45,000 ms). Ticket LDG-4471.\n\n")
+
+
+def test_the_fix_is_graded_from_code_never_from_prose():
+    order = ["src/net/backoff.py", "src/config/limits.py"]
+    right = [  # the compaction-v7-g2 full answer, then each valid spelling
+        "```python\nelapsed = (time.monotonic_ns() - started_ns) "
+        "// 100_000_000\n```",
+        "`return elapsed < limits.RETRY_WINDOW * 100`",
+        "`return elapsed // 100 < limits.RETRY_WINDOW`",
+        "`elapsed = (time.monotonic_ns() - started_ns) / 10**8`",
+        "```\nRETRY_WINDOW = 45_000  # ms\n```",
+        "```python\nreturn 100 * limits.RETRY_WINDOW > elapsed",  # unclosed
+    ]
+    wrong = [  # the compaction-v7-g2 basic and reduced answers, then prose
+        "```python\nelapsed = (time.monotonic_ns() - started_ns) "
+        "// 100_000\n```",
+        "```python\n    return elapsed // 10 < limits.RETRY_WINDOW\n```",
+        "Multiply RETRY_WINDOW * 100 or divide elapsed // 100.",
+        "```python\nelapsed = (time.monotonic_ns() - started_ns) "
+        "// 1_000_000\n```",
+        "`RETRY_WINDOW = 45,000`",  # a tuple, not a number
+    ]
+    for fix in right:
+        assert cb.grade(_DIAG + fix, order)["fixed"], fix
+    for fix in wrong:
+        g = cb.grade(_DIAG + fix, order)
+        assert not g["conversion"] and not g["fixed"], fix
+    assert not cb.grade(_DIAG, order)["fixed"]
+
+
+def test_regrade_recomputes_the_fix_from_the_saved_answer(tmp_path):
+    rel = cb.write_history(tmp_path, "basic/system", 0, [
+        {"role": "researcher", "answer": True, "messages": HEAD}])
+    wrong = _DIAG + "```python\nelapsed = (t1 - t0) // 100_000\n```"
+    trial = {"arm": "basic/system", "trial": 0, "history": rel, "grader": 2,
+             "answer": wrong, "fixed": True, "conversion": True, "status": {}}
+    project = tmp_path / "project" / "src" / "net"
+    project.mkdir(parents=True)
+    (project / "backoff.py").write_text("")
+    order = cb.saved_order(tmp_path)
+    assert order == ["src/net/backoff.py"]
+    out = cb.regrade(trial, tmp_path, P, order)
+    assert out["fixed"] is False and out["conversion"] is False
+    assert out["grader"] == cb.GRADER_VERSION
+    # No order (nothing saved to rebuild it from): the fix is left as graded.
+    assert cb.regrade(trial, tmp_path, P)["fixed"] is True

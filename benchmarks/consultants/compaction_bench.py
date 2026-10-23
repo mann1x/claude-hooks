@@ -72,6 +72,13 @@ so the "folded" column could be answered without compaction (the
   rows never right, the visible control ≥ 90%, enough carried rows) and
   says FAIL rather than print a table nobody can rely on.
 
+Grader v3 (2026-10-24): the ×100 conversion counts only in code the
+answer proposes (fenced blocks, inline backticks), never in its prose. v2
+searched the whole answer, and the basic arm of ``compaction-v7-g2`` was
+graded fixed on "= 45 seconds = 45,000 ms" in its diagnosis while its fix,
+``// 100_000`` on nanoseconds, is wrong. ``--regrade`` recomputes the fix
+too, from the saved answer.
+
 Task v4: the extra modules that size the project carry real-looking names
 and are interleaved (``modules_for``).
 
@@ -407,17 +414,27 @@ def build_project(dest: Path, *, seed: int = 7, funcs: int = FUNCS,
 
 TASK_VERSION = 7
 #: How rows are classified (see the module docstring).
-GRADER_VERSION = 2
+GRADER_VERSION = 3
 TICKET = "LDG-4471"
 FOLLOWUP_AFTER = 8
 FOLLOWUP = (f"One more thing from the on-call lead: whatever you find, the "
             f"answer must cite ticket {TICKET}, which tracks this incident.")
 
-#: A ×100 conversion between deciseconds and milliseconds, either side.
+#: A ×100 conversion between deciseconds and milliseconds, either side, as
+#: code: the window times 100, ms divided by 100, ns divided by 10**8, or the
+#: window restated as 45 000 ms. Read only from :func:`code_of`.
 _CONVERSION = re.compile(
-    r"RETRY_WINDOW\s*\*\s*100\b|100\s*\*\s*(limits\.)?RETRY_WINDOW"
-    r"|elapsed\s*(//|/)\s*100\b|//\s*100[_,]?000[_,]?000\b"
-    r"|//\s*1e8|45[_,]?000\b", re.I)
+    r"RETRY_WINDOW\s*\*\s*100\b|\b100\s*\*\s*(limits\.)?RETRY_WINDOW"
+    r"|elapsed\s*//?\s*100\b|//?\s*100_?000_?000\b"
+    r"|//?\s*(1e8|10\s*\*\*\s*8)\b|RETRY_WINDOW\s*=\s*45_?000\b", re.I)
+#: Fenced blocks (an unclosed one runs to the end) and inline code spans.
+_CODE = re.compile(r"```.*?(?:```|\Z)|`[^`\n]+`", re.S)
+
+
+def code_of(text: str) -> str:
+    """The code an answer writes: a fix is graded from this, never from
+    prose that only states the unit ("45 s = 45,000 ms")."""
+    return "\n".join(m.group(0) for m in _CODE.finditer(text or ""))
 
 
 STATUSES = ("carried", "visible", "unseen")
@@ -594,7 +611,7 @@ def grade(answer: str, order: list[str]) -> dict:
     names_fn = "should_retry" in text
     names_file = "backoff" in low
     units = "decisecond" in low or "tenths of a second" in low
-    conversion = _CONVERSION.search(text) is not None
+    conversion = _CONVERSION.search(code_of(text)) is not None
     ticket = TICKET in text
     modules = sum(1 for p in order if Path(p).stem in text)
     # An answer at all: a lane that stopped on a promise of more reading
@@ -855,16 +872,19 @@ def load_history(out: Path, rel: str) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
-def regrade(trial: dict, out: Path, purposes: dict[str, tuple[str, str]]
-            ) -> dict:
-    """``trial`` with its statuses and table recomputed from its saved
-    history by the current grader — no model."""
+def regrade(trial: dict, out: Path, purposes: dict[str, tuple[str, str]],
+            order: Optional[list[str]] = None) -> dict:
+    """``trial`` with its statuses, table and (given ``order``) fix grade
+    recomputed from its saved history and answer by the current grader — no
+    model."""
     if not trial.get("history"):
         return trial
     calls = [c for c in load_history(out, trial["history"])
              if c.get("role") == "researcher"]
     status, where = status_from_history(calls, purposes)
-    return {**trial, "grader": GRADER_VERSION, "status": status,
+    return {**trial, **(grade(trial.get("answer") or "", order)
+                        if order else {}),
+            "grader": GRADER_VERSION, "status": status,
             "status_where": where,
             "table": grade_table(trial.get("answer") or "", purposes, status)}
 
@@ -1262,6 +1282,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         project = out / "project"
         order, purposes = build_project(project, funcs=funcs, extra=extra)
         meta["purposes"] = purposes
+        meta["order"] = order
         meta["grader"] = GRADER_VERSION
         problems = preflight(project, order, purposes, out)
         for x in problems:
@@ -1306,7 +1327,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if "purposes" not in meta and prev.exists():
         # A report-only pass keeps what the run recorded.
         old = json.loads(prev.read_text())
-        meta.update({k: old[k] for k in ("purposes", "grader") if k in old})
+        meta.update({k: old[k] for k in ("purposes", "order", "grader") if k in old})
     prev.write_text(json.dumps(meta, indent=2) + "\n")
     return finish(out, trials, meta)
 
@@ -1320,6 +1341,13 @@ def finish(out: Path, trials: list[dict], meta: dict) -> int:
         print(f"{v:4s} {what}")
     print(out / "report.md")
     return 1 if any(v == "FAIL" for v, _ in checks) else 0
+
+
+def saved_order(out: Path) -> list[str]:
+    """The project's modules from the copy saved with the run, for a run
+    whose metadata predates ``order``."""
+    root = out / "project"
+    return sorted(str(p.relative_to(root)) for p in (root / "src").rglob("*.py"))
 
 
 def regrade_dir(out: Path) -> int:
@@ -1338,7 +1366,8 @@ def regrade_dir(out: Path) -> int:
     backup = out / f"trials.jsonl.grader-v{max(olds)}"
     if not backup.exists():
         backup.write_text(path.read_text())
-    trials = [regrade(t, out, purposes) for t in trials]
+    order = meta.get("order") or saved_order(out)
+    trials = [regrade(t, out, purposes, order) for t in trials]
     path.write_text("".join(json.dumps(t) + "\n" for t in trials))
     meta["grader"] = GRADER_VERSION
     (out / "metadata.json").write_text(json.dumps(meta, indent=2) + "\n")
