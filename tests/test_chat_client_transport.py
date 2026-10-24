@@ -230,3 +230,41 @@ def test_api_key_and_base_url_normalisation():
     with patch("urllib.request.urlopen", side_effect=seq2):
         ChatClient("http://h").chat({"model": "m", "messages": []})
     assert seq2.requests[0].get_header("Authorization") is None
+
+
+class TestRoomRefusalOnAPlacedCall:
+    """A PolyKV-placed call refused for KV room is raised at once, for the
+    run's manager to free room and resend; retrying in the client cannot
+    make room (csl-2026-10-24-1700-78ca: 16 x 429 then 15 x 503, 47 min)."""
+
+    ADMISSION = ('{"error":"admission rejected: context allocation exhausted '
+                 '(base 31617 free of 32768 cells, needs 32768)"}')
+    NO_ROOM = ('{"error":"the engine has had no room for this request for '
+               '2m0s; it is refusing new work rather than queueing it"}')
+
+    def _payload(self, placed=True):
+        p = {"model": "m", "messages": [{"role": "user", "content": "q"}]}
+        if placed:
+            p["placement"] = {"session_id": "run~planner~x"}
+        return p
+
+    @pytest.mark.parametrize("code,body", [(429, ADMISSION), (503, NO_ROOM)])
+    def test_placed_room_refusal_raises_without_retrying(self, code, body):
+        seq = _Seq([_http(code, body)])
+        with patch("urllib.request.urlopen", seq):
+            with pytest.raises(ChatFault) as exc:
+                _client().chat(self._payload())
+        assert len(seq.requests) == 1
+        assert exc.value.status == code
+
+    def test_an_unplaced_call_keeps_its_retries(self):
+        seq = _Seq([_http(429, self.ADMISSION), _Resp(_ok())])
+        with patch("urllib.request.urlopen", seq):
+            out = _client().chat(self._payload(placed=False))
+        assert len(seq.requests) == 2 and out
+
+    def test_a_placed_call_retries_other_503s(self):
+        seq = _Seq([_http(503, '{"error":"model is loading"}'), _Resp(_ok())])
+        with patch("urllib.request.urlopen", seq):
+            assert _client().chat(self._payload())
+        assert len(seq.requests) == 2

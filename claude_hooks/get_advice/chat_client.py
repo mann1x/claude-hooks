@@ -44,6 +44,13 @@ DEFAULT_MAX_RETRIES = 15
 DEFAULT_RETRY_BASE_DELAY_S = 1.5
 DEFAULT_RETRY_MAX_DELAY_S = 90.0
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
+
+#: An engine refusing a call for KV room (opencoti / xOllama admission, or
+#: xOllama's 503 after two minutes with none). On a PolyKV-placed call it
+#: is raised at once: the run's manager frees room (its idle sessions, the
+#: caller's own cache) and resends; retrying here cannot make room (live:
+#: 16 x 429 then 15 x 503, 47 min, csl-2026-10-24-1700-78ca).
+_ROOM_REFUSAL_RX = re.compile(r"admission rejected|no room for this request")
 # 4xx response bodies that look like transient cloud parser/validator
 # flaps rather than genuine "you sent bad data" errors. Substring
 # match against the response body. Conservative — anything not on
@@ -1373,7 +1380,10 @@ class ChatClient:
                         and any(s in err_body
                                 for s in RETRYABLE_4XX_BODY_SUBSTRINGS))
                 )
-                if (fault != TOOL_CALL_UNPARSABLE
+                room = (e.code in (429, 503) and bool(payload.get("placement"))
+                        and bool(_ROOM_REFUSAL_RX.search(err_body or "")))
+                retryable = retryable and not room
+                if (fault != TOOL_CALL_UNPARSABLE and not room
                         and self._wait_out_outage(e, err_body, attempts, outage,
                                                   what=what,
                                                   cancel_check=cancel_check,
