@@ -1364,7 +1364,7 @@ nothing is added to the graph.
 ### PolyKV placement (`[polykv]`, off by default)
 
 ```
-claude-consultants config set-polykv on [--mode auto|affinity|pooled|assured|off]
+claude-consultants config set-polykv on [--mode auto|affinity|pooled|assured|off] [--layout shared|as-built]
 ```
 
 On an opencoti endpoint (`[endpoints.X] backend = "opencoti"`), or an
@@ -1404,6 +1404,39 @@ manager (`consultants/engine/polykv.py`) places every role call:
   does not fit, or an engine without owned pools, runs as `pooled`.
 
 Cloud and plain Ollama calls in the same council are never touched.
+
+**Shared layout** (`--layout shared`, the default; plan F4). Every role
+opens with its own system prompt, so on an engine that shares prefixes
+the critic, meta-critic, synthesizer and adversary each prefilled the
+same question, plan and reports behind a different first turn. Under
+`pooled` / `assured` the manager sends each council role's conversation
+as `consultants/engine/prompt_layout.py:role_last()` lays it out:
+- the system turn is the council preamble every role prompt opens with
+  (plus one line saying where the role's job is written), then the
+  grounding turns as they were;
+- the role's own text, and the `# Output Budget` section wherever it was
+  appended, go to the end of the first user turn, under `# Your role in
+  the council`. Nothing else moves, so a tool loop keeps one prefix.
+
+A conversation whose system turn does not open with the preamble
+(compaction steps, audits, tool_executor, coder) is sent as built, and
+so is everything under `affinity` / `off` / `--layout as-built`. The
+layout is applied at the wire: the recorder, compaction and every reader
+see the messages as the roles built them.
+
+The first user turn then gets a **layer per shared block**, each a fork
+(`/polykv/pools/{id}/fork`) of the one before, and a call attaches the
+deepest: after the question, after the plan and before the last report,
+from the headers the builders write (`block_cuts()`), and the end of the
+longest prefix two calls of the run share, snapped to a paragraph end —
+that is how the last report's end is found, since reports hold blank
+lines of their own. A block under 1,024 characters joins the next one.
+A refused fork shares what the chain already has, and the next block
+forks from the last layer that exists. In the tests a critic
+makes the layer up to its last report, the synthesizer forks it through
+that report and attaches it. A call's private window leaves out what
+its layer covers. Settle releases forks before their parents (the engine
+refuses a parent with children).
 
 Lanes of one run queue on each other for room. Before a call that states
 a window, the manager reads `/kv`; if the engine has fewer free cells

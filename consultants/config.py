@@ -1080,6 +1080,10 @@ class CriticConfig:
 
 
 POLYKV_MODES = ("off", "affinity", "pooled", "assured", "auto")
+#: Plan F4: ``shared`` puts what the roles have in common first and each
+#: role's instructions last on a PolyKV root, one layer per shared block;
+#: ``as-built`` sends what the builders wrote.
+POLYKV_LAYOUTS = ("shared", "as-built")
 
 
 @dataclass
@@ -1093,6 +1097,7 @@ class PolykvConfig:
     it."""
     enabled: bool = False
     mode: str = "auto"
+    layout: str = "shared"
 
     def is_default(self) -> bool:
         return self == PolykvConfig()
@@ -1750,6 +1755,12 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
             else:
                 log.warning("consultants config: polykv.mode ignored: must be "
                             "one of %s", ", ".join(POLYKV_MODES))
+        if "layout" in pk:
+            if pk["layout"] in POLYKV_LAYOUTS:
+                base.polykv.layout = pk["layout"]
+            else:
+                log.warning("consultants config: polykv.layout ignored: must "
+                            "be one of %s", ", ".join(POLYKV_LAYOUTS))
 
     # decision model (plan H)
     dec = raw.get("decision") or {}
@@ -2228,6 +2239,9 @@ def _render(cfg: ConsultantsConfig, *,
                  "mode: auto | affinity | pooled | assured | off.")
         L.append(f"enabled = {'true' if cfg.polykv.enabled else 'false'}")
         L.append(f"mode = {_toml_value(cfg.polykv.mode)}")
+        L.append("# layout: shared (the roles' common blocks first, each "
+                 "role's instructions last, a layer per block) | as-built.")
+        L.append(f"layout = {_toml_value(cfg.polykv.layout)}")
         L.append("")
     if cfg.critic.cross_examination:
         L.append("[critic]")
@@ -2647,16 +2661,20 @@ def set_cross_examination(*, enabled: bool, scope: str = "user",
 
 
 def set_polykv(*, enabled: Optional[bool] = None, mode: Optional[str] = None,
-               scope: str = "user",
+               layout: Optional[str] = None, scope: str = "user",
                cwd: Optional[Path] = None) -> ConsultantsConfig:
     """Set ``[polykv]`` (plan F)."""
     if mode is not None and mode not in POLYKV_MODES:
         raise ValueError(f"mode must be one of {', '.join(POLYKV_MODES)}")
+    if layout is not None and layout not in POLYKV_LAYOUTS:
+        raise ValueError(f"layout must be one of {', '.join(POLYKV_LAYOUTS)}")
     cfg = _load_for_edit(scope, cwd)
     if enabled is not None:
         cfg.polykv.enabled = bool(enabled)
     if mode is not None:
         cfg.polykv.mode = mode
+    if layout is not None:
+        cfg.polykv.layout = layout
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 

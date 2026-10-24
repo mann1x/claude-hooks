@@ -1546,7 +1546,8 @@ def cmd_config_set_polykv(args, base: str) -> int:
     try:
         cfg = cc.set_polykv(
             enabled=None if args.state is None else args.state == "on",
-            mode=args.mode, **_resolve_active_scope(args))
+            mode=args.mode, layout=args.layout,
+            **_resolve_active_scope(args))
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
     return _emit_config(cfg, args)
@@ -3311,6 +3312,11 @@ def build_parser() -> argparse.ArgumentParser:
              "once. Other backends are never touched. Default off.")
     cpk.add_argument("state", nargs="?", choices=["on", "off"])
     cpk.add_argument("--mode", choices=list(cc.POLYKV_MODES))
+    cpk.add_argument("--layout", choices=list(cc.POLYKV_LAYOUTS),
+                     help="shared (default): the roles' common blocks "
+                          "first and each role's instructions last, a "
+                          "layer per block; as-built: as the roles build "
+                          "their prompts")
     _add_scope_args(cpk)
     cpk.set_defaults(fn=cmd_config_set_polykv)
 

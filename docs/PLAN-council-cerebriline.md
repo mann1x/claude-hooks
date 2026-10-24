@@ -641,6 +641,20 @@ open: the replay-quality bench (continuation on vs off), a live council
 
 ### F4. Prompt reorder
 
+**Built 2026-10-24 (`[polykv] layout = "shared"`, default under
+`pooled` / `assured`).** `consultants/engine/prompt_layout.py:role_last()`
+at the wire (`KvRunManager.shape()`, from `PlacedChat`): the system turn
+is the council preamble every role prompt opens with, then the grounding;
+the role's own text and its `# Output Budget` section close the first
+user turn. Layers: the system run, then a fork per shared block of the
+first user turn (after the question, after the plan, before the last
+report, from the builders' headers) and one at the longest prefix two
+calls of the run share (snapped to a paragraph end); a call attaches the
+deepest, its private window leaves out what the layer covers, settle
+releases leaves first. Not done: grounding for the judges (they have no
+grounding and other tools, so they share nothing with the lanes beyond
+the preamble), and the answer-quality A/B below.
+
 - Today every role opens with its own system prompt, so roles share nothing.
 - On PolyKV backends the shared council system turn and grounding go first and the role's instructions last.
 - An A/B on answer quality decides whether that layout also becomes the default elsewhere; it would also help Ollama's implicit prompt cache.

@@ -58,6 +58,13 @@ from claude_hooks.polykv.client import (
 log = logging.getLogger("consultants.polykv")
 
 MODES = ("off", "affinity", "pooled", "assured", "auto")
+#: Prompt layouts (plan F4): ``shared`` puts what the roles have in common
+#: first and each role's own instructions last (``prompt_layout``), and
+#: stacks a layer per shared block; ``as-built`` sends what the builders
+#: wrote, with the leading system run as the one layer.
+LAYOUTS = ("shared", "as-built")
+#: First user turns kept per head, to find the prefix two calls share.
+SEEN_PER_HEAD = 16
 #: A layer shorter than this is not worth a pool (xOllama's own automatic
 #: pooling starts at 256 tokens; the engine warns under 64).
 MIN_LAYER_CHARS = 1024
@@ -215,14 +222,24 @@ def _int(value: Any) -> int:
 
 class KvRunManager:
     def __init__(self, run_id: str, *, mode: str = "auto",
+                 layout: str = "shared",
                  root_for: Callable[[Any, str], Optional[Root]] = default_root_for,
                  show: Optional[Callable[[str, str], Optional[dict]]] = None,
                  min_layer_chars: int = MIN_LAYER_CHARS,
                  clock: Callable[[], float] = time.monotonic):
         if mode not in MODES:
             raise ValueError(f"polykv mode must be one of {MODES}")
+        if layout not in LAYOUTS:
+            raise ValueError(f"polykv layout must be one of {LAYOUTS}")
         self.run_id = wire_id(run_id)
         self.mode = mode
+        self.layout = layout
+        #: (root key, head key) -> first user turns seen under that head
+        self._seen: dict[tuple, list[str]] = {}
+        #: (root key, head key, content hash, seen count) -> deepest pool
+        self._chains: dict[tuple, Optional[str]] = {}
+        #: pool id -> characters of the first user turn its layer covers
+        self._covered: dict[str, int] = {}
         self._root_for = root_for
         if show is None:
             from claude_hooks import provider_caps
@@ -597,6 +614,8 @@ class KvRunManager:
         rest_chars = sum(len(str(m.get("content") or ""))
                          + len(json.dumps(m.get("tool_calls") or "", default=str))
                          + TURN_OVERHEAD_CHARS for m in rest)
+        # A layer over the first user turn (plan F4) holds that much of it.
+        rest_chars = max(0, rest_chars - self._covered.get(str(pid), 0))
         opts = payload.get("options") or {}
         out = _int(opts.get("num_predict")) or _int(payload.get("max_tokens"))
         if not out:
@@ -615,6 +634,150 @@ class KvRunManager:
         if not retry:
             with self._lock:
                 root.given_up.add(key)
+
+    # ------------------------------------------------------------ layout
+    def shape(self, client: Any, payload: dict) -> dict:
+        """``payload`` in the run's prompt layout (plan F4): the shared
+        layout only where layers are made (``pooled`` / ``assured``), so
+        ``affinity`` and ``off`` send what the builders wrote."""
+        if self.layout != "shared" or self.mode == "off" or self.released:
+            return payload
+        model = payload.get("model") or ""
+        root = self._root(client, model)
+        if root is None:
+            return payload
+        self._settle_mode(root, model)
+        if root.mode not in ("pooled", "assured"):
+            return payload
+        from consultants.engine import prompt_layout
+        msgs = list(payload.get("messages") or [])
+        shaped = prompt_layout.role_last(msgs)
+        if shaped is msgs:
+            return payload
+        return {**payload, "messages": shaped}
+
+    def _deep_layers(self, root: Root, client: Any, model: str, messages: list,
+                     tools: Optional[list], payload: dict,
+                     parent: Optional[str]) -> Optional[str]:
+        """The deepest layer over the first user turn's shared blocks
+        (plan F4), each a fork of the one before it: after the question,
+        after the plan, before the last report (``prompt_layout.block_cuts``)
+        and, once another call of the run has shown it, the end of the
+        longest prefix the two share. ``parent`` (the system-run layer, or
+        None) when there is nothing deeper to share."""
+        if self.layout != "shared":
+            return parent
+        from consultants.engine import prompt_layout as PL
+        wire_msgs = self._wire_messages(client, model, messages)
+        fu = PL.first_user(wire_msgs)
+        if fu is None:
+            return parent
+        idx, content = fu
+        head_key = hashlib.sha256(json.dumps(
+            [wire_msgs[:idx], tools or []], default=str,
+            sort_keys=True).encode()).hexdigest()[:16]
+        with self._lock:
+            seen = self._seen.setdefault((root.key, head_key), [])
+            best = max((PL.common_prefix(content, other) for other in seen
+                        if other != content), default=0)
+            if content not in seen:
+                seen.append(content)
+                del seen[:-SEEN_PER_HEAD]
+            memo = (root.key, head_key,
+                    hashlib.sha256(content.encode()).hexdigest()[:16],
+                    best)
+            if memo in self._chains:
+                return self._chains[memo] or parent
+        cuts = PL.block_cuts(content)
+        lcp = PL.snap(content, best)
+        if lcp and lcp > max(cuts, default=0):
+            cuts.append(lcp)
+        if not cuts:
+            with self._lock:
+                self._chains[memo] = None
+            return parent
+        try:
+            full = root.client.render_chat(wire_msgs, tools=tools)
+        except (OpencotiError, OSError, ValueError) as e:
+            log.info("polykv: %s deep layers not rendered: %s", root.key, e)
+            return parent
+        off = full.find(content[:max(cuts)])
+        if off < 0:
+            # Said once per turn shape, not on every call of a tool loop.
+            self._give_up(root, head_key, "the template does not carry the "
+                          "first user turn verbatim", retry=True)
+            with self._lock:
+                self._chains[memo] = None
+            return parent
+        deepest = parent
+        prev = root.sizes.get(parent, (0, 0))[1] if parent else 0
+        for c in sorted(set(cuts)):
+            text = full[:off + c]
+            if len(text) - prev < self.min_layer_chars:
+                continue
+            pid = self._fork_layer(root, client, model, text, full, tools,
+                                   payload, deepest, c)
+            if pid is None:
+                # A refused block: the next one forks from the last layer
+                # that exists (a fork names its whole prefix).
+                continue
+            deepest, prev = pid, len(text)
+        with self._lock:
+            self._chains[memo] = deepest
+        return deepest
+
+    def _fork_layer(self, root: Root, client: Any, model: str, text: str,
+                    full: str, tools: Optional[list], payload: dict,
+                    parent: Optional[str], covered: int) -> Optional[str]:
+        key = hashlib.sha256(json.dumps([text, tools or []], default=str,
+                                        sort_keys=True).encode()).hexdigest()[:16]
+        with self._lock:
+            if key in root.given_up:
+                return None
+            if key in root.pools:
+                return root.pools[key]
+            lk = self._layer_locks.setdefault(f"{root.key}|{key}", threading.Lock())
+        with lk:
+            with self._lock:
+                if key in root.pools:
+                    return root.pools[key]
+            owner = (self._ensure_owner(root, client, model, text, full,
+                                        payload)
+                     if root.mode == "assured" else None)
+            try:
+                if parent is not None:
+                    made = root.client.fork_pool(
+                        parent, prompt=text, session_id=owner, pin=True,
+                        **({} if owner else {"ephemeral": True}))
+                elif owner:
+                    made = root.client.create_pool(prompt=text,
+                                                   session_id=owner, pin=True)
+                else:
+                    made = root.client.create_pool(prompt=text, shared=True,
+                                                   ephemeral=True, pin=True)
+            except (OpencotiError, OSError, ValueError) as e:
+                self._give_up(root, key, f"layer refused: {e}",
+                              retry=isinstance(e, OpencotiError) and
+                              getattr(e, "status", 0) in (429, 503))
+                return None
+            pid = pool_ref(made)
+            if pid is None:
+                self._give_up(root, key, "create answered no pool id")
+                return None
+            cells = (_int((made or {}).get("own_len"))
+                     or _int((made or {}).get("prefix_len")))
+            with self._lock:
+                root.pools[key] = pid
+                self.created.append((root.key, pid))
+                self._covered[pid] = covered
+                if cells:
+                    root.sizes[pid] = (cells, len(text))
+            self.events.append({"kind": "layer", "root": root.key, "key": key,
+                                "pool_id": pid, "chars": len(text),
+                                "parent": parent, "owner": owner,
+                                "covered": covered,
+                                "reused": bool((made or {}).get("reused"))})
+            return pid
 
     # ------------------------------------------------------------- place
     def place(self, client: Any, payload: dict, *, role: str) -> Optional[dict]:
@@ -635,6 +798,9 @@ class KvRunManager:
         if root.mode in ("pooled", "assured"):
             pid = self._layer(root, client, model, messages,
                               payload.get("tools") or None, payload)
+            pid = self._deep_layers(root, client, model, messages,
+                                    payload.get("tools") or None, payload,
+                                    pid)
             if pid is not None:
                 placement["pool_id"] = pid
                 placement["_layer_root"] = root.key
@@ -909,7 +1075,9 @@ class KvRunManager:
         report["released_pools"] = []
         report["unpinned_pools"] = []
         mine: dict[str, set] = {}
-        for rk, pid in list(self.created):
+        # Leaves first: the engine refuses to release a parent with
+        # children, and a layer's forks were created after it.
+        for rk, pid in reversed(list(self.created)):
             root = self.roots.get(rk)
             if root is None or root.client is None:
                 continue
@@ -1340,6 +1508,12 @@ class PlacedChat:
 
     def _call(self, method: str, payload: dict, *args, **kwargs) -> dict:
         mgr = self._placed_manager
+        try:
+            # The shared layout (plan F4) before placement, so the layers
+            # are cut from the messages actually sent.
+            payload = mgr.shape(self._placed_inner, payload)
+        except Exception:  # noqa: BLE001 — the layout never fails a call
+            log.exception("polykv: layout failed; sending as built")
         try:
             placement = mgr.place(self._placed_inner, payload,
                                   role=self._placed_role)

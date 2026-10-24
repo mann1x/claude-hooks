@@ -2058,6 +2058,7 @@ def _polykv_manager(cfg, state, cwd: str, runner_input: dict, *,
         return None
     mgr = polykv_mod.start_run(
         state.sid, mode=pk.mode, cwd=cwd,
+        layout=getattr(pk, "layout", "shared"),
         resume=bool(runner_input.get("resume")),
         adopt_root=getattr(state, "root_sid", None) if adopt else None)
     state._polykv = mgr

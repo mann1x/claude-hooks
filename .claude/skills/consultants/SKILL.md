@@ -1005,11 +1005,15 @@ and **More…** opens the next batch (ending with **Done**):
     roots: a private worktree per lane, changes held as patches) and
     `--held-ttl-days` are here too; only `net=none` exists so far.
 19. **PolyKV** — `claude-consultants config set-polykv on|off
-    [--mode auto|affinity|pooled|assured|off]` (default off, mode
-    `auto`). On opencoti endpoints and xOllama models with client-pool
-    seats, each conversation gets its own engine session and the
-    council's shared prompt head (grounding + role prompt + tools) is one
-    pool, prefilled once; `affinity` keeps only the sessions. Cloud and
+    [--mode auto|affinity|pooled|assured|off] [--layout shared|as-built]`
+    (default off, mode `auto`, layout `shared`). On opencoti endpoints
+    and xOllama models with client-pool seats, each conversation gets its
+    own engine session and the council's shared prompt head is pooled,
+    prefilled once; `affinity` keeps only the sessions. `shared` sends
+    each role's prompt with the common blocks first (question, plan,
+    reports) and the role's own instructions last, one layer per block,
+    so the judges share the reports too; `as-built` sends what the roles
+    build. Cloud and
     plain Ollama are never touched. The run's `show` reports the shared
     tokens and any leak.
 
