@@ -324,6 +324,14 @@ class AliasesCliTests(_Durable):
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.store.durable_rows(), [])
 
+    def test_another_hosts_alias_gets_no_os_unless_given(self):
+        self.run_cli("register", "box@pandorum")
+        self.assertEqual(self._row("box", "pandorum").os, "")
+        self.run_cli("register", "box@pandorum", "--os", "windows")
+        self.assertEqual(self._row("box", "pandorum").os, "windows")
+        self.run_cli("register", f"own@{self.HOST}")
+        self.assertNotEqual(self._row("own", self.HOST).os, "")
+
     def test_owner_and_ttl(self):
         rc, out = self.run_cli("register", "osync", "--owner", OWNER,
                                "--ttl", "2w")

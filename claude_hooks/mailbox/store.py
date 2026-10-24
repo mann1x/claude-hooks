@@ -296,15 +296,17 @@ class MailboxStore:
         return [_as_session(r) for r in others]
 
     def _insert_row(self, cur, session_id: str, alias: str, host: str,
-                    cwd: str, now, client: Optional[tuple]) -> None:
+                    cwd: str, now, client: Optional[tuple],
+                    os_label: Optional[str] = None) -> None:
         pid, started = client or (None, None)
         cur.execute(self._q(
             "INSERT INTO session_registry "
             "(session_id, alias, host, os, cwd, started_at, last_seen, "
             " client_pid, client_started) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"),
-            (session_id, alias, host, os_name(), cwd, now, now, pid,
-             started))
+            (session_id, alias, host,
+             os_name() if os_label is None else os_label, cwd, now, now,
+             pid, started))
 
     def _row(self, cur, where: str, params: Sequence) -> Optional[dict]:
         cur.execute(self._q(
@@ -770,7 +772,8 @@ class MailboxStore:
 
     def register_durable(self, alias: str, host: str, *, owner: str,
                          until: Optional[datetime] = None, cwd: str = "",
-                         force: bool = False) -> dict:
+                         force: bool = False,
+                         os_label: Optional[str] = None) -> dict:
         """Make ``alias@host`` a lasting registration owned by ``owner``.
 
         Kept until :meth:`release_durable` or ``until``, however quiet —
@@ -781,6 +784,9 @@ class MailboxStore:
         another host: a bare ``osync`` would then be ambiguous and every
         sender's mail to it refused. ``force`` (an operator) skips the
         first two, never the third. Registering it again renews it.
+
+        ``os_label`` defaults to this machine's OS for an alias of this
+        host and to "" for another host's, which this machine cannot see.
 
         Returns ``{"alias", "host", "session_id", "owner", "until",
         "renewed"}``.
@@ -840,13 +846,17 @@ class MailboxStore:
                         # row, its process); the slot becomes durable.
                         cur.execute(self._q(
                             "UPDATE session_registry SET durable = 1, "
-                            "owner = ?, durable_until = ?, last_seen = ? "
-                            "WHERE session_id = ?"),
-                            (owner, until_v, now, slot["session_id"]))
+                            "owner = ?, durable_until = ?, last_seen = ?, "
+                            "os = COALESCE(?, os) WHERE session_id = ?"),
+                            (owner, until_v, now, os_label,
+                             slot["session_id"]))
                         sid = slot["session_id"]
                     else:
+                        if os_label is None:
+                            os_label = (os_name() if host == host_name()
+                                        else "")
                         self._insert_row(cur, sid, alias, host, cwd, now,
-                                         None)
+                                         None, os_label)
                         self._apply_meta(cur, sid, {
                             "owner": owner, "durable_until": until_v})
                 conn.commit()

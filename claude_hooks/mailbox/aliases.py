@@ -49,6 +49,10 @@ def main(argv: Optional[list[str]] = None, *, store=None) -> int:
                                        "(default: the alias itself)")
     p_reg.add_argument("--force", action="store_true",
                        help="take it from another owner or a live session")
+    p_reg.add_argument("--os", dest="os_label",
+                       help="linux / windows / darwin, as mailbox-sessions "
+                            "shows it (default: this machine's for its own "
+                            "host, else none)")
     p_rm = sub.add_parser("remove", help="end a durable alias")
     p_rm.add_argument("alias")
     p_rm.add_argument("--owner")
@@ -79,6 +83,7 @@ def main(argv: Optional[list[str]] = None, *, store=None) -> int:
         ttl = parse_ttl(args.ttl)
         res = store.register_durable(
             alias, host, owner=owner, force=args.force,
+            os_label=args.os_label,
             until=(utcnow() + ttl) if ttl else None)
     except MailboxError as e:
         print(f"refused: {e}")
