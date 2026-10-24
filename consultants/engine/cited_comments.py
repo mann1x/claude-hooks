@@ -113,13 +113,13 @@ def _resolve(path: str, roots: Sequence[str]) -> Optional[Path]:
 def blocks_for(reports: Sequence[str], roots: Sequence[str]) -> list[dict]:
     """One entry per distinct comment block the reports cite:
     ``{path, line, first, last, text, cites}``, most cited first."""
-    from consultants.engine.citation_linter import extract_citations
+    from consultants.engine.typed_results import citations_of
     roots = [r for r in roots if r]
     if not roots:
         return []
     counts: Counter = Counter()
     for r in reports:
-        for _m, path, start, _end in extract_citations(r or ""):
+        for _m, path, start, _end in citations_of(r or ""):
             counts[(path, start)] += 1
     files: dict[str, Optional[list[str]]] = {}
     out: dict[tuple, dict] = {}

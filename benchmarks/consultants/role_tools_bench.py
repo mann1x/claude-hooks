@@ -431,6 +431,13 @@ def run_detect_trial(q: DetectQuestion, *, arm: str, trial_idx: int,
         verdict = " ".join(getattr(x, "content", "") or "" for x in turns)
     t.verdict_chars = len(verdict)
     t.verdict = verdict
+    # Plan G7: a typed critic hands on its record as JSON. Graded through
+    # render(), the prose the oracle was written for, so the typed arm is
+    # scored on what it said, not on its format.
+    from consultants.engine import typed_results
+    rec = typed_results.loads(verdict, typed_results.VERDICT)
+    if rec is not None:
+        verdict = typed_results.render(typed_results.VERDICT, rec)
     for turn in (out.get("turns") or []):
         t.prompt_tokens += int(getattr(turn, "prompt_tokens", 0) or 0)
         t.completion_tokens += int(getattr(turn, "completion_tokens", 0) or 0)

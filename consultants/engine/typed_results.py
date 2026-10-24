@@ -13,13 +13,15 @@ The same here, behind ``[protocol] typed`` (default off):
 - **A record counts only as the turn's only call.** A result call made
   beside reads is not taken. The model is told to call it again on its
   own, so a report is never written before the reads it rests on.
-- **Downstream roles read rendered text, never raw JSON.** The render
-  reproduces exactly what each role writes in prose today (the
-  ``DECISION:`` line, the ``CORRECTIONS:`` block, the ``REFUTATION:``
-  block, ``CONFIDENCE:``, a numbered plan, bullets with literal
-  ``path:line``). Routing, the escalator, the synthesizer, the
-  retrospective and the recorder therefore work unchanged. xOllama
-  measured critics answering in JSON once raw JSON was in their prompt.
+- **Roles send and receive the record as JSON** (plan G7, owner
+  2026-10-19: as xOllama's council does; only the synthesizer's answer is
+  prose). :func:`dumps` is what goes on the state channel: the record
+  tagged with its tool name. Every engine reader takes the fields first
+  (:func:`loads`, :func:`citations_of`, :func:`first_line`) and its prose
+  regex only for text that is not a record (the prose fallback, typed
+  off). :func:`render` is kept for display. xOllama measured critics
+  answering in JSON once JSON was in their prompt, so :func:`loads` also
+  takes an untagged JSON object that validates as the expected record.
 - **Bounds:** item counts go in the schema, text length is cut at render.
   Never put ``maxLength`` in a schema: it made xOllama's grammar compiler
   fail and killed a run at 692 s (``55d4baf70``).
@@ -457,3 +459,95 @@ def render(name: str, rec: dict) -> str:
         return "REFUTATION:\n" + "\n".join(
             f"- {i['claim']} — {i['why']}{_cite(i.get('cite'))}" for i in issues)
     raise KeyError(name)
+
+
+# --------------------------------------------------------------- G7 codec
+
+#: The key that names a record's kind on the state channel.
+RECORD_KEY = "record"
+RESULT_NAMES = (PLAN, REPORT, VERDICT, REFUTATION)
+
+
+def dumps(name: str, rec: dict) -> str:
+    """The record as the next role receives it: JSON, tagged."""
+    return json.dumps({RECORD_KEY: name, **rec}, ensure_ascii=False, indent=1)
+
+
+def loads(text: Any, name: Optional[str] = None) -> Optional[dict]:
+    """The record ``text`` carries (its fields, without the tag), or
+    ``None`` when it is prose. With ``name``, only that kind: a tagged
+    record of another kind is ``None``, and an untagged JSON object is
+    taken when :func:`parse` validates it as ``name``."""
+    s = text.strip() if isinstance(text, str) else ""
+    if not s.startswith("{"):
+        fence = re.match(r"^```(?:json)?\s*\n(\{.*\})\s*```$", s, re.S)
+        if not fence:
+            return None
+        s = fence.group(1)
+    try:
+        # The leading object only: the engine appends notes after a
+        # record (the evidence hold, the cross-examination block).
+        d, _end = json.JSONDecoder().raw_decode(s)
+    except ValueError:
+        return None
+    if not isinstance(d, dict):
+        return None
+    tag = d.get(RECORD_KEY)
+    if tag in RESULT_NAMES:
+        if name and tag != name:
+            return None
+        return {k: v for k, v in d.items() if k != RECORD_KEY}
+    return parse(name, d) if name else None
+
+
+def kind_of(text: Any) -> Optional[str]:
+    """The record kind ``text`` carries, or ``None``."""
+    for name in RESULT_NAMES:
+        if loads(text, name) is not None:
+            return name
+    return None
+
+
+def citations_of(text: Any) -> list[tuple[str, str, int, Optional[int]]]:
+    """``extract_citations()`` for a record or prose: a report's claims give
+    their ``path`` + ``line`` (JSON keeps them apart, so the prose regex
+    finds none), its other fields and any cite strings are read as text."""
+    from consultants.engine.citation_linter import extract_citations
+    rec = None
+    name = kind_of(text)
+    if name:
+        rec = loads(text, name)
+    if rec is None:
+        return extract_citations(str(text or ""))
+    out = []
+    for c in rec.get("claims") or []:
+        if isinstance(c, dict) and c.get("path") and isinstance(c.get("line"), int):
+            ref = f"{c['path']}:{c['line']}"
+            out.append((ref, str(c["path"]), int(c["line"]), None))
+    flat = json.dumps({k: v for k, v in rec.items()}, ensure_ascii=False)
+    out += extract_citations(flat)
+    seen, uniq = set(), []
+    for t in out:
+        if (t[1], t[2]) not in seen:
+            seen.add((t[1], t[2]))
+            uniq.append(t)
+    return uniq
+
+
+def first_line(text: Any) -> Optional[str]:
+    """What a record says first (a report's summary, a verdict's decision
+    and why, a plan's first step), or ``None`` for prose."""
+    name = kind_of(text)
+    if not name:
+        return None
+    rec = loads(text, name) or {}
+    if name == REPORT:
+        return str(rec.get("summary") or "")
+    if name == VERDICT:
+        return f"{rec.get('decision')}: {rec.get('why') or ''}".strip()
+    if name == PLAN:
+        steps = rec.get("steps") or []
+        return str(steps[0]) if steps else ""
+    issues = rec.get("issues") or []
+    return f"{len(issues)} issue(s)" if issues else "none"
+

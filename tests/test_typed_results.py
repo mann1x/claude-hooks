@@ -218,8 +218,10 @@ def test_critic_typed_verdict_routes_like_prose():
     chat = FakeChat([_resp(calls=[_call(tr.VERDICT, VERDICT)])])
     up = council.critic_node(_critic_state(True), chat_client=chat, model="m")
     assert up["critic_decision"] == "needs_more_research"
-    assert "gap_named: retry cap value" in up["critique"]
-    assert "CONFIDENCE" not in up["critique"]
+    # Plan G7: the next role gets the record itself, as JSON.
+    rec = tr.loads(up["critique"], tr.VERDICT)
+    assert rec["gaps"][0]["what"] == "retry cap value"
+    assert up["critique"].lstrip().startswith('{\n "record": "council_verdict"')
     assert up["confidence"] == [pytest.approx(0.62)]
     sent = chat.calls[0]
     assert [t["function"]["name"] for t in sent["tools"]] == [tr.VERDICT]
@@ -380,9 +382,12 @@ def test_researcher_typed_report_is_checked_not_relinted(tmp_path):
             "name": "read_file", "parameters": {"type": "object"}}}],
         tool_executor=lambda n, a, c: SRC, grounding_msgs=[])
     text = up["research"][0]
-    assert "(`src/a.py:4`) [`foo`]" in text
+    rec = tr.loads(text, tr.REPORT)                 # plan G7: JSON on
+    first, second = rec["claims"]
+    assert (first["path"], first["line"], first["symbol"]) == ("src/a.py", 4, "foo")
+    assert "unverified" not in first
     assert "[in " not in text                       # not re-linted
-    assert text.count("[unverified — `bar` is not at that line]") == 1
+    assert second["unverified"] == "`bar` is not at that line"
 
 
 # ------------------------------------------------------------ G5: stop on no progress
@@ -420,3 +425,68 @@ def test_two_barren_rounds_overrule_the_reroute_on_the_typed_protocol():
         council.ROUTE_SYNTHESIZER
     assert council.route_after_critic(_stalled_state(False)) == \
         council.ROUTE_RESEARCHER                              # parity
+
+
+# ------------------------------------------------------------ G7: JSON between roles
+
+def _report(*cites):
+    return tr.dumps(tr.REPORT, {"summary": "s", "gaps": [], "claims": [
+        {"claim": "c", "path": p, "line": n} for p, n in cites]})
+
+
+def test_g7_records_round_trip_and_prose_is_not_a_record():
+    text = tr.dumps(tr.VERDICT, tr.parse(tr.VERDICT, VERDICT))
+    assert tr.kind_of(text) == tr.VERDICT
+    assert tr.loads(text, tr.VERDICT)["decision"] == "needs_more_research"
+    assert tr.loads(text, tr.REPORT) is None                 # another kind
+    assert tr.loads("DECISION: ready\nfine", tr.VERDICT) is None
+    assert tr.loads('{"route": "research"}', tr.VERDICT) is None
+    # Notes the engine appends after a record leave it readable.
+    assert tr.loads(text + "\n\nEVIDENCE HOLD: no run", tr.VERDICT)
+    # A critic that answered its verdict as text JSON, untagged or fenced.
+    bare = json.dumps({"decision": "ready", "why": "ok", "confidence": 0.8})
+    assert tr.loads(bare, tr.VERDICT)["decision"] == "ready"
+    assert tr.loads(f"```json\n{bare}\n```", tr.VERDICT)["confidence"] == 0.8
+
+
+def test_g7_every_reader_takes_the_record_fields():
+    v = tr.dumps(tr.VERDICT, tr.parse(tr.VERDICT, VERDICT))
+    assert council.parse_critic_decision(v + "\n\nnote") == "needs_more_research"
+    assert council._extract_confidence(v)[1] == pytest.approx(0.62)
+    plan = tr.dumps(tr.PLAN, {"steps": ["read a.py", "check b.py"]})
+    assert council.parse_plan_items(plan) == ["read a.py", "check b.py"]
+    none = tr.dumps(tr.REFUTATION, {"issues": []})
+    some = tr.dumps(tr.REFUTATION, {"issues": [{"claim": "x", "why": "y"}]})
+    assert council.parse_adversary_refutation(none) == ("none", "")
+    assert council.parse_adversary_refutation(some)[0] == "issues"
+    from consultants.engine import escalation, lane_digest
+    st = {"critic_decision": "needs_more_research", "critique": v}
+    assert escalation._critic_named_gap(st)
+    no_gap = tr.dumps(tr.VERDICT, {**tr.parse(tr.VERDICT, VERDICT), "gaps": []})
+    assert not escalation._critic_named_gap({**st, "critique": no_gap})
+    assert lane_digest._first_line(_report(("a.py", 1))) == "s"
+
+
+def test_g7_a_json_round_that_cites_something_new_is_not_barren():
+    # JSON keeps path and line apart: read as prose, every round after the
+    # first would be barren and overrule the critic's re-route.
+    lanes = [{"lane": 0, "round": 1}, {"lane": 0, "round": 2}]
+    assert council.barren_rounds([_report(("src/a.py", 1)),
+                                  _report(("src/a.py", 2))], lanes) == 0
+    assert council.barren_rounds([_report(("src/a.py", 1)),
+                                  _report(("src/a.py", 1))], lanes) == 1
+
+
+def test_g7_cited_comments_and_challenges_read_records(tmp_path):
+    from consultants.engine import cited_comments, cross_exam
+    (tmp_path / "a.py").write_text("x = 1\n# why: the cap is 3\nCAP = 3\n")
+    blocks = cited_comments.blocks_for([_report(("a.py", 3))], [str(tmp_path)])
+    assert blocks and "the cap is 3" in blocks[0]["text"]
+    v = tr.dumps(tr.VERDICT, {**tr.parse(tr.VERDICT, VERDICT),
+                              "why": "CHALLENGE report=1: the cap is 5, not 3"})
+    assert cross_exam.challenges(v, 1) == {1: ["the cap is 5, not 3"]}
+
+
+def test_g7_judges_are_told_the_shape_of_what_they_read():
+    assert "`council_report` {summary, claims" in council.CLAIMS_FRAMING
+    assert "`unverified`" in council.CLAIMS_FRAMING

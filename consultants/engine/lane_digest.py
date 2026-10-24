@@ -30,6 +30,10 @@ _FAILED_PREFIXES = ("(researcher lane failed", "(researcher lane produced no")
 
 
 def _first_line(report: str) -> str:
+    from consultants.engine.typed_results import first_line
+    said = first_line(report)       # plan G7: a record's summary
+    if said is not None:
+        report = said or "(empty)"
     for line in (report or "").splitlines():
         flat = " ".join(line.strip().lstrip("#*->").split())
         if flat:

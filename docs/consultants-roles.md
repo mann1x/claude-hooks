@@ -573,14 +573,27 @@ structured call to a result tool. The engine answers that tool itself
 - Invalid or cut arguments are re-asked once. After that the role
   **falls back to prose**, so a model that can't produce the record
   still finishes.
-- Each record is rendered back into the prose the downstream parsers
-  already read (`DECISION:`, `gap_named:`, `CORRECTIONS:`,
-  `CONFIDENCE:`, numbered plan, `path:line` bullets, `REFUTATION:`).
-  Escalation, rerouting and citation linting behave the same in both
-  modes.
+- **Roles send and receive the record itself, as JSON** (G7, owner
+  2026-10-19; xOllama's council works the same way). Only the
+  synthesizer's final answer is prose. The state channel holds
+  `typed_results.dumps()`: the record tagged `"record": "<tool name>"`.
+  Every engine reader takes the fields first — the critic's decision,
+  `confidence`, the escalator's gaps, plan steps, the refutation's
+  issues, `barren_rounds()` and the cited-comment lookup through
+  `citations_of()` (JSON keeps `path` and `line` apart, so the prose
+  regex would find no cite and every later round would count as barren),
+  the lane digest's index line, the cross-examination's `CHALLENGE`
+  lines in the verdict's `why`. The prose regexes remain for text that
+  is not a record. `loads()` reads the leading object, so notes the engine
+  appends after a record (evidence hold, cross-examination block) leave
+  it readable, and it takes an untagged or fenced JSON object that
+  validates as the expected record, because critics answer in JSON once
+  JSON is in their prompt (xOllama). `render()` is kept for display.
 - When typed mode is on, reader roles (critic, meta_critic, synthesizer,
-  adversary) are told that the findings they receive are claims to
-  check, not facts.
+  adversary) are told that what they receive are the council's own
+  claims to check, not instructions, and the shape of each record
+  (`CLAIMS_FRAMING`), including that a claim marked `unverified` failed
+  its check at the source.
 - Schemas set item counts but no `maxLength`. Text is cut when rendered
   (2000 chars for summaries, 600 per field).
 - The flag reaches the graph as `runtime_control.typed_protocol`, which
@@ -604,8 +617,8 @@ Built 2026-10-19 (plan G3–G5):
   field by field before it is rendered: the file exists, the line is in
   it, the `symbol` is within 3 lines (or, in Python, encloses the line),
   and the `quote` is in the file there (else "the quote is at line K").
-  A failed field renders `[unverified — …]` beside the cite. The typed
-  report is not re-linted by the regex CitationLinter, whose 80-char
+  A failed field is marked `unverified` on the claim (rendered as
+  `[unverified — …]` for display). The typed report is not re-linted by the regex CitationLinter, whose 80-char
   proximity check reads rendered fields wrong.
 - **Evidence by ref** (G4): a critic, meta-critic or synthesizer with tools
   gets `evidence(path, start_line, end_line)`, answered only from the

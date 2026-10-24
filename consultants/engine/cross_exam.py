@@ -115,6 +115,10 @@ def challenges(text: str, n_reports: int) -> dict[int, list[str]]:
     challenge past :data:`MAX_PER_LANE` for its report."""
     out: dict[int, list[str]] = {}
     text = text or ""
+    from consultants.engine import typed_results
+    rec = typed_results.loads(text, typed_results.VERDICT)
+    if rec is not None:            # plan G7: the lines are in its `why`
+        text = str(rec.get("why") or "")
     for m in _CHALLENGE.finditer(text):
         n = int(m.group(1))
         stop = _STOP.search(text, m.end())
