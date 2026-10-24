@@ -345,3 +345,24 @@ def test_loaded_context_reads_api_ps_and_caches_briefly():
     assert provider_caps.loaded_context("http://h", "q:8b", fetch=fetch) == 32768
     assert provider_caps.loaded_context("http://h", "other", fetch=fetch) is None
     assert calls == ["http://h/api/ps", "http://h/api/ps"]
+
+
+def test_streamed_placed_call_keeps_xollamas_cache_count():
+    # xOllama's final stream chunk names the share prompt_eval_cached_count;
+    # the reader kept only cached_prompt_tokens, so every streamed PolyKV
+    # call (every researcher turn) read as 0 cached (ch-10, 2026-10-24).
+    c = cc.ChatClient("http://h")
+    lines = [json.dumps({"message": {"role": "assistant", "content": "ok"},
+                         "done": False}).encode() + b"\n",
+             json.dumps({"done": True, "done_reason": "stop", "eval_count": 2,
+                         "prompt_eval_count": 1224,
+                         "prompt_eval_cached_count": 1152}).encode() + b"\n"]
+
+    class _S(_Resp):
+        def __iter__(self):
+            return iter(lines)
+    payload = {"model": "m", "messages": [{"role": "user", "content": "q"}],
+               "placement": {"session_id": "run~researcher~x", "pool_id": "1"}}
+    with patch("urllib.request.urlopen", side_effect=_Seq([_S({})])):
+        out = c.chat_streamed(payload)
+    assert out["timings"]["polykv"]["cache_n"] == 1152

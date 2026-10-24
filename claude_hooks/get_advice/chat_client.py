@@ -1533,9 +1533,12 @@ class ChatClient:
                          "prompt_eval_duration", "eval_duration",
                          "done_reason",
                          # xOllama / think-budget builds: the enforced
-                         # budget, and the prompt tokens served from cache.
+                         # budget, and the prompt tokens served from cache
+                         # (xOllama names it prompt_eval_cached_count; dropping
+                         # it read every streamed PolyKV call as 0 cached).
                          "think_budget_tokens", "think_budget",
-                         "cached_prompt_tokens"):
+                         "cached_prompt_tokens", "prompt_eval_cached_count",
+                         "opencoti"):
                     if k in obj:
                         final_fields[k] = obj[k]
             # A reasoning loop (plan D1): stop reading. Leaving the
