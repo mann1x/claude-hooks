@@ -472,16 +472,33 @@ class TestNeverAttachedPools:
         assert report["released_pools"] == ["0"]
         assert eng.pools == {} and report["leaked_pools"] == []
 
-    def test_an_attached_layer_is_unpinned_and_left_to_the_sweep(self):
+    def test_an_attached_layer_is_released_too(self):
+        # Unpinned and left to the engine's sweep, three attached layers
+        # outlived two councils on eleven2go and the next run's layer was
+        # refused: "pool seq-id reservoir exhausted".
         eng = SizedEngine()
         mgr = _mgr(eng)
         polykv.PlacedChat(FakeChat(), mgr, role="researcher").chat(_payload())
         assert eng.pools[0]["pinned"] is True       # pinned while in use
         eng.pools[0]["attached_ever"] = True
         report = mgr.release_all()
-        assert report["released_pools"] == [] and list(eng.pools) == [0]
+        assert report["released_pools"] == ["0"] and eng.pools == {}
+        assert report["unpinned_pools"] == [] and report["leaked_pools"] == []
+
+    def test_a_layer_someone_still_holds_is_unpinned(self):
+        eng = SizedEngine()
+        mgr = _mgr(eng)
+        polykv.PlacedChat(FakeChat(), mgr, role="researcher").chat(_payload())
+        orig = eng.handle
+
+        def held(method, route, params, data):
+            if route.endswith("/release"):
+                return Reply(409, {"error": {"message": "pool is attached"}})
+            return orig(method, route, params, data)
+        eng.handle = held
+        report = mgr.release_all()
         assert report["unpinned_pools"] == ["0"] and eng.pools[0]["pinned"] is False
-        assert report["leaked_pools"] == []
+        assert report["released_pools"] == []
 
     def test_a_layer_that_could_not_be_released_is_reported(self):
         eng = SizedEngine()
@@ -733,6 +750,8 @@ class TestAudit:
         orig = eng.handle
 
         def no_unpin(method, route, params, data):
+            if route.endswith("/release"):
+                return Reply(409, {"error": {"message": "pool is attached"}})
             if route.endswith("/unpin"):
                 return Reply(500, {"error": {"message": "busy"}})
             return orig(method, route, params, data)

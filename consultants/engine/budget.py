@@ -245,6 +245,19 @@ def resolve_window(chat_client: Any, model: str,
     that stated none (csl-2026-10-24-1927-bc05). A client without a capability record keeps the old
     probe (:func:`context_length_of`).
     """
+    caps = _caps_of(chat_client, model)
+    pinned = knobs.num_ctx if (isinstance(knobs.num_ctx, int)
+                               and not isinstance(knobs.num_ctx, bool)
+                               and knobs.num_ctx > 0) else None
+    local = (caps is not None and caps.backend == "ollama"
+             and caps.cloud is False)
+    # A pin is sent on every call where it is sent at all, granted window
+    # or not: once the engine reported a grant, the granted branch below
+    # returned no num_ctx, and that call loaded the model at its default
+    # (eleven2go, run 5: 262,144 <-> 32,768 every few minutes).
+    send_pin = pinned if pinned and (
+        local or (caps is not None and caps.backend == "xollama"
+                  and caps.cloud is False)) else None
     granted = getattr(chat_client, "granted_window", None)
     if callable(granted):
         try:
@@ -252,17 +265,9 @@ def resolve_window(chat_client: Any, model: str,
         except Exception:  # pragma: no cover
             g = None
         if _positive(g):
-            return Window(int(g), "granted")
-    caps = _caps_of(chat_client, model)
-    pinned = knobs.num_ctx if (isinstance(knobs.num_ctx, int)
-                               and not isinstance(knobs.num_ctx, bool)
-                               and knobs.num_ctx > 0) else None
-    local = (caps is not None and caps.backend == "ollama"
-             and caps.cloud is False)
+            return Window(int(g), "granted", send_pin)
     if pinned:
-        sent = local or (caps is not None and caps.backend == "xollama"
-                         and caps.cloud is False)
-        return Window(pinned, "pinned", pinned if sent else None)
+        return Window(pinned, "pinned", send_pin)
     if caps is None:
         ctx = context_length_of(chat_client, model)
         return Window(ctx, "probe" if ctx else "unknown")

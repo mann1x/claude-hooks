@@ -148,6 +148,22 @@ def test_granted_window_wins_and_no_caps_keeps_the_old_probe():
     assert (w.tokens, w.source) == (131_072, "probe")
 
 
+def test_a_pin_is_still_sent_once_a_window_was_granted():
+    # Run 5 on eleven2go: after the engine reported a grant, the granted
+    # branch returned no num_ctx and that call loaded the model at the
+    # tag's default — 262,144 <-> 32,768 reloads every few minutes.
+    pin = budget.knobs_from({"num_ctx": 262_144})
+    xo = budget.resolve_window(
+        _Caps(_caps(backend="xollama", cloud=False), granted=262_144), "m", pin)
+    assert (xo.tokens, xo.source, xo.send_num_ctx) == (262_144, "granted", 262_144)
+    cloud = budget.resolve_window(
+        _Caps(_caps(cloud=True), granted=262_144), "m", pin)
+    assert cloud.send_num_ctx is None
+    unpinned = budget.resolve_window(
+        _Caps(_caps(backend="xollama", cloud=False), granted=262_144), "m")
+    assert unpinned.send_num_ctx is None
+
+
 def test_budget_options_send_num_ctx_unless_the_caller_set_one():
     c = _Caps(_caps(cloud=False, declared_num_ctx=65_536))
     p = budget.plan(c, "m", [{"role": "user", "content": "q"}])

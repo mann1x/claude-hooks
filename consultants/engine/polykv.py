@@ -1129,10 +1129,12 @@ class KvRunManager:
                         report["owners_closed"].append(owner)
                 except (OpencotiError, OSError) as e:
                     report["close_errors"].append(f"{owner}: {e}")
-        # A layer nobody attached is never swept (the engine sweeps an
-        # ephemeral pool only once it has been attached): release it here.
-        # One that was attached is unpinned and left to the sweep — another
-        # council may share it.
+        # Every layer this run made is released here, leaves first. One the
+        # engine will not release now (409: a session of another run holds
+        # it) is unpinned instead. An attached layer used to be only
+        # unpinned and left to the engine's sweep, which did not come: on
+        # eleven2go three of them outlived two councils and the next one's
+        # layer was refused with the pool seq-id reservoir exhausted.
         report["released_pools"] = []
         report["unpinned_pools"] = []
         mine: dict[str, set] = {}
@@ -1144,12 +1146,8 @@ class KvRunManager:
                 continue
             mine.setdefault(rk, set()).add(str(pid))
             try:
-                if (root.client.pool(pid) or {}).get("attached_ever"):
-                    root.client.pin_pool(pid, False)
-                    report["unpinned_pools"].append(pid)
-                    continue
-                root.client.release_pool(pid)
-                report["released_pools"].append(pid)
+                done = _settle_pool(root.client, pid)
+                report[f"{done}_pools"].append(pid)
             except (OpencotiError, OSError) as e:
                 if getattr(e, "status", None) not in (400, 404):   # gone
                     report["close_errors"].append(f"pool {pid}: {e}")
@@ -1480,10 +1478,24 @@ def client_for_key(key: str) -> Optional[PolykvClient]:
     return None
 
 
+def _settle_pool(client: Any, pid: str) -> str:
+    """Release a layer of a run that is over, or unpin it when the engine
+    refuses the release because something still holds it (409). Returns
+    ``"released"`` or ``"unpinned"``; any other refusal is raised."""
+    try:
+        client.release_pool(pid)
+        return "released"
+    except OpencotiError as e:
+        if getattr(e, "status", None) != 409:
+            raise
+    client.pin_pool(pid, False)
+    return "unpinned"
+
+
 def release_snapshot(snap: dict) -> dict:
     """Release a held snapshot's owners and layers without its manager:
-    owners closed (their pools go with them), shared layers released when
-    never attached, else unpinned."""
+    owners closed (their pools go with them), layers released, or
+    unpinned when the engine says something still holds them."""
     out = {"owners_closed": [], "released_pools": [], "unpinned_pools": [],
            "errors": []}
     for key, r in (snap.get("roots") or {}).items():
@@ -1498,12 +1510,7 @@ def release_snapshot(snap: dict) -> dict:
                 out["errors"].append(f"{r['owner']}: {e}")
         for pid in (r.get("pools") or {}).values():
             try:
-                if (c.pool(pid) or {}).get("attached_ever"):
-                    c.pin_pool(pid, False)
-                    out["unpinned_pools"].append(pid)
-                else:
-                    c.release_pool(pid)
-                    out["released_pools"].append(pid)
+                out[f"{_settle_pool(c, pid)}_pools"].append(pid)
             except (OpencotiError, OSError) as e:
                 if getattr(e, "status", None) not in (400, 404):
                     out["errors"].append(f"pool {pid}: {e}")
