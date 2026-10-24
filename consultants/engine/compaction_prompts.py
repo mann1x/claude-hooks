@@ -281,6 +281,26 @@ Write every step as the step itself, then what came back as its own short senten
 # --------------------------------------------------------------------- #
 
 
+def describe_past_key(cited: list[int], calls: int) -> str:
+    """Tell the writer it narrated calls that never happened. A writer
+    whose span ended mid-task carried on in the present tense ("Then
+    src/cluster/. [#63-67]") to #174 against a 55-call key
+    (compaction-v7-cite, 2026-10-24): a forecast written as a record."""
+    lo, hi = min(cited), max(cited)
+    span = f"#{lo}" if lo == hi else f"#{lo}–#{hi}"
+    return "\n".join([
+        "",
+        "",
+        f"Your previous attempt cited {span}. Only #1–#{calls} happened in "
+        f"this part of the conversation; nothing after #{calls} has been "
+        f"done yet, so it was rejected.",
+        "",
+        f"Write it again ending where the conversation above ends, at "
+        f"#{calls}. Do not narrate what comes next: the turns after it are "
+        f"still in front of you and will say for themselves what was done.",
+    ])
+
+
 def describe_overrun(measured_tokens: int, limit_tokens: int) -> str:
     """Tell the writer, in numbers, that its last attempt did not fit.
     The one place length is worth talking about: a measurement against a

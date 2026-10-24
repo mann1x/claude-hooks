@@ -358,12 +358,54 @@ _CITATION = re.compile(rf"\[#\d+(?:\s*[-–—]\s*#?\d+)?(?:\s*,\s*{_PART})*\]")
 _RANGE = re.compile(r"#?(\d+)(?:\s*[-–—]\s*#?(\d+))?")
 
 
+def _cited(text: str) -> list[tuple[re.Match, list[int]]]:
+    out = []
+    for m in _CITATION.finditer(text or ""):
+        nums: list[int] = []
+        for part in _RANGE.finditer(m.group(0)[1:-1]):
+            a = int(part.group(1))
+            b = int(part.group(2)) if part.group(2) else a
+            nums += list(range(a, b + 1)) if b >= a else [a]
+        out.append((m, nums))
+    return out
+
+
+def past_key(text: str, calls: int) -> list[int]:
+    """Numbers ``text`` cites beyond a ``calls``-entry key: calls that did
+    not happen in the span, so the sentence citing them is invented."""
+    return sorted({n for _m, nums in _cited(text) for n in nums if n > calls})
+
+
+def drop_past_key(text: str, calls: int) -> tuple[str, int]:
+    """``text`` without the narration of calls past the key. A citation
+    follows the clause that narrates its call, so a citation naming only
+    calls past the key goes with the clause before it — back to the
+    previous citation, never across a paragraph. One that also names real
+    calls keeps its clause; :func:`splice` drops just the bad numbers."""
+    keep, at, dropped = [], 0, 0
+    prev_end = 0
+    for m, nums in _cited(text):
+        if nums and all(n > calls for n in nums):
+            para = text.rfind("\n\n", 0, m.start())
+            start = max(prev_end, para + 2 if para >= 0 else 0)
+            keep.append(text[at:start])
+            at, dropped = m.end(), dropped + 1
+        prev_end = m.end()
+    keep.append(text[at:])
+    out = "".join(keep)
+    out = re.sub(r"[ \t]+\n", "\n", re.sub(r"[ \t]{2,}", " ", out))
+    return re.sub(r"\n{3,}", "\n\n", out).strip(), dropped
+
+
 @dataclass
 class Splice:
     text: str
     cited: list[int]
     uncited: list[int]
     invalid: list[int]
+    #: Calls cited again after their first place: the entry is already in
+    #: the text, so the repeat is dropped — not a call that did not exist.
+    repeated: list[int] = field(default_factory=list)
 
 
 def splice(replay: str, entries: list[Entry]) -> Splice:
@@ -373,9 +415,14 @@ def splice(replay: str, entries: list[Entry]) -> Splice:
     cited: list[int] = []
     invalid: list[int] = []
 
+    repeated: list[int] = []
+
     def place(i: int) -> Optional[str]:
         e = by_index.get(i)
-        if e is None or i in used:
+        if e is not None and i in used:
+            repeated.append(i)
+            return ""
+        if e is None:
             return None
         used.add(i)
         cited.append(i)
@@ -393,7 +440,7 @@ def splice(replay: str, entries: list[Entry]) -> Splice:
                 placed = place(i)
                 if placed is None:
                     invalid.append(i)
-                else:
+                elif placed:
                     out.append(placed)
         return f"\n{chr(10).join(out)}\n" if out else ""
 
@@ -401,10 +448,10 @@ def splice(replay: str, entries: list[Entry]) -> Splice:
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     return Splice(text=text, cited=cited,
                   uncited=[e.index for e in entries if e.index not in used],
-                  invalid=invalid)
+                  invalid=invalid, repeated=repeated)
 
 
 __all__ = ["Entry", "Splice", "build", "merge", "evict", "evicted", "budget_chars",
-           "numbers",
+           "numbers", "past_key", "drop_past_key",
            "render", "render_entry", "render_key", "splice", "is_verdict",
            "looks_refused", "summarize_input", "summarize_output"]

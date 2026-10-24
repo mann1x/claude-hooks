@@ -602,7 +602,8 @@ def test_splice_drops_invalid_citations():
             {"id": "a", "function": {"name": "read_file", "arguments": '{"path": "p"}'}}]},
         {"role": "tool", "tool_call_id": "a", "content": "body"}])
     s = tool_ledger.splice("Reading. [#1] Then [#1] and [#9] and [#3-1].", entries)
-    assert s.cited == [1] and sorted(s.invalid) == [1, 3, 9]
+    # A repeat is not an invented call: it is reported apart.
+    assert s.cited == [1] and sorted(s.invalid) == [3, 9] and s.repeated == [1]
     assert "1. read_file" in s.text and "[#" not in s.text
 
 
@@ -894,3 +895,61 @@ def test_the_bound_line_counts_against_the_key_budget():
     key = tool_ledger.render_key(entries, len(calls_only) + 5)
     assert len(key) <= len(calls_only) + 5
     assert key.endswith("no other number exists.)")
+
+
+# --- the writer never narrates calls that did not happen ------------ #
+# compaction-v7-cite (2026-10-24): with every call numbered, the gen-1
+# writer still went on past its 55-call span in the present tense — "Then
+# `src/cluster/`. [#63-67]" — to #174: a forecast written as a record. The
+# splice dropped the numbers and kept the sentences.
+
+_FORECAST = ("I read the audit modules. [#1-2]\n\n"
+             "Let me read the remaining `src/cli/` files. [#3-4] "
+             "Then `src/cluster/`. [#5-7] Then `src/config/`. [#8-9]\n\n"
+             "So far the unit is deciseconds. [#2]")
+
+
+def test_past_key_finds_and_cuts_only_the_invented_steps():
+    assert tool_ledger.past_key(_FORECAST, 3) == [4, 5, 6, 7, 8, 9]
+    text, cut = tool_ledger.drop_past_key(_FORECAST, 3)
+    assert cut == 2
+    assert "src/cluster" not in text and "src/config" not in text
+    # A cite naming a real call keeps its clause; splice drops #4 alone.
+    assert "remaining `src/cli/` files. [#3-4]" in text
+    assert text.startswith("I read the audit modules. [#1-2]")
+    assert text.endswith("So far the unit is deciseconds. [#2]")
+    assert tool_ledger.drop_past_key(_FORECAST, 9) == (_FORECAST, 0)
+
+
+def test_a_cut_never_crosses_a_paragraph():
+    text, cut = tool_ledger.drop_past_key(
+        "Found the bug in backoff.py. [#1] The window is in deciseconds."
+        "\n\nNext I read cluster. [#7]", 2)
+    assert cut == 1 and text == ("Found the bug in backoff.py. [#1] "
+                                 "The window is in deciseconds.")
+
+
+def test_the_writer_is_re_asked_with_the_numbers_it_invented():
+    asks = []
+
+    def writer(payload, n):
+        asks.append(payload["messages"][-1]["content"])
+        return _FORECAST if len(asks) == 1 else "I read them. [#1-3]"
+    paths = ["src/a.py", "src/b.py", "src/c.py"]
+    d = compaction.write_digest(_scope(Backend(writer=writer), review=False),
+                                _calls(paths, 1), target_tokens=3_000)
+    assert len(asks) == 2
+    assert "cited #4–#9. Only #1–#3 happened" in asks[1]
+    assert d.invalid_citations == [] and "src/cluster" not in d.summary
+
+
+def test_invented_steps_left_after_the_last_attempt_are_cut(caplog):
+    paths = ["src/a.py", "src/b.py", "src/c.py"]
+    backend = Backend(writer=lambda p, n: _FORECAST)
+    with caplog.at_level("WARNING", logger="consultants.engine.compaction"):
+        d = compaction.write_digest(_scope(backend, review=False),
+                                    _calls(paths, 1), target_tokens=3_000)
+    assert "src/cluster" not in d.summary and "src/config" not in d.summary
+    assert d.invalid_citations == [4]          # the real cite's extra number
+    assert "narrated 2 step(s) past the 3-call record" in caplog.text
+    assert len(_writer_requests(backend)) == 3  # every attempt was used

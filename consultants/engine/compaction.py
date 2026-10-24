@@ -502,10 +502,13 @@ def build_writer_request(prompt: str, conversation: str, *,
 
 
 def write_replay(scope: Scope, request: str, *, system: str,
-                 max_tokens: int, model: str, tail: bool) -> tuple[str, dict]:
+                 max_tokens: int, model: str, tail: bool,
+                 calls: int = 0) -> tuple[str, dict]:
     """Up to ``writer_attempts`` calls. A throw or an empty reply is resent
-    as is; an over-budget one is resent with the measured overrun. An
-    over-budget text on the last attempt is kept; an empty one never."""
+    as is; an over-budget one is resent with the measured overrun, and one
+    citing past the ``calls``-entry key with the numbers it invented. An
+    over-budget or past-key text on the last attempt is kept (the caller
+    cuts what is past the key); an empty one never."""
     attempts = max(1, int(scope.settings.writer_attempts))
     info: dict = {"attempts": 0, "echo_cut": 0, "trimmed_blocks": 0}
     best = ""
@@ -538,6 +541,13 @@ def write_replay(scope: Scope, request: str, *, system: str,
             best = text
             info["last_failure"] = "over_budget"
             ask = request + P.describe_overrun(measured, max_tokens)
+            continue
+        invented = tool_ledger.past_key(text, calls) if calls else []
+        if invented and n + 1 < attempts:
+            best = text
+            info["last_failure"] = "past_key"
+            info["past_key"] = info.get("past_key", 0) + len(invented)
+            ask = request + P.describe_past_key(invented, calls)
             continue
         return text, info
     if best:
@@ -842,7 +852,8 @@ def write_digest(scope: Scope, dropped: list[dict], *, target_tokens: int,
         requests=shown, ledger_key=key)
     replay, winfo = write_replay(
         scope, request, system=P.WRITER_SYSTEM_PROMPT if tail else P.FULL_SYSTEM_PROMPT,
-        max_tokens=summary_max, model=model, tail=tail)
+        max_tokens=summary_max, model=model, tail=tail,
+        calls=len(ledger))
 
     retro = ""
     spent = token_calib.estimate_tokens(len(replay), model) if replay else 0
@@ -878,6 +889,14 @@ def write_digest(scope: Scope, dropped: list[dict], *, target_tokens: int,
     replay = strip_half_marker(replay)
     if tail:
         replay, _ = trim_fences(replay)
+    if replay and ledger:
+        # The floor under the writer's re-ask: a half-critic or reviewer can
+        # bring invented steps back, and the splice alone would drop their
+        # numbers and keep the sentences (fork tool-ledger.ts "invalid").
+        replay, cut = tool_ledger.drop_past_key(replay, len(ledger))
+        if cut:
+            log.warning("compaction replay narrated %d step(s) past the "
+                        "%d-call record; cut", cut, len(ledger))
 
     spliced = tool_ledger.splice(replay, ledger) if (replay and ledger) else None
     final = spliced.text if spliced else replay
@@ -893,6 +912,9 @@ def write_digest(scope: Scope, dropped: list[dict], *, target_tokens: int,
     if spliced and spliced.invalid:
         log.warning("compaction replay cited %d call(s) not in the record: %s",
                     len(spliced.invalid), spliced.invalid[:10])
+    if spliced and spliced.repeated:
+        log.info("compaction replay cited %d call(s) again; kept at their "
+                 "first place", len(spliced.repeated))
     if final:
         final = _ensure_files(final, dropped)
 
