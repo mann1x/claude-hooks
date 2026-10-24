@@ -758,9 +758,10 @@ def test_an_over_long_key_shortens_inputs_and_keeps_every_call():
     full = tool_ledger.render_key(entries)
     cut = tool_ledger.render_key(entries, 2_000)
     assert len(full) > 2_000 >= len(cut)
-    lines = cut.splitlines()
+    *lines, bound = cut.splitlines()
     assert [ln.split(".", 1)[0] for ln in lines] == [str(i) for i in range(1, 41)]
     assert all(ln.endswith("…") for ln in lines)
+    assert bound == "(That is all 40 calls, #1–#40; no other number exists.)"
     assert tool_ledger.render_key(entries, 10 ** 6) == full
 
 
@@ -793,7 +794,7 @@ def test_the_writers_key_is_bounded_at_a_tenth_of_its_input():
                             "writing them out:\n", 1)[1].split("\n\nConversation:", 1)[0]
     assert len(key) <= max(tool_ledger.budget_chars(3_000),
                            int(9_000 * 3 * compaction.KEY_SHARE))
-    assert len(key.splitlines()) == 60
+    assert len(key.splitlines()) == 60 + 1  # every call, then the bound
 
 
 def test_the_last_turn_ceiling_is_a_share_of_the_usable_input():
@@ -824,3 +825,72 @@ def test_the_shipped_flow_is_full():
     from consultants.engine import compaction
     assert compaction.Settings().flow == "full"
     assert compaction.settings_from({}, "researcher", "m").flow == "full"
+
+
+# --- the writer reads each call's number, never counts it ------------- #
+# compaction-v7-g2: every step cited past its key (a 52-call key cited up
+# to #180) because the transcript showed calls unnumbered, so a citation
+# meant counting calls through a long run of alike reads.
+
+def test_the_transcript_numbers_each_call_as_the_key_does():
+    backend = Backend()
+    paths = ["src/a.py", "src/b.py", "src/c.py"]
+    compaction.write_digest(_scope(backend, review=False), _calls(paths, 1),
+                            target_tokens=3_000)
+    req = _writer_requests(backend)[0]
+    key, conv = req.split("\n\nConversation:\n", 1)
+    for n, p in enumerate(paths, 1):
+        assert f"\n{n}. read_file  path={p}" in key
+        assert f"[Bot tool calls]: #{n} read_file(path={p})" in conv
+    assert "(That is all 3 calls, #1–#3; no other number exists.)" in key
+    assert "number in the conversation below" in key
+
+
+def test_numbers_follow_a_carried_ledger_and_collapsed_repeats():
+    carried = tool_ledger.build(_calls(["src/old.py"], 1))
+    again = _calls(["src/x.py", "src/x.py", "src/y.py"], 1)
+    again[2]["tool_calls"][0]["id"] = "r1"  # a second id for the same call
+    again[3]["tool_call_id"] = "r1"
+    ledger = tool_ledger.merge(carried, tool_ledger.build(again))
+    nums = tool_ledger.numbers(ledger)
+    # The carried call is #1; the repeat of src/x.py shares #2; src/y.py #3.
+    assert (nums["k0"], nums["r1"]) == (2, 2) and nums["k2"] == 3
+    text = compaction.serialize(again, numbers=nums)
+    assert text.count("[Bot tool calls]: #2 read_file(path=src/x.py)") == 2
+    assert "[Bot tool calls]: #3 read_file(path=src/y.py)" in text
+    # Without numbers the transcript is as before.
+    assert "#" not in compaction.serialize(again).split("[Tool result]")[0]
+    assert not any("ids" in e.as_dict() for e in ledger)
+
+
+def test_a_citation_list_is_spliced_and_never_left_as_text():
+    entries = tool_ledger.build(_calls([f"src/m{i}.py" for i in range(6)], 1))
+    sp = tool_ledger.splice("I read them. [#1-2, 4, #5-6] Then stop.", entries)
+    assert "[#" not in sp.text
+    assert sp.cited == [1, 2, 4, 5, 6] and sp.uncited == [3]
+    assert sp.invalid == []
+    over = tool_ledger.splice("More. [#5-6, 9]", entries)
+    assert over.cited == [5, 6] and over.invalid == [9]
+    assert tool_ledger.render_key(entries[:1]).endswith(
+        "(That is the only call, #1; no other number exists.)")
+    assert tool_ledger.render_key([]) == ""
+
+
+def test_a_repeat_across_the_carried_seam_keeps_its_number():
+    carried = tool_ledger.build(_calls(["src/x.py"], 1))
+    new = _calls(["src/x.py", "src/y.py"], 1)
+    new[0]["tool_calls"][0]["id"] = new[1]["tool_call_id"] = "n0"
+    new[2]["tool_calls"][0]["id"] = new[3]["tool_call_id"] = "n1"
+    ledger = tool_ledger.merge(carried, tool_ledger.build(new))
+    assert len(ledger) == 2 and ledger[0].repeated == 2
+    assert tool_ledger.numbers(ledger) == {"k0": 1, "n0": 1, "n1": 2}
+
+
+def test_the_bound_line_counts_against_the_key_budget():
+    entries = tool_ledger.build(_calls([f"src/m{i}.py" for i in range(20)], 1))
+    full = tool_ledger.render_key(entries)
+    calls_only = full.rsplit("\n", 1)[0]
+    # Room for every call but not for the bound: inputs shrink to fit both.
+    key = tool_ledger.render_key(entries, len(calls_only) + 5)
+    assert len(key) <= len(calls_only) + 5
+    assert key.endswith("no other number exists.)")

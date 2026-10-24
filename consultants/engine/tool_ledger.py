@@ -63,6 +63,10 @@ class Entry:
     repeated: int = 1
     files: list[str] = field(default_factory=list)
     verdict: bool = False
+    #: The ``tool_call`` ids this entry stands for (a collapsed repeat has
+    #: several), so the transcript can print each call's number where it
+    #: happened (:func:`numbers`). Not carried: a later fold has new ids.
+    ids: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {"index": self.index, "tool": self.tool, "input": self.input,
@@ -228,15 +232,18 @@ def build(messages: list[dict]) -> list[Entry]:
                 raw = answer.get("content")
                 result = summarize_output(raw)
                 failed = looks_refused(raw, bool(answer.get("is_error")))
+            cid = [tc["id"]] if (tc or {}).get("id") else []
             prev = entries[-1] if entries else None
             if (prev and prev.tool == name and prev.input == inp
                     and prev.result == result):
                 prev.repeated += 1
+                prev.ids += cid
                 continue
             entries.append(Entry(
                 index=len(entries) + 1, tool=name, input=inp, result=result,
                 failed=failed, files=_paths(fn.get("arguments")),
-                verdict=is_verdict(name, raw if isinstance(raw, str) else "")))
+                verdict=is_verdict(name, raw if isinstance(raw, str) else ""),
+                ids=cid))
     return entries
 
 
@@ -253,9 +260,15 @@ def merge(previous: list[Entry], new: list[Entry]) -> list[Entry]:
         if (last and last.tool == e.tool and last.input == e.input
                 and last.result == e.result):
             last.repeated += e.repeated
+            last.ids += e.ids
             continue
-        merged.append(replace(e, files=list(e.files)))
+        merged.append(replace(e, files=list(e.files), ids=list(e.ids)))
     return _renumber(merged)
+
+
+def numbers(entries: list[Entry]) -> dict[str, int]:
+    """``tool_call`` id → the number the key gives that call."""
+    return {i: e.index for e in entries for i in e.ids}
 
 
 def _chars(e: Entry) -> int:
@@ -312,10 +325,20 @@ def render_key(entries: list[Entry], max_chars: Optional[int] = None) -> str:
     who reads every call of the fold, then cites by counting (fork
     ``renderToolLedgerKey``, 46bafaeb71)."""
     heads = [f"{e.index}. {e.tool}" for e in entries]
+    # A writer narrating a long run of alike reads kept numbering past the
+    # end (a 52-call key cited up to #180, compaction-v7-g2): the bound is
+    # stated, not left to be inferred. It counts against ``max_chars``.
+    bound = ""
+    if entries:
+        n = len(entries)
+        bound = (f"(That is all {n} calls, #1–#{n}; no other number exists.)"
+                 if n > 1 else "(That is the only call, #1; no other number "
+                 "exists.)")
     full = sum(len(h) + 2 + len(e.input) + 1 for h, e in zip(heads, entries))
     allowance = None
-    if max_chars is not None and full > max_chars:
-        allowance = max(0, (max_chars - sum(len(h) + 3 for h in heads))
+    if max_chars is not None and full + len(bound) + 1 > max_chars:
+        allowance = max(0, (max_chars - len(bound) - 1
+                            - sum(len(h) + 3 for h in heads))
                         // max(1, len(entries)))
     lines = []
     for h, e in zip(heads, entries):
@@ -323,10 +346,16 @@ def render_key(entries: list[Entry], max_chars: Optional[int] = None) -> str:
         if allowance is not None and len(inp) > allowance:
             inp = inp[:allowance - 1] + "…" if allowance > 1 else ""
         lines.append(f"{h}  {inp}" if inp else h)
+    if bound:
+        lines.append(bound)
     return "\n".join(lines)
 
 
-_CITATION = re.compile(r"\[#(\d+)(?:\s*[-–—]\s*#?(\d+))?\]")
+_PART = r"#?\d+(?:\s*[-–—]\s*#?\d+)?"
+#: ``[#7]``, ``[#2-5]`` and a list of either, ``[#4-11, 21-23]`` — a list
+#: the pattern did not take stayed in the replay as literal text.
+_CITATION = re.compile(rf"\[#\d+(?:\s*[-–—]\s*#?\d+)?(?:\s*,\s*{_PART})*\]")
+_RANGE = re.compile(r"#?(\d+)(?:\s*[-–—]\s*#?(\d+))?")
 
 
 @dataclass
@@ -353,24 +382,19 @@ def splice(replay: str, entries: list[Entry]) -> Splice:
         return render_entry(e)
 
     def sub(m: re.Match) -> str:
-        start = int(m.group(1))
-        if m.group(2) is None:
-            placed = place(start)
-            if placed is None:
-                invalid.append(start)
-                return ""
-            return f"\n{placed}\n"
-        end = int(m.group(2))
-        if end < start or end - start + 1 > len(entries):
-            invalid.append(start)
-            return ""
         out = []
-        for i in range(start, end + 1):
-            placed = place(i)
-            if placed is None:
-                invalid.append(i)
-            else:
-                out.append(placed)
+        for part in _RANGE.finditer(m.group(0)[1:-1]):
+            start = int(part.group(1))
+            end = int(part.group(2)) if part.group(2) else start
+            if end < start or end - start + 1 > len(entries):
+                invalid.append(start)
+                continue
+            for i in range(start, end + 1):
+                placed = place(i)
+                if placed is None:
+                    invalid.append(i)
+                else:
+                    out.append(placed)
         return f"\n{chr(10).join(out)}\n" if out else ""
 
     text = _CITATION.sub(sub, replay or "")
@@ -381,5 +405,6 @@ def splice(replay: str, entries: list[Entry]) -> Splice:
 
 
 __all__ = ["Entry", "Splice", "build", "merge", "evict", "evicted", "budget_chars",
+           "numbers",
            "render", "render_entry", "render_key", "splice", "is_verdict",
            "looks_refused", "summarize_input", "summarize_output"]

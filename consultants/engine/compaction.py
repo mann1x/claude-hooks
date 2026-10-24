@@ -308,14 +308,19 @@ def _text(message: dict) -> str:
     return str(content or "")
 
 
-def serialize(messages: list[dict]) -> str:
+def serialize(messages: list[dict],
+              numbers: Optional[dict[str, int]] = None) -> str:
     """The folded span as the writer reads it.
 
     The line markers are the fork's (``[User]:``, ``[Bot]:``,
     ``[Bot thinking]:``, ``[Bot tool calls]:``, ``[Tool result]:``):
     strings the harness writes and a replay has no reason to produce, so
     :func:`cut_echo` can key on them. Earlier digests are not serialized;
-    the writer gets the previous one as ``Previous summary:``."""
+    the writer gets the previous one as ``Previous summary:``.
+
+    With ``numbers`` (:func:`tool_ledger.numbers`) each call carries the
+    key's number, ``[Bot tool calls]: #7 read_file(…)``: a writer that had
+    to count calls to cite them miscounted on long runs of alike reads."""
     lines: list[str] = []
     for m in messages or []:
         if not isinstance(m, dict) or budget.is_compaction_marker(m):
@@ -334,7 +339,9 @@ def serialize(messages: list[dict]) -> str:
             lines.append(f"[{who}]: {_cut(text, MAX_MESSAGE_CHARS)}")
         for tc in m.get("tool_calls") or []:
             fn = (tc or {}).get("function") or {}
-            lines.append(f"[Bot tool calls]: {fn.get('name') or '?'}("
+            n = (numbers or {}).get((tc or {}).get("id") or "")
+            lines.append(f"[Bot tool calls]: {f'#{n} ' if n else ''}"
+                         f"{fn.get('name') or '?'}("
                          f"{_cut(tool_ledger.summarize_input(fn.get('arguments')), MAX_CALL_ARGS_CHARS)})")
     return "\n".join(lines).strip()
 
@@ -486,8 +493,9 @@ def build_writer_request(prompt: str, conversation: str, *,
             "are what you must reproduce verbatim rather than describe:\n\n"
             + requests_block(requests))
     if ledger_key.strip():
-        parts.append("The calls you made, numbered. Cite these as `[#N]` in "
-                     "your replay rather than writing them out:\n"
+        parts.append("The calls you made, numbered. Each one carries its "
+                     "number in the conversation below as well. Cite these "
+                     "as `[#N]` in your replay rather than writing them out:\n"
                      + ledger_key.strip())
     parts.append("Conversation:\n" + (conversation or "(empty)"))
     return "\n\n".join(parts)
@@ -827,7 +835,7 @@ def write_digest(scope: Scope, dropped: list[dict], *, target_tokens: int,
     view = budget_projection.project(_capped(dropped), target_tokens=writer_budget,
                                      policy_intent="summary_input", model=model)
     retrospective._log_projection("writer", view)
-    transcript = serialize(view.messages)
+    transcript = serialize(view.messages, numbers=tool_ledger.numbers(ledger))
     request = build_writer_request(
         prompt, transcript,
         previous_summary=previous.summary if previous else "",
