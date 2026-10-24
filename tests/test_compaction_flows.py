@@ -7,7 +7,8 @@ import time
 
 import pytest
 
-from consultants.engine import budget, compaction, retrospective, tool_ledger
+from consultants.engine import (budget, compaction, retrospective, tool_ledger,
+                               unread_files)
 from consultants.engine import compaction_prompts as P
 
 
@@ -953,3 +954,146 @@ def test_invented_steps_left_after_the_last_attempt_are_cut(caplog):
     assert d.invalid_citations == [4]          # the real cite's extra number
     assert "narrated 2 step(s) past the 3-call record" in caplog.text
     assert len(_writer_requests(backend)) == 3  # every attempt was used
+
+
+# --- files no call opened (unread_files) -------------------------------- #
+
+def _listing(dirpath, names, cid="ls"):
+    return [{"role": "assistant", "content": None, "tool_calls": [
+                {"id": cid, "function": {"name": "list_files", "arguments":
+                                         json.dumps({"path": dirpath})}}]},
+            {"role": "tool", "tool_call_id": cid,
+             "content": "\n".join(f"{dirpath}/{n}" for n in names)}]
+
+
+def test_seen_counts_what_a_call_showed_never_what_a_listing_named():
+    msgs = (_listing("src/admin", ["keeper.py", "registry.py", "slot.py"])
+            + _calls(["src/admin/keeper.py"], 1)
+            + [{"role": "assistant", "content": None, "tool_calls": [
+                   {"id": "g", "function": {"name": "grep", "arguments":
+                                            json.dumps({"pattern": "out\\["})}},
+                   {"id": "r", "function": {"name": "run_command", "arguments":
+                                            json.dumps({"command": "cat src/x/y.py"})}}]},
+               {"role": "tool", "tool_call_id": "g",
+                "content": 'src/admin/registry.py:12:    out["lineage"] = v'},
+               {"role": "tool", "tool_call_id": "r", "content": "def f(): ..."}])
+    seen = unread_files.seen_in(msgs)
+    assert seen == {"src/admin/keeper.py", "src/admin/registry.py",
+                    "src/x/y.py"}                      # never slot.py
+
+
+def test_files_in_reads_paths_not_dotted_names():
+    f = unread_files.files_in
+    assert f("*   `src/admin/bucket_keeper.py`: `weight`, `spill_target`") \
+        == ["src/admin/bucket_keeper.py"]
+    assert f("os.path.join, self.store.ack, limits.RETRY_WINDOW * 100, "
+             "e.g. 1.5 s, https://x.org/a.py") == []
+    assert f("net/backoff.py:148 and http.py") == ["net/backoff.py", "http.py"]
+
+
+# The shape of compaction-v7-cite's first fold: a row for the module read,
+# then rows for modules only listed, every field invented.
+_TABLE = ("Let me read the admin modules. [#1]\n\n"
+          "Module table so far:\n"
+          "*   `src/admin/keeper.py`: `weight`, `spill_target`\n"
+          "*   `src/admin/registry.py`: `hold_epoch`, `retention_class`\n"
+          "*   `src/admin/slot.py`: `lineage`, `fence_token`\n"
+          "| `admin/slot.py` | `codec` | `owner_shard` |\n"
+          "The fix is in `src/admin/keeper.py`, unlike `src/admin/slot.py`.\n"
+          "```\nsrc/admin/slot.py: kept, it is code\n```\n"
+          "The task excludes `config/limits.py`.")
+
+
+def test_lines_about_only_unread_files_are_cut_and_their_names_kept():
+    seen = {"src/admin/keeper.py"}
+    text, names, cut = unread_files.drop_unread(
+        _TABLE, seen, exempt="every module except `config/limits.py`")
+    assert cut == 3
+    assert names == ["src/admin/registry.py", "src/admin/slot.py",
+                     "admin/slot.py"]
+    assert "`src/admin/keeper.py`: `weight`" in text
+    assert "hold_epoch" not in text and "fence_token" not in text
+    assert "`codec`" not in text
+    # a line about a read file that names an unread one stays
+    assert "The fix is in `src/admin/keeper.py`" in text
+    assert "src/admin/slot.py: kept, it is code" in text   # fenced
+    assert "The task excludes `config/limits.py`." in text  # the task's
+    # A suffix of a seen path is the seen file.
+    assert unread_files.drop_unread("`admin/keeper.py`: x", seen)[2] == 0
+
+
+def test_the_digest_keeps_rows_it_read_and_names_the_rest():
+    msgs = (_listing("src/admin", ["keeper.py", "registry.py", "slot.py"])
+            + _calls(["src/admin/keeper.py"], 1))
+    backend = Backend(writer=lambda p, n: _TABLE)
+    d = compaction.write_digest(_scope(backend, review=False), msgs,
+                                target_tokens=3_000)
+    assert "`src/admin/keeper.py`: `weight`" in d.summary
+    assert "hold_epoch" not in d.summary and "fence_token" not in d.summary
+    assert "Not yet read (4 line(s)" in d.summary   # no task: limits.py too
+    assert "`src/admin/registry.py`, `src/admin/slot.py`" in d.summary
+    assert d.info["unread_lines_cut"] == 4
+    assert "src/admin/keeper.py" in d.seen_files
+    # The rule is in the writer's prompt too.
+    assert "Say nothing about a file no call in the record opened" \
+        in _writer_requests(backend)[0]
+
+
+def test_seen_files_carry_to_the_next_fold():
+    first = (_listing("src/admin", ["keeper.py", "registry.py", "slot.py"])
+             + _calls(["src/admin/keeper.py"], 1))
+    d1 = compaction.write_digest(_scope(Backend(writer=lambda p, n: _TABLE),
+                                        review=False),
+                                 first, target_tokens=3_000)
+    prev = retrospective.previous_digest(
+        [retrospective.render_marker(d1, dropped=4)])
+    assert prev.seen_files == d1.seen_files
+    # Fold 2 reads registry.py; the writer carries fold 1's keeper row.
+    carry = ("*   `src/admin/keeper.py`: `weight`, `spill_target`\n"
+             "*   `src/admin/registry.py`: `hold_epoch`, `retention_class`\n"
+             "*   `src/admin/slot.py`: `lineage`, `fence_token`")
+    second = [dict(m, tool_call_id="k9") if m.get("role") == "tool" else
+              {**m, "tool_calls": [dict(m["tool_calls"][0], id="k9")]}
+              for m in _calls(["src/admin/registry.py"], 1)]
+    d2 = compaction.write_digest(_scope(Backend(writer=lambda p, n: carry),
+                                        review=False),
+                                 second, target_tokens=3_000, generation=2,
+                                 previous=prev)
+    assert "keeper.py`: `weight`" in d2.summary       # read in fold 1
+    assert "registry.py`: `hold_epoch`" in d2.summary  # read in fold 2
+    assert "fence_token" not in d2.summary
+    assert {"src/admin/keeper.py", "src/admin/registry.py"} <= set(d2.seen_files)
+
+
+def test_a_marker_from_before_the_seen_set_is_read_leniently():
+    legacy = {"role": "user", "_compaction_marker": True,
+              "_compaction_generation": 1,
+              "_compaction_summary": "*   `src/admin/keeper.py`: `weight`",
+              "_compaction_ledger": [{"index": 1, "tool": "read_file",
+                                      "files": ["src/admin/registry.py"]}],
+              "content": "x"}
+    prev = retrospective.previous_digest([legacy])
+    assert prev.seen_files is None
+    carry = ("*   `src/admin/keeper.py`: `weight`\n"
+             "*   `src/admin/registry.py`: `hold_epoch`\n"
+             "*   `src/admin/slot.py`: `fence_token`")
+    d = compaction.write_digest(_scope(Backend(writer=lambda p, n: carry),
+                                       review=False),
+                                _calls(["src/other.py"], 1),
+                                target_tokens=3_000, generation=2,
+                                previous=prev)
+    assert "keeper.py`: `weight`" in d.summary
+    assert "registry.py`: `hold_epoch`" in d.summary
+    assert "fence_token" not in d.summary
+
+
+def test_a_file_the_task_names_is_never_cut():
+    msgs = (_listing("src/admin", ["keeper.py", "registry.py", "slot.py"])
+            + _calls(["src/admin/keeper.py"], 1))
+    task = {"role": "user",
+            "content": "Audit every module except `config/limits.py`."}
+    d = compaction.write_digest(
+        _scope(Backend(writer=lambda p, n: _TABLE), review=False), msgs,
+        target_tokens=3_000, task=task)
+    assert "The task excludes `config/limits.py`." in d.summary
+    assert d.info["unread_lines_cut"] == 3

@@ -124,6 +124,8 @@ Carry all of this:
 
 Do not invent anything you are not sure of. In particular, do not report a result you cannot see: a call whose output is not in front of you is a call whose outcome you do not know, and writing that it succeeded is the one error here that the next turn cannot recover from.
 
+Say nothing about a file no call in the record opened. If the task asks for a table or a list covering files you have not read yet, carry only the rows you have read; name the rest as still to read, with nothing about what they contain. The harness removes any line that states something about a file no call opened.
+
 Do not write instructions to yourself to rewrite or restore content that this replay does not itself contain — you would be reconstructing from memory something that is still on disk, and producing a worse version of it.
 
 Write the replay and stop. Do not continue the transcript that follows these instructions, and do not copy any part of it back: it is what you are replacing."""
@@ -174,7 +176,7 @@ Your own account of how the work actually went, which the reasoning being delete
 ## Next
 The immediate next steps, in order, specific enough to act on without re-deriving them.
 
-Two rules over all of it. **Do not invent anything.** If you cannot recall something, leave it out or say it is uncertain — a confident wrong detail in this summary cannot be checked against anything and will be acted on. And do not write a step that rewrites or restores content this summary does not itself contain: the material is still there to be read, and reconstructing it from memory produces a worse copy of something intact."""
+Three rules over all of it. **Say nothing about a file no call opened**: a table the task asks for holds only the files that were read, and the rest are named as still to read. **Do not invent anything.** If you cannot recall something, leave it out or say it is uncertain — a confident wrong detail in this summary cannot be checked against anything and will be acted on. And do not write a step that rewrites or restores content this summary does not itself contain: the material is still there to be read, and reconstructing it from memory produces a worse copy of something intact."""
 
 # --------------------------------------------------------------------- #
 # The full flow's council (council-compaction.ts:59-124)
@@ -211,6 +213,7 @@ So: **return the {{half}} half only.** Do not return the {{other_half}} half, do
 
 - **Keep every citation your half already has, exactly as it is, where it is.** Do not renumber them, do not turn them into a numbered list, do not write them out as "Step 7".
 - **Only cite a number that appears in the record.** If your half describes something with no call behind it, leave it uncited — inventing a number attaches your sentence to somebody else's call, or to nothing.
+- **Add nothing about a file no call in the record opened.** A table the task asks for is filled only from files the transcript shows read; the rest are named as still to read, never given contents.
 - If the transcript shows a call your half never mentions, add the step and cite its number from the record.
 
 What to change in your half:

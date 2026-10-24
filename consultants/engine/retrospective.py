@@ -495,6 +495,10 @@ class Digest:
     shown_requests: list = field(default_factory=list)
     #: The tool ledger, carried across generations (entry dicts).
     ledger: list = field(default_factory=list)
+    #: Files a call put in front of the model, carried across generations
+    #: (:mod:`consultants.engine.unread_files`); ``None`` from a marker
+    #: written before it was carried.
+    seen_files: Optional[list] = None
     #: The rendered entries the replay did not cite.
     uncited: str = ""
     invalid_citations: list = field(default_factory=list)
@@ -712,6 +716,7 @@ def render_marker(digest: Digest, dropped: int, *,
         "_compaction_retrospective": digest.retrospective,
         "_compaction_user_requests": list(digest.user_requests),
         "_compaction_ledger": list(digest.ledger),
+        "_compaction_seen_files": list(digest.seen_files or []),
         "content": "\n".join(parts),
     }
 
@@ -731,6 +736,8 @@ def previous_digest(messages: list[dict]) -> Optional[Digest]:
                 generation=int(message.get("_compaction_generation") or 1),
                 user_requests=list(message.get("_compaction_user_requests") or []),
                 ledger=list(message.get("_compaction_ledger") or []),
+                seen_files=(list(message["_compaction_seen_files"])
+                            if "_compaction_seen_files" in message else None),
             )
     return None
 

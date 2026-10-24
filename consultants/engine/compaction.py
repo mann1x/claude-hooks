@@ -50,7 +50,7 @@ from typing import Any, Callable, Optional
 from claude_hooks import budget_projection, capped_thinking, token_calib
 from consultants.engine import budget
 from consultants.engine import compaction_prompts as P
-from consultants.engine import retrospective, tool_ledger
+from consultants.engine import retrospective, tool_ledger, unread_files
 
 log = logging.getLogger("consultants.engine.compaction")
 
@@ -897,6 +897,26 @@ def write_digest(scope: Scope, dropped: list[dict], *, target_tokens: int,
         if cut:
             log.warning("compaction replay narrated %d step(s) past the "
                         "%d-call record; cut", cut, len(ledger))
+    # Lines about files no call opened (unread_files): the writer and the
+    # half-critics completed the task's module table for files not yet
+    # read, every field wrong (compaction-v7-g2 / -cite). Names kept.
+    seen = unread_files.seen_in(dropped)
+    if previous is not None:
+        if previous.seen_files is not None:
+            seen |= set(previous.seen_files)
+        else:      # a marker from before the set was carried: lenient
+            seen |= set(unread_files.files_in(previous.summary))
+            for d in previous.ledger:
+                seen.update(str(f) for f in (d.get("files") or []))
+    unread_names: list[str] = []
+    unread_cut = 0
+    if replay:
+        replay, unread_names, unread_cut = unread_files.drop_unread(
+            replay, seen, exempt="\n".join(shown))
+        if unread_cut:
+            log.warning("compaction replay stated details of %d file(s) no "
+                        "call opened (%d line(s)); cut",
+                        len(unread_names), unread_cut)
 
     spliced = tool_ledger.splice(replay, ledger) if (replay and ledger) else None
     final = spliced.text if spliced else replay
@@ -917,6 +937,9 @@ def write_digest(scope: Scope, dropped: list[dict], *, target_tokens: int,
                  "first place", len(spliced.repeated))
     if final:
         final = _ensure_files(final, dropped)
+        if unread_cut:
+            final = (final.rstrip() + "\n\n"
+                     + unread_files.note(unread_names, unread_cut))
 
     stored = render_requests(stored_requests,
                              int(target_tokens * 3 * USER_REQUEST_SHARE))
@@ -926,10 +949,12 @@ def write_digest(scope: Scope, dropped: list[dict], *, target_tokens: int,
         stand_down="" if (final or retro) else "both-phases-empty",
         user_requests=stored_requests, shown_requests=stored,
         ledger=[e.as_dict() for e in kept],
+        seen_files=unread_files.carried(
+            (previous.seen_files or []) if previous else [], seen),
         uncited=tool_ledger.render(uncited) if final else "",
         invalid_citations=list(spliced.invalid) if spliced else [],
         flow=s.flow if tail else "full-state",
-        info={**winfo, **rinfo})
+        info={**winfo, **rinfo, "unread_lines_cut": unread_cut})
 
 
 # --------------------------------------------------------------------- #
