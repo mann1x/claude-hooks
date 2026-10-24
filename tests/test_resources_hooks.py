@@ -164,7 +164,26 @@ class TestTools:
     def test_catalog_names(self):
         assert {t["name"] for t in tool_catalog()} == {
             "resource-status", "resource-acquire", "resource-release",
-            "resource-check", "resource-define", "resource-events"}
+            "resource-extend", "resource-check", "resource-define",
+            "resource-events"}
+
+    def test_a_single_resource_or_claim_string_is_read(self, st):
+        # 2026-10-23: {"resource": "solidpc/gpu0"} was refused four times
+        # as "a claim needs at least one resource".
+        mine = self.tools(st)
+        ok = mine.call("resource-acquire", {"resource": "solidpc/gpu0",
+                                            "reason": "gate", "ttl": "1h"})
+        assert ok.startswith("GRANTED"), ok
+        cid = ok.split()[1].rstrip(":")
+        ext = mine.call("resource-extend", {"claim": cid, "ttl": "3h"})
+        assert ext.startswith(f"EXTENDED {cid}"), ext
+        assert mine.call("resource-release", {"claims": cid}).startswith(
+            "RELEASED")
+
+    def test_extend_needs_a_target_and_a_duration(self, st):
+        t = self.tools(st)
+        assert t.call("resource-extend", {"ttl": "1h"}).startswith("Name")
+        assert t.call("resource-extend", {"all": True}).startswith("Not done")
 
     def test_acquire_busy_then_queue_then_release(self, st):
         mine, theirs = self.tools(st), self.tools(st, "other")

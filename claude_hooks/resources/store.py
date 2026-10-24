@@ -504,6 +504,74 @@ class ResourceStore:
 
         return self._run(go)
 
+    def extend(self, claim_ids: Iterable[str] = (), *, session_id: str = "",
+               resources: Iterable[str] = (), ttl_s: float = 0,
+               by_s: float = 0, force: bool = False
+               ) -> tuple[list[tuple[Claim, str]], list[Claim]]:
+        """Move claims' expiry in place: the claim keeps its id, its grant
+        and its place in the queue, which a release + acquire loses (a FIFO
+        waiter is granted in between). ``ttl_s`` ends it that long from now,
+        ``by_s`` that much after its current end; an extension never
+        shortens a claim. A queued claim gets the longer TTL for when it is
+        granted. Selects like :meth:`release`. Returns ``([(claim, was)],
+        refused)``; waiters are woken (``NOTIFY``) so they see the new end."""
+        if ttl_s <= 0 and by_s <= 0:
+            raise model.SpecError("extend needs a duration (--ttl or --by)")
+        ids = set(claim_ids or ())
+        names = {model.normalize(r) for r in (resources or ())}
+
+        def go(cur):
+            live, _, _ = self._settle(cur)
+            now = self._clock()
+            done, refused = [], []
+            for c in live:
+                if ids:
+                    if c.id not in ids:
+                        continue
+                    if not force and c.session_id != session_id:
+                        refused.append(c)
+                        continue
+                elif not session_id or c.session_id != session_id:
+                    continue
+                elif names and not names & {i.resource for i in c.items}:
+                    continue
+                was = c.expires_at
+                if c.state != "granted":
+                    if c.ttl_s <= 0:
+                        continue             # no end once granted either
+                    ttl = max(c.ttl_s, int(ttl_s or 0), c.ttl_s + int(by_s or 0))
+                    if ttl == c.ttl_s:
+                        continue
+                    cur.execute(self._q("UPDATE resource_claims SET ttl_s = ? "
+                                        "WHERE id = ?"), (ttl, c.id))
+                    c.ttl_s = ttl
+                    self._event(cur, c, "extended",
+                                f"for {ttl // 60} min once granted")
+                    done.append((c, was))
+                    continue
+                current = parse_iso(c.expires_at)
+                if current is None:
+                    continue                 # no end: nothing to extend
+                end = max(current, now + ttl_s if ttl_s > 0 else 0,
+                          current + by_s if by_s > 0 else 0)
+                if end <= current:
+                    continue
+                exp = iso(datetime.fromtimestamp(end, timezone.utc))
+                granted = parse_iso(c.granted_at) or now
+                cur.execute(self._q(
+                    "UPDATE resource_claims SET expires_at = ?, ttl_s = ? "
+                    "WHERE id = ?"), (exp, int(end - granted), c.id))
+                c.expires_at, c.ttl_s = exp, int(end - granted)
+                self._event(cur, c, "extended",
+                            f"until {exp[:19].replace('T', ' ')} (was "
+                            f"{was[:19].replace('T', ' ')})")
+                done.append((c, was))
+            if done:
+                self._notify(cur, "extended")
+            return done, refused
+
+        return self._run(go)
+
     def status(self) -> tuple[list[Outcome], dict[str, int], list[dict]]:
         """Every live claim (granted first, then the queue in order), the
         capacities, and the definitions."""
@@ -611,11 +679,17 @@ class ResourceStore:
     def wait(self, claim_id: str, *, timeout_s: Optional[float] = None,
              renew_every_s: float = 60.0,
              on_update: Optional[Callable[[Outcome], None]] = None,
+             on_extended: Optional[Callable[[Outcome, str], bool]] = None,
              stop: Optional[threading.Event] = None) -> Optional[Outcome]:
         """Block until ``claim_id`` is granted (returns its outcome), is
         gone (None: released, expired, its holder died) or ``timeout_s``
         passes (returns the waiting outcome). On Postgres the wait is a
         ``LISTEN``: a release anywhere wakes it within one round trip.
+
+        ``on_extended(outcome, was)`` is called when the claim it waits
+        behind is extended (its end moved later, ``was`` the old end);
+        returning true ends the wait there with the waiting outcome, the
+        booking kept — a background waiter's exit is how a session hears.
 
         The LISTEN is opened before the first check, so a release that
         lands between "still waiting" and "now listening" is not missed.
@@ -627,11 +701,23 @@ class ResourceStore:
             listener.execute(f"LISTEN {schema.CHANNEL}")
         last_renew = self._clock()
         last_seen = None
+        ends: dict[str, str] = {}
         try:
             while True:
                 out = self.get(claim_id)
                 if out is None or out.granted:
                     return out
+                by = out.block.by if out.block else None
+                if by is not None:
+                    was = ends.get(by.id)
+                    ends[by.id] = by.expires_at
+                    # ``was`` empty: the blocker had no end yet (a queued
+                    # claim gets one at its grant), which is no extension.
+                    if (was and on_extended is not None
+                            and (parse_iso(by.expires_at) or 0)
+                            > (parse_iso(was) or 0)
+                            and on_extended(out, was)):
+                        return out
                 key = (out.position, out.block.describe() if out.block else "")
                 if on_update is not None and key != last_seen:
                     on_update(out)

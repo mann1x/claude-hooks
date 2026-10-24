@@ -5,6 +5,8 @@
     claude-hooks-res acquire solidpc/gpu0:x solidpc:quiet -r bench --ttl 3h
     claude-hooks-res wait bs2/gpu1 -r "gate"       # book + block until granted
     claude-hooks-res wait --claim 3f2a9c…          # wait on an existing booking
+    claude-hooks-res book bs2/gpu1 -r "gate"       # book into the queue, exit 3
+    claude-hooks-res extend solidpc/gpu0 --ttl 2h  # or --claim ID / --all, --by 1h
     claude-hooks-res run solidpc/gpu0 -r "ppl" -- ./llama-perplexity …
     claude-hooks-res release solidpc/gpu0          # or --claim ID, or --all
     claude-hooks-res check solidpc:quiet           # exit 0 if grantable now
@@ -17,12 +19,17 @@ A spec is ``RES[:MODE[:UNITS]]``; MODE is ``shared``/``s``, ``exclusive``/
 claim, granted all together or not at all.
 
 From a Claude Code session, run ``wait`` as a **background** command: it
-exits the moment the claim is granted, which is the notification. A claim
-made from a session lasts until it is released, its TTL passes, or the
-session ends; ``run`` holds its claim exactly as long as the command.
+exits the moment the claim is granted, which is the notification. It also
+exits (code 4, booking kept) when the claim it waits behind is extended,
+so the session hears the new expected free time; resume with ``wait
+--claim ID``. A claim made from a session lasts until it is released, its
+TTL passes, or the session ends; ``run`` holds its claim exactly as long
+as the command. ``extend`` moves a claim's end in place (same id, same
+place in the queue); a release + acquire would hand it to the next waiter.
 
 Exit codes: 0 granted / done, 1 busy / timed out / refused, 2 usage,
-3 queued (``acquire --queue``).
+3 queued (``acquire --queue`` / ``book``), 4 the claim waited behind was
+extended (``wait``, booking kept).
 """
 from __future__ import annotations
 
@@ -166,9 +173,25 @@ def cmd_acquire(args) -> int:
     return 1
 
 
-def _wait_on(claim_id: str, session: str, timeout_s: float, keep: bool) -> int:
+def _end(text: str) -> str:
+    return text[:19].replace("T", " ") + " UTC" if text else "no end"
+
+
+def _wait_on(claim_id: str, session: str, timeout_s: float, keep: bool,
+             wake_on_extend: bool = False) -> int:
     st = _store()
     stop = threading.Event()
+    woken: list = []
+
+    def on_extended(out, was) -> bool:
+        by = out.block.by
+        print(f"EXTENDED {by.id}: {by.label()} held by {by.owner} now until "
+              f"{_end(by.expires_at)} (was {_end(was)}); your booking "
+              f"{claim_id} stays at position {out.position}", flush=True)
+        if wake_on_extend:
+            woken.append(out)
+            return True
+        return False
 
     def on_signal(signum, _frame):
         stop.set()
@@ -181,7 +204,8 @@ def _wait_on(claim_id: str, session: str, timeout_s: float, keep: bool) -> int:
             pass
     try:
         out = st.wait(claim_id, timeout_s=timeout_s or None,
-                      on_update=_say_waiting, stop=stop)
+                      on_update=_say_waiting, on_extended=on_extended,
+                      stop=stop)
     except KeyboardInterrupt:
         if not keep:
             _cancel(claim_id, session)
@@ -194,6 +218,10 @@ def _wait_on(claim_id: str, session: str, timeout_s: float, keep: bool) -> int:
     if out.granted:
         print(_granted_line(out.claim))
         return 0
+    if woken:
+        print(f"  still booked; keep waiting (in the background): "
+              f"claude-hooks-res wait --claim {claim_id}")
+        return 4
     if keep:
         print(f"TIMEOUT {claim_id}: still queued at position {out.position} "
               f"(kept)")
@@ -214,7 +242,8 @@ def cmd_wait(args) -> int:
             print(_granted_line(out.claim))
             return 0
         _say_waiting(out)
-        return _wait_on(args.claim, out.claim.session_id, timeout, args.keep)
+        return _wait_on(args.claim, out.claim.session_id, timeout, args.keep,
+                        wake_on_extend=not args.no_wake)
     if not args.specs:
         print("wait: name resources or --claim ID", file=sys.stderr)
         return 2
@@ -223,7 +252,8 @@ def cmd_wait(args) -> int:
         print(_granted_line(out.claim, out.reused))
         return 0
     _say_waiting(out)
-    return _wait_on(out.claim.id, out.claim.session_id, timeout, args.keep)
+    return _wait_on(out.claim.id, out.claim.session_id, timeout, args.keep,
+                    wake_on_extend=not args.no_wake)
 
 
 def cmd_run(args) -> int:
@@ -336,9 +366,53 @@ def cmd_quiet_check(args) -> int:
 def cmd_renew(args) -> int:
     from claude_hooks.resources import api
     session = args.session if args.session is not None else api.session_id_here()
+    if args.ttl or args.by:
+        # "renew --ttl" is what holders reach for when they mean extend.
+        args.specs, args.claim, args.all, args.force = [], [], True, False
+        return cmd_extend(args)
     n = _store().renew(session_id=session if not args.host_wide else "")
-    print(f"renewed {n} claim(s)")
+    print(f"renewed {n} claim(s) (leases only; --ttl / --by or `extend` "
+          f"moves the end)")
     return 0
+
+
+def cmd_extend(args) -> int:
+    from claude_hooks.resources import api
+    session = args.session if args.session is not None else api.session_id_here()
+    ttl, by = parse_duration(args.ttl), parse_duration(args.by)
+    if not (ttl or by):
+        print("extend: give --ttl DUR (from now) or --by DUR (on top)",
+              file=sys.stderr)
+        return 2
+    st = _store()
+    if args.claim:
+        done, refused = st.extend(args.claim, session_id=session, ttl_s=ttl,
+                                  by_s=by, force=args.force)
+    elif args.all or args.specs:
+        if not session:
+            print("extend: no session here (CLAUDE_CODE_SESSION_ID); use "
+                  "--claim ID", file=sys.stderr)
+            return 2
+        names = [model.parse_item(sp).resource for sp in args.specs]
+        done, refused = st.extend(session_id=session, resources=names,
+                                  ttl_s=ttl, by_s=by)
+    else:
+        print("extend: name resources, --claim ID or --all", file=sys.stderr)
+        return 2
+    for c, was in done:
+        if c.state == "granted":
+            print(f"EXTENDED {c.id}: {c.label()} until {_end(c.expires_at)} "
+                  f"(was {_end(was)})")
+        else:
+            print(f"EXTENDED {c.id}: {c.label()} for {c.ttl_s // 60} min once "
+                  f"granted (still queued)")
+    for c in refused:
+        print(f"REFUSED {c.id}: held by {c.owner}, not this session — "
+              f"--force to extend it", file=sys.stderr)
+    if not done and not refused:
+        print("nothing to extend (no matching claim of this session with an "
+              "end later than that)")
+    return 1 if refused else 0
 
 
 def cmd_define(args) -> int:
@@ -398,12 +472,20 @@ def build_parser() -> argparse.ArgumentParser:
                    help="keep the booking when busy (exit 3)")
     p.set_defaults(fn=cmd_acquire)
 
+    p = sub.add_parser("book", help="book into the queue now, exit 3 "
+                                    "(= acquire --queue)")
+    claim_opts(p)
+    p.set_defaults(fn=cmd_acquire, queue=True)
+
     p = sub.add_parser("wait", help="book and block until granted")
     claim_opts(p, specs_required=False)
     p.add_argument("--claim", help="wait on an existing booking")
     p.add_argument("--timeout", default="", help="give up after (e.g. 2h)")
     p.add_argument("--keep", action="store_true",
                    help="keep the booking on timeout / interrupt")
+    p.add_argument("--no-wake", action="store_true",
+                   help="keep waiting when the claim ahead is extended "
+                        "(default: exit 4 to tell the session, booking kept)")
     p.set_defaults(fn=cmd_wait)
 
     p = sub.add_parser("run", help="claim, run a command, release")
@@ -432,10 +514,30 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("host", nargs="?", default=None)
     p.set_defaults(fn=cmd_quiet_check)
 
-    p = sub.add_parser("renew", help="renew this session's leases")
+    p = sub.add_parser("renew", help="renew this session's leases "
+                                     "(with --ttl / --by: extend them)")
     p.add_argument("--host-wide", action="store_true",
                    help="every live claim of this host")
+    p.add_argument("--ttl", default="",
+                   help="also extend this session's claims to this long "
+                        "from now")
+    p.add_argument("--by", default="",
+                   help="also extend this session's claims by this much")
     p.set_defaults(fn=cmd_renew)
+
+    p = sub.add_parser("extend", help="move a claim's end in place (same "
+                                      "id and queue place)")
+    p.add_argument("specs", nargs="*", metavar="RES")
+    p.add_argument("--claim", action="append", default=[])
+    p.add_argument("--all", action="store_true",
+                   help="every claim of this session")
+    p.add_argument("--ttl", default="",
+                   help="end it this long from now (never shorter)")
+    p.add_argument("--by", default="",
+                   help="end it this much after its current end")
+    p.add_argument("--force", action="store_true",
+                   help="extend another session's claim (logged)")
+    p.set_defaults(fn=cmd_extend)
 
     p = sub.add_parser("define", help="give a resource a capacity / text")
     p.add_argument("name")

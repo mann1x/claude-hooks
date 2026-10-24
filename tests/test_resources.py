@@ -344,6 +344,105 @@ class TestStore:
         assert sorted(results) == [False] * 7 + [True]
 
 
+# ─── extend (ch-19) ─────────────────────────────────────────────────────
+
+class TestExtend:
+    """A held claim's end moves in place: same id, same grant, same place
+    in the queue. Release + acquire handed the GPU to the next FIFO waiter
+    (backup_models, 2026-10-24: ``renew`` moved only the lease)."""
+
+    def test_moves_the_end_and_keeps_the_id_and_the_queue(self, db):
+        clock = Clock()
+        st = mk(db, clock=clock)
+        a = st.request(items("bs2/gpu0"), owner("A", pid=1), ttl_s=3600)
+        # B follows a live process: a pid-less one would lapse on its lease.
+        b = st.request(items("bs2/gpu0"), owner("B", pid=2))
+        was = a.claim.expires_at
+        done, refused = st.extend([a.claim.id], session_id="A", ttl_s=7200)
+        assert not refused and [(c.id, w) for c, w in done] == [(a.claim.id, was)]
+        now = st.get(a.claim.id)
+        assert now.granted and now.claim.granted_at == a.claim.granted_at
+        assert parse_iso(now.claim.expires_at) == pytest.approx(clock.t + 7200)
+        assert st.get(b.claim.id).position == 1
+        clock.t += 3700                     # past the old end
+        assert st.get(a.claim.id).granted
+        assert not st.get(b.claim.id).granted
+        assert st.events(5)[0]["event"] == "extended"
+
+    def test_by_adds_to_the_current_end_and_nothing_shortens(self, db):
+        clock = Clock()
+        st = mk(db, clock=clock)
+        a = st.request(items("x"), owner("A", pid=1), ttl_s=3600)
+        end = parse_iso(a.claim.expires_at)
+        done, _ = st.extend(session_id="A", resources=["x"], by_s=600)
+        assert parse_iso(done[0][0].expires_at) == pytest.approx(end + 600)
+        # 10 min from now is earlier than the end: nothing changes.
+        assert st.extend(session_id="A", resources=["x"], ttl_s=600) == ([], [])
+
+    def test_a_claim_with_no_end_is_left_alone(self, db):
+        st = mk(db)
+        st.request(items("x"), owner("A", pid=1))
+        assert st.extend(session_id="A", ttl_s=60) == ([], [])
+
+    def test_a_queued_claim_keeps_the_longer_ttl_for_its_grant(self, db):
+        st = mk(db)
+        st.request(items("x"), owner("A", pid=1))
+        q = st.request(items("x"), owner("B"), ttl_s=600)
+        unlimited = st.request(items("x"), owner("C"))
+        done, _ = st.extend(session_id="B", ttl_s=3600)
+        assert [c.ttl_s for c, _ in done] == [3600]
+        assert st.get(q.claim.id).position == 1
+        assert st.extend(session_id="C", ttl_s=60) == ([], [])
+        assert st.get(unlimited.claim.id).claim.ttl_s == 0
+
+    def test_another_sessions_claim_needs_force(self, db):
+        st = mk(db)
+        a = st.request(items("x"), owner("A", pid=1), ttl_s=60)
+        done, refused = st.extend([a.claim.id], session_id="B", ttl_s=600)
+        assert not done and [c.id for c in refused] == [a.claim.id]
+        done, _ = st.extend([a.claim.id], session_id="B", ttl_s=600, force=True)
+        assert done
+
+    def test_needs_a_duration(self, db):
+        with pytest.raises(SpecError):
+            mk(db).extend(session_id="A")
+
+    def test_a_waiter_is_told_and_keeps_its_booking(self, db):
+        clock = Clock()
+        st = mk(db, clock=clock)
+        a = st.request(items("gpu0"), owner("A", pid=1), ttl_s=3600)
+        b = st.request(items("gpu0"), owner("B"))
+        seen = []
+
+        def on_extended(out, was):
+            seen.append((out.block.by.id, was, out.block.by.expires_at))
+            return True
+
+        def extend_soon():
+            time.sleep(0.6)
+            mk(db, clock=clock).extend([a.claim.id], session_id="A",
+                                       ttl_s=7200)
+        t = threading.Thread(target=extend_soon)
+        t.start()
+        out = st.wait(b.claim.id, timeout_s=10, on_extended=on_extended)
+        t.join()
+        assert seen and seen[0][0] == a.claim.id
+        assert seen[0][1] == a.claim.expires_at and seen[0][2] > seen[0][1]
+        assert out is not None and not out.granted
+        assert st.get(b.claim.id) is not None          # still booked
+
+    def test_a_blocker_getting_its_first_end_is_no_extension(self, db):
+        st = mk(db)
+        a = st.request(items("gpu0"), owner("A", pid=1))
+        b = st.request(items("gpu0"), owner("B"), ttl_s=600)   # queued
+        c = st.request(items("gpu0"), owner("C"))
+        st.release([a.claim.id], session_id="A")    # b granted: end set
+        calls = []
+        out = st.wait(c.claim.id, timeout_s=0.3,
+                      on_extended=lambda o, w: calls.append(w) or True)
+        assert out.block.by.id == b.claim.id and not calls
+
+
 # ─── CLI ────────────────────────────────────────────────────────────────
 
 def cli(*argv, env=None, timeout=60):
@@ -411,6 +510,53 @@ class TestCli:
         assert cli("check", "bs2/gpu0", env=env).returncode == 0
         assert cli("acquire", "x", "--follow-pid", "999999999",
                    env=env).returncode == 2
+
+    def test_extend_and_renew_ttl_move_the_end_in_place(self, tmp_path):
+        env = {"CLAUDE_HOOKS_RESOURCES_DB": str(tmp_path / "r.db")}
+        a = cli("--session", "A", "acquire", "bs2/gpu0", "--ttl", "1h", env=env)
+        cid = a.stdout.split()[1].rstrip(":")
+        e = cli("--session", "A", "extend", "bs2/gpu0", "--ttl", "3h", env=env)
+        assert e.returncode == 0 and f"EXTENDED {cid}" in e.stdout
+        r = cli("--session", "A", "renew", "--by", "1h", env=env)
+        assert r.returncode == 0 and f"EXTENDED {cid}" in r.stdout
+        assert cli("--session", "A", "extend", "bs2/gpu0",
+                   env=env).returncode == 2
+        assert cli("--session", "B", "extend", "--claim", cid, "--ttl", "5h",
+                   env=env).returncode == 1
+
+    def test_book_queues_and_exits_3(self, tmp_path):
+        env = {"CLAUDE_HOOKS_RESOURCES_DB": str(tmp_path / "r.db")}
+        cli("--session", "A", "acquire", "x", env=env)
+        b = cli("--session", "B", "book", "x", "-r", "next", env=env)
+        assert b.returncode == 3 and "QUEUED" in b.stdout
+        assert "wait --claim" in b.stdout
+
+    def test_a_waiter_exits_4_when_the_claim_ahead_is_extended(self, tmp_path):
+        env = {"CLAUDE_HOOKS_RESOURCES_DB": str(tmp_path / "r.db")}
+        cli("--session", "A", "acquire", "x", "--ttl", "1h", env=env)
+        e = dict(os.environ, **env, CLAUDE_HOOKS_CLIENT_PID="0")
+        w = subprocess.Popen([sys.executable, "-m", "claude_hooks.resources.cli",
+                              "--session", "B", "wait", "x", "--timeout", "30s"],
+                             cwd=REPO, env=e, stdout=subprocess.PIPE, text=True)
+        time.sleep(1.5)
+        assert cli("--session", "A", "extend", "x", "--by", "1h",
+                   env=env).returncode == 0
+        out, _ = w.communicate(timeout=30)
+        assert w.returncode == 4, out
+        assert "EXTENDED" in out and "wait --claim" in out
+        cid = out.split("QUEUED ")[1].split()[0]
+        st = cli("status", env=env)
+        assert f"id {cid}" in st.stdout              # booking kept
+        # Resumed on the kept booking, it wakes on the next extension too.
+        w = subprocess.Popen([sys.executable, "-m", "claude_hooks.resources.cli",
+                              "--session", "B", "wait", "--claim", cid,
+                              "--timeout", "30s"],
+                             cwd=REPO, env=e, stdout=subprocess.PIPE, text=True)
+        time.sleep(1.5)
+        assert cli("--session", "A", "extend", "x", "--by", "1h",
+                   env=env).returncode == 0
+        out, _ = w.communicate(timeout=30)
+        assert w.returncode == 4 and "EXTENDED" in out, out
 
     def test_bad_spec_is_usage_error(self, tmp_path):
         env = {"CLAUDE_HOOKS_RESOURCES_DB": str(tmp_path / "r.db")}
@@ -493,3 +639,27 @@ class TestPostgresLive:
         for t in ts:
             t.join(30)
         assert sorted(results) == [False] * 5 + [True]
+
+    def test_an_extension_wakes_the_waiter_fast(self, pgdsn):
+        st = ResourceStore("postgres", pgdsn, host="solidpc",
+                           alive=lambda p, s: True)
+        a = st.request(items("gpu0"), owner("A"), ttl_s=3600)
+        b = st.request(items("gpu0"), owner("B"))
+        got = {}
+
+        def waiter():
+            w = ResourceStore("postgres", pgdsn, host="solidpc",
+                              alive=lambda p, s: True)
+            t0 = time.monotonic()
+            got["out"] = w.wait(b.claim.id, timeout_s=30,
+                                on_extended=lambda o, was: True)
+            got["s"] = time.monotonic() - t0
+
+        t = threading.Thread(target=waiter)
+        t.start()
+        time.sleep(1.0)
+        st.extend([a.claim.id], session_id="A", by_s=600)
+        t.join(35)
+        assert got["out"] is not None and not got["out"].granted
+        # The NOTIFY, not the 15 s poll.
+        assert got["s"] < 5

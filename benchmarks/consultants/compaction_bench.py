@@ -102,7 +102,11 @@ function, the decisecond unit, a ×100 conversion and the ticket
 
 Arms are ``flow/placement`` pairs: ``reduced`` and ``full`` crossed with
 ``system`` and ``user`` (the §11.2 placement A/B), plus ``basic`` (the
-deterministic fold, no model call) as the floor.
+deterministic fold, no model call) as the floor. A ``/cont`` suffix
+(``full/system/cont``) runs the writer and critics as continuations of
+the lane (plan F3) instead of on the transcript pasted as text; their
+calls are still recorded as ``researcher:compaction``, so the grader's
+``visible`` control never reads them.
 
     python benchmarks/consultants/compaction_bench.py \\
         --base http://192.168.178.161:22434 \\
@@ -1028,15 +1032,20 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
               window: Optional[int] = None,
               purposes: Optional[dict[str, tuple[str, str]]] = None,
               history_dir: Optional[Path] = None) -> dict:
-    flow, placement = arm.split("/")
+    flow, placement, *extra = arm.split("/")
+    # ``/cont``: the writer and critics continue the lane (plan F3,
+    # Settings.continuation "on"); every other arm sends the transcript
+    # as text, as before.
+    continuation = "on" if "cont" in extra else "off"
     client = make_client(base, window)
     rec = Recorder()
     # A pinned window is pinned in the budget too, not only on the wire: a
     # cloud model's own window outranks the client's, and gemma4:31b-cloud
     # ran to 56k prompt tokens on a "32k" window with no compaction at all.
     knobs = budget.Knobs(num_ctx=window,
-                         compaction=compaction.Settings(flow=flow,
-                                                        placement=placement))
+                         compaction=compaction.Settings(
+                             flow=flow, placement=placement,
+                             continuation=continuation))
     budgeter = council._loop_payload_budgeter(
         client, model, role="researcher", knobs=knobs, recorder=rec,
         round=0, lane_idx=idx)

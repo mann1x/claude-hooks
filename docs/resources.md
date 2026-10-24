@@ -61,6 +61,8 @@ so: that one is never granted until the first is released.
 claude-hooks-res status                                   # who holds what, who waits
 claude-hooks-res acquire bs2/gpu0 -r "op-101 gate" --ttl 3h  # now, or exit 1 naming the holder
 claude-hooks-res wait solidpc/gpu0 -r "KLD run"           # book, block until granted
+claude-hooks-res book solidpc/gpu0 -r "KLD run"           # book and return (= acquire --queue)
+claude-hooks-res extend solidpc/gpu0 --by 1h              # push a held claim's end (or --ttl 3h)
 claude-hooks-res run solidpc/gpu0 -r ppl -- ./llama-perplexity …   # hold exactly for the command
 claude-hooks-res release solidpc/gpu0                     # or --claim ID, or --all
 ```
@@ -69,19 +71,33 @@ claude-hooks-res release solidpc/gpu0                     # or --claim ID, or --
 `run_in_background`; it exits with `GRANTED <id>` the moment the claim is
 granted, and that exit is the session's notification. It prints `QUEUED`
 with the position and the holder first. Interrupted or timed out
-(`--timeout 2h`), it cancels its booking unless `--keep`.
+(`--timeout 2h`), it cancels its booking unless `--keep`. When the claim
+it waits behind is **extended**, it exits 4 (`EXTENDED`, booking kept,
+with the `wait --claim <id>` command to resume): the end it was waiting
+for moved, and the session decides whether to keep waiting. `--no-wake`
+waits through extensions.
+
+**Extending** (`extend SPEC… | --claim ID | --all`, `--ttl D` = end at
+least D from now, `--by D` = D past the current end; `renew --ttl/--by`
+is the same) moves `expires_at` in place: the claim keeps its id and
+the queue keeps its order. It only ever lengthens, a claim with no end
+is left alone, and a queued claim gets the longer TTL for when it is
+granted. Another session's claim needs `--force`.
 
 The MCP tools do the same without a shell: `resource-acquire` (with
 `queue: true` it books and returns the `wait --claim <id>` command),
-`resource-release`, `resource-status`, `resource-check`, `resource-define`,
-`resource-events`.
+`resource-extend`, `resource-release`, `resource-status`,
+`resource-check`, `resource-define`, `resource-events`. They take the
+list keys (`resources`, `claims`) as a list, a single string, or the
+singular key (`resource`, `claim`): models sent `{"resource": "x"}` and
+`{"claims": "id"}`, and a refusal there left a session with no booking.
 
 For scripts: `claude-hooks-res check SPEC…` (exit 0 when grantable now,
 books nothing) and `claude-hooks-res quiet-check [HOST]` (exit 1 while
 another session keeps the host quiet).
 
 Exit codes: 0 granted / done, 1 busy / timed out / refused, 2 usage,
-3 queued (`acquire --queue`).
+3 queued (`book`, `acquire --queue`), 4 the blocker was extended (`wait`).
 
 ## How long a claim lives
 
@@ -99,7 +115,8 @@ Other hosts cannot see that process, so they trust a **lease**
 daemon's maintenance thread (every 5 min). A host that goes dark has its
 claims dropped when the lease lapses. `--ttl` ends a claim regardless,
 counted from its **grant**: a claim queued behind a long job keeps its
-whole TTL for the time it actually holds the resource.
+whole TTL for the time it actually holds the resource. `extend` moves it
+later.
 
 Every grant, release, expiry and holder exit is logged
 (`claude-hooks-res events`), 30 days.

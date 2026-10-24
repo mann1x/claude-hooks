@@ -17,7 +17,8 @@ from claude_hooks.resources.model import Claim, SpecError
 log = logging.getLogger("claude_hooks.resources.tools")
 
 TOOL_NAMES = ("resource-status", "resource-acquire", "resource-release",
-              "resource-check", "resource-define", "resource-events")
+              "resource-extend", "resource-check", "resource-define",
+              "resource-events")
 
 _SPECS = {"type": "array", "items": {"type": "string"},
           "description": "RES[:MODE[:UNITS]] each, e.g. solidpc/gpu0, "
@@ -61,6 +62,19 @@ def tool_catalog() -> list[dict]:
              "claims": {"type": "array", "items": {"type": "string"}},
              "resources": {"type": "array", "items": {"type": "string"}},
              "all": {"type": "boolean"}}}},
+        {"name": "resource-extend",
+         "description": (
+             "Give this session's claims more time in place: the claim keeps "
+             "its id and its place, which a release + acquire would hand to "
+             "the next waiter. ttl = end that long from now, by = that much "
+             "after its current end; never shortens. Waiters behind it are "
+             "told the new end."),
+         "inputSchema": {"type": "object", "properties": {
+             "claims": {"type": "array", "items": {"type": "string"}},
+             "resources": {"type": "array", "items": {"type": "string"}},
+             "all": {"type": "boolean"},
+             "ttl": {"type": "string", "description": "e.g. 2h"},
+             "by": {"type": "string", "description": "e.g. 1h"}}}},
         {"name": "resource-check",
          "description": "Would these resources be granted now? Books "
                         "nothing.",
@@ -82,6 +96,20 @@ def tool_catalog() -> list[dict]:
          "inputSchema": {"type": "object", "properties": {
              "limit": {"type": "integer"}}}},
     ]
+
+
+def _names(a: dict, key: str, singular: str) -> list[str]:
+    """``a[key]`` as a list, also from a bare string or the singular key:
+    ``{"resource": "solidpc/gpu0"}`` was refused four times as "a claim
+    needs at least one resource" (xollama session, 2026-10-23)."""
+    out: list[str] = []
+    for k in (key, singular):
+        v = a.get(k)
+        if isinstance(v, str):
+            out += [x for x in v.replace(",", " ").split() if x]
+        elif isinstance(v, (list, tuple)):
+            out += [str(x) for x in v if str(x).strip()]
+    return out
 
 
 def _line(c: Claim) -> str:
@@ -128,7 +156,8 @@ class ResourceTools:
             return "\n".join(lines)
         if name == "resource-acquire":
             from claude_hooks.resources.cli import parse_duration
-            items = [model.parse_item(s) for s in a.get("resources") or []]
+            items = [model.parse_item(s)
+                     for s in _names(a, "resources", "resource")]
             owner = self._owner_fn()
             out = st.request(items, owner, reason=str(a.get("reason") or ""),
                              ttl_s=parse_duration(a.get("ttl")))
@@ -142,7 +171,9 @@ class ResourceTools:
                         "release that one first." if out.self_blocked else "")
                 return (f"QUEUED {out.claim.id} at position {out.position}: "
                         f"{why}.{note}\nRun this as a background command; it "
-                        f"exits as soon as the claim is granted:\n"
+                        f"exits as soon as the claim is granted (or, booking "
+                        f"kept, with code 4 when the claim ahead is "
+                        f"extended):\n"
                         f"  claude-hooks-res wait --claim {out.claim.id}")
             st.release([out.claim.id], session_id=owner.session_id,
                        event="cancelled")
@@ -150,9 +181,9 @@ class ResourceTools:
                     f"call again with queue=true.")
         if name == "resource-release":
             owner = self._owner_fn()
-            ids = list(a.get("claims") or [])
+            ids = _names(a, "claims", "claim")
             names = [model.parse_item(s).resource
-                     for s in a.get("resources") or []]
+                     for s in _names(a, "resources", "resource")]
             if not ids and not names and not a.get("all"):
                 return "Name claims, resources, or all=true."
             if ids:
@@ -164,8 +195,30 @@ class ResourceTools:
             lines += [f"REFUSED {c.id}: held by {c.owner}, not this session"
                       for c in refused]
             return "\n".join(lines) or "Nothing of this session to release."
+        if name == "resource-extend":
+            from claude_hooks.resources.cli import parse_duration
+            ttl, by = parse_duration(a.get("ttl")), parse_duration(a.get("by"))
+            owner = self._owner_fn()
+            ids = _names(a, "claims", "claim")
+            names = [model.parse_item(s).resource
+                     for s in _names(a, "resources", "resource")]
+            if not ids and not names and not a.get("all"):
+                return "Name claims, resources, or all=true."
+            done, refused = st.extend(ids, session_id=owner.session_id,
+                                      resources=names, ttl_s=ttl, by_s=by)
+            lines = [(f"EXTENDED {c.id}: {c.label()} until "
+                      f"{c.expires_at[:19].replace('T', ' ')} UTC (was "
+                      f"{was[:19].replace('T', ' ') or 'no end'})")
+                     if c.state == "granted" else
+                     f"EXTENDED {c.id}: {c.label()} for {c.ttl_s // 60} min "
+                     f"once granted" for c, was in done]
+            lines += [f"REFUSED {c.id}: held by {c.owner}, not this session"
+                      for c in refused]
+            return "\n".join(lines) or ("Nothing to extend: no claim of this "
+                                        "session that would end later.")
         if name == "resource-check":
-            items = tuple(model.parse_item(s) for s in a.get("resources") or [])
+            items = tuple(model.parse_item(s)
+                          for s in _names(a, "resources", "resource"))
             outs, capacity, _ = st.status()
             probe = Claim(id="?", seq=1 << 62, items=items)
             b = model.why_waiting(probe, [o.claim for o in outs if o.granted],
