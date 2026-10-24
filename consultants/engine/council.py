@@ -1517,10 +1517,20 @@ def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
         # Plan C: the digest is written on this role's own client and
         # model (Scope has no other), serially, stall-protected under
         # phase=compaction, and aimed at a quarter of the free content.
+        # What the lane sends, for a continuation writer (plan F3): its
+        # tools, its num_ctx and its stated budget section.
+        wire = None
+        if knobs.announce:
+            stated = (plan.role_cap, plan.context_length,
+                      _stated_think_share(chat_client, model, think,
+                                          plan.role_cap, plan.context_length))
+            wire = lambda m: budget.with_output_budget_section(m, *stated)  # noqa: E731
         scope = compaction.Scope(
             chat_client=chat_client, model=model, role=role or "",
             recorder=recorder, round=round, lane_idx=lane_idx,
-            settings=settings)
+            settings=settings, tools=tools, wire=wire,
+            options=({"num_ctx": plan.send_num_ctx} if plan.send_num_ctx
+                     else None))
         outcome = compaction.compact(scope, messages, plan=plan, tools=tools,
                                      session=session, reason=force or "trigger",
                                      require_smaller=force == "overflow")

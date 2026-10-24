@@ -1630,7 +1630,7 @@ def cmd_config_set_sampling(args, base: str) -> int:
 _COMPACTION_ARGS = ("flow", "placement", "review", "target_share",
                     "writer_attempts", "ledger", "tool_result_max_chars",
                     "file_result_max_chars", "stale_read_share",
-                    "reasoning_replay")
+                    "reasoning_replay", "continuation")
 
 
 def cmd_config_set_compaction(args, base: str) -> int:
@@ -3439,6 +3439,10 @@ def build_parser() -> argparse.ArgumentParser:
     cco.add_argument("--reasoning-replay", dest="reasoning_replay",
                      choices=["none", "all", "inline"],
                      help="Past-turn reasoning on the wire (default none).")
+    cco.add_argument("--continuation", choices=["auto", "on", "off"],
+                     help="Writer and critics as the lane's next turn: auto "
+                          "(default) under PolyKV pooled / assured, on for "
+                          "any backend, off the transcript as text.")
     cco.add_argument("--clear", action="append", default=[], metavar="KEY")
     _add_scope_args(cco)
     cco.set_defaults(fn=cmd_config_set_compaction)

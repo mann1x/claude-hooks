@@ -87,6 +87,10 @@ class Settings:
     file_result_max_chars: int = 50_000
     stale_read_share: float = 0.4
     reasoning_replay: str = "none"
+    #: The writer and critics as the lane's next turn (plan F3): ``auto``
+    #: under PolyKV pooled / assured only, ``on`` on any backend (a
+    #: prompt-cache continuation), ``off`` the transcript as text.
+    continuation: str = "auto"
     # From runtime_control, not config: whether stall protection applies
     # (a v2 run), and the operator's overrides.
     stall: bool = False
@@ -102,7 +106,7 @@ DEFAULT_SETTINGS = Settings()
 CONFIG_KEYS = ("flow", "placement", "review", "target_share",
                "writer_attempts", "ledger", "tool_result_max_chars",
                "file_result_max_chars", "stale_read_share",
-               "reasoning_replay")
+               "reasoning_replay", "continuation")
 
 
 def settings_from(rc: Optional[dict], role: Optional[str],
@@ -154,8 +158,56 @@ class Scope:
     #: Every call made, in order: ``(step, model)``. Read by tests and
     #: the compaction report.
     calls: list = field(default_factory=list)
+    #: The lane's tool schemas, its wire options (``num_ctx``) and what it
+    #: does to its messages before sending them (the ``# Output Budget``
+    #: section): a continuation sends exactly what the lane would.
+    tools: Optional[list] = None
+    options: Optional[dict] = None
+    wire: Optional[Callable[[list], list]] = None
+    #: This compaction's continuation, when it runs as one.
+    cont: Optional["Continuation"] = None
     _fn: Any = None
     _step: str = ""
+
+
+@dataclass
+class Continuation:
+    """The writer and the critics as the lane's next turn (plan F3, fork
+    ``continuation-compaction.ts``): the lane's own messages and tools
+    with the instruction on the last of them, so the server shares the
+    stream it already holds instead of prefilling the transcript again as
+    text (:func:`with_instruction`)."""
+    messages: list
+    reason: str
+    tools: Optional[list] = None
+    options: dict = field(default_factory=dict)
+    #: The writer wrote: the critics may follow it.
+    writer_text: str = ""
+    #: The engine session the writer went to, dropped by :func:`release`.
+    session: Optional[str] = None
+    released: bool = False
+
+
+def with_instruction(messages: list, instruction: str) -> list:
+    """``messages`` with ``instruction`` on the content of the last one
+    when that is a tool result or a user turn, else as a harness turn.
+
+    Never as a new user turn after the tool loop: a Qwen-style template
+    renders every assistant turn after the last user query with its
+    ``<think></think>`` block, so a new query re-renders the whole loop
+    and the stream the lane's slot holds stops matching right after the
+    question (eleven2go render, 2026-10-24). On the last tool result the
+    lane's stream is a byte prefix of the request — the harness's own
+    ``[SYSTEM MESSAGE]`` convention for notes riding on a tool result."""
+    from claude_hooks.agent_loop.runner import HARNESS_TAG, harness_note
+    out = list(messages)
+    last = out[-1] if out else None
+    if last is not None and last.get("role") in ("tool", "user") \
+            and isinstance(last.get("content"), str):
+        out[-1] = {**last, "content": (last["content"].rstrip() + "\n\n"
+                                       + HARNESS_TAG + " " + instruction)}
+        return out
+    return out + [harness_note(instruction)]
 
 
 @dataclass
@@ -165,6 +217,7 @@ class CallResult:
     reasoning_chars: int = 0
     done_reason: str = ""
     error: str = ""
+    tool_calls: list = field(default_factory=list)
 
 
 def _is_refusal(exc: BaseException) -> bool:
@@ -214,23 +267,42 @@ def _chat_fn(scope: Scope) -> Callable[[dict], dict]:
 
 
 def call(scope: Scope, step: str, system: str, user: str, max_tokens: int,
-         *, refusal_waits: Optional[int] = OPTIONAL_REFUSAL_WAITS) -> CallResult:
+         *, refusal_waits: Optional[int] = OPTIONAL_REFUSAL_WAITS,
+         cont: Optional[Continuation] = None) -> CallResult:
     """One compaction call on the lane's own model, thinking off.
 
     Never raises: a step that fails returns ``CallResult(error=...)`` and
     the pipeline keeps what it had. ``refusal_waits`` ``None`` waits a
-    refusal out without bound (the writer)."""
+    refusal out without bound (the writer).
+
+    With ``cont`` the call continues the lane: its messages with ``system``
+    and ``user`` as the instruction on the last of them
+    (:func:`with_instruction`) — the lane's own system prompt stays in
+    place, so the role travels in the instruction (fork
+    ``continuation.write``) — with the lane's tools and options."""
     scope._step = step
-    payload = {
-        "model": scope.model,
-        "messages": [{"role": "system", "content": system},
-                     {"role": "user", "content": user}],
-        "stream": False,
-        "think": False,
-        "options": {"num_predict": max(1, int(max_tokens))},
-    }
+    if cont is None:
+        payload = {
+            "model": scope.model,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": user}],
+            "stream": False,
+            "think": False,
+            "options": {"num_predict": max(1, int(max_tokens))},
+        }
+    else:
+        payload = {
+            "model": scope.model,
+            "messages": with_instruction(cont.messages, f"{system}\n\n{user}"),
+            "stream": False,
+            "think": False,
+            "options": {**cont.options, "num_predict": max(1, int(max_tokens))},
+        }
+        if cont.tools:
+            payload["tools"] = cont.tools
     fn = _chat_fn(scope)
     waits = 0
+    answered = False
     while True:
         scope.calls.append((step, scope.model))
         t0 = time.monotonic()
@@ -248,7 +320,21 @@ def call(scope: Scope, step: str, system: str, user: str, max_tokens: int,
             return CallResult(error=f"{type(exc).__name__}: {exc}")
         ms = int((time.monotonic() - t0) * 1000)
         _record(scope, step, payload, resp, ms, None)
-        return _parse(resp)
+        r = _parse(resp)
+        if cont is not None and not r.text and r.tool_calls and not answered:
+            # The lane's tools stay on offer so its prefix still matches,
+            # and Ollama has no tool_choice "none": a call is answered as
+            # not run and the turn asked again, once, still a continuation
+            # (live: three writer attempts spent on calls, run4).
+            answered = True
+            payload = {**payload, "messages": [
+                *payload["messages"],
+                {"role": "assistant", "content": "", "tool_calls": r.tool_calls},
+                *({"role": "tool", "content": CONTINUATION_TOOLS_OFF,
+                   **({"tool_call_id": tc["id"]} if tc.get("id") else {})}
+                  for tc in r.tool_calls)]}
+            continue
+        return r
 
 
 def _parse(resp: dict) -> CallResult:
@@ -263,7 +349,8 @@ def _parse(resp: dict) -> CallResult:
     done = str((choices[0].get("finish_reason") if choices else "")
                or resp.get("done_reason") or "")
     return CallResult(text=text, completion_tokens=ct,
-                      reasoning_chars=len(thinking), done_reason=done)
+                      reasoning_chars=len(thinking), done_reason=done,
+                      tool_calls=list(msg.get("tool_calls") or []))
 
 
 def _record(scope: Scope, step: str, payload: dict, resp: Optional[dict],
@@ -482,7 +569,14 @@ KEY_SHARE = 0.1
 def build_writer_request(prompt: str, conversation: str, *,
                          previous_summary: str = "",
                          requests: Optional[list[str]] = None,
-                         ledger_key: str = "") -> str:
+                         ledger_key: str = "",
+                         in_context: str = "") -> str:
+    """The writer's request. ``in_context`` names the span when the
+    writer reads the transcript as its own conversation above (plan F3):
+    it takes the place of the ``Conversation:`` section, since pasting the
+    transcript again is the prefill a continuation exists to avoid."""
+    if in_context:
+        prompt = P.in_context(prompt)
     parts = [prompt]
     if previous_summary.strip():
         parts.append("Previous summary:\n" + previous_summary.strip())
@@ -493,12 +587,79 @@ def build_writer_request(prompt: str, conversation: str, *,
             "are what you must reproduce verbatim rather than describe:\n\n"
             + requests_block(requests))
     if ledger_key.strip():
-        parts.append("The calls you made, numbered. Each one carries its "
-                     "number in the conversation below as well. Cite these "
+        where = ("in the order they appear in the conversation above"
+                 if in_context else "in the conversation below as well")
+        parts.append(f"The calls you made, numbered. Each one carries its "
+                     f"number {where}. Cite these "
                      "as `[#N]` in your replay rather than writing them out:\n"
                      + ledger_key.strip())
-    parts.append("Conversation:\n" + (conversation or "(empty)"))
+    if in_context:
+        parts.append(in_context)
+    else:
+        parts.append("Conversation:\n" + (conversation or "(empty)"))
     return "\n\n".join(parts)
+
+
+def _opening(message: Optional[dict], limit: int = 200) -> str:
+    text = re.sub(r"\s+", " ", serialize([message] if message else [])).strip()
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def describe_span(messages: list[dict], dropped: list[dict],
+                  pinned: Optional[dict] = None) -> str:
+    """Which part of the conversation above the replay covers (fork
+    ``describeReplaySpan``): from the first folded message up to the first
+    one kept after it, which stays word for word after the replay."""
+    ids = {id(m) for m in dropped}
+    last = max((i for i, m in enumerate(messages) if id(m) in ids), default=-1)
+    after = next((m for m in messages[last + 1:]
+                  if m is not pinned), None) if last >= 0 else None
+    start = (f" from the message that begins «{_opening(dropped[0])}»"
+             if dropped else "")
+    if after is None:
+        first = (f"The replay covers the conversation above{start} to its "
+                 f"end." if start else
+                 "The replay covers everything above this message.")
+    else:
+        first = (f"The replay covers the conversation above{start} up to, "
+                 f"and not including, the message that begins "
+                 f"«{_opening(after)}». That message and everything after it "
+                 "stay in your context word for word, directly after what "
+                 "you write, so the replay ends where it begins.")
+    lines = [first]
+    if pinned is not None:
+        lines.append(f"The user's message that begins «{_opening(pinned)}» "
+                     "also stays word for word, directly after the replay.")
+    lines.append("The instructions and the question at the top of the "
+                 "conversation stay as well. Write text only: do not call "
+                 "any tool.")
+    return "\n\n".join(lines)
+
+
+def _note_session(scope: Scope, cont: Continuation) -> None:
+    last = getattr(scope.chat_client, "last_placement", None)
+    placement = last() if callable(last) else None
+    if placement and placement.get("session_id"):
+        cont.session = placement["session_id"]
+
+
+def release(scope: Scope) -> None:
+    """Give the lane's slot back once the critics are done (fork step 5,
+    "erase the slot rather than close it"): its cells hold the transcript
+    the replay is about to replace, and the layer covers the head of the
+    lane's next call. The session stays running. Idempotent; never
+    raises."""
+    cont = scope.cont
+    if cont is None or cont.released:
+        return
+    cont.released = True
+    mgr = getattr(scope.chat_client, "_placed_manager", None)
+    if mgr is None or not cont.session:
+        return
+    try:
+        mgr.erase_session(cont.session)
+    except Exception:  # noqa: BLE001 — a release never fails a fold
+        log.exception("compaction: releasing %s failed", cont.session)
 
 
 def write_replay(scope: Scope, request: str, *, system: str,
@@ -513,13 +674,18 @@ def write_replay(scope: Scope, request: str, *, system: str,
     info: dict = {"attempts": 0, "echo_cut": 0, "trimmed_blocks": 0}
     best = ""
     ask = request
+    cont = scope.cont
     for n in range(attempts):
         info["attempts"] = n + 1
         r = call(scope, f"writer#{n + 1}", system, ask, max_tokens,
-                 refusal_waits=None)
+                 refusal_waits=None, cont=cont)
+        if cont is not None:
+            _note_session(scope, cont)
         if r.error:
             info["last_failure"] = "threw"
             continue
+        if cont is not None and r.text.strip():
+            cont.writer_text = r.text.strip()
         text, cut = cut_echo(r.text)
         info["echo_cut"] += cut
         if tail:
@@ -566,6 +732,23 @@ MIN_MERGE_RATIO = 0.5
 #: The reviewer may grow the replay this much (prompted, as in the fork).
 MAX_GROWTH = 1.1
 HALF_MARKER_BAND = 0.3
+#: What a continuing critic or reviewer is told in place of the pasted
+#: transcript.
+CONTINUATION_TOOLS_OFF = ("Not run: tools are off for this turn. Write the "
+                          "text you were asked for, from what is already "
+                          "in front of you.")
+CONTINUATION_SOURCE = ("The transcript the replay was written from is the "
+                       "conversation above these instructions. Write text "
+                       "only: do not call any tool.")
+
+
+def _continuing(scope: Scope) -> Optional[Continuation]:
+    """The continuation a reviewer or critic follows: only once a writer
+    turn exists to continue from, and while the lane's slot is held."""
+    cont = scope.cont
+    if cont is None or cont.released or not cont.writer_text:
+        return None
+    return cont
 _HALF_LINE = re.compile(r"^[ \t]*<<<\s*HALFWAY\s*>>>[ \t]*$", re.M)
 
 
@@ -653,10 +836,16 @@ def review(scope: Scope, replay: str, retro: str, *, transcript: str,
     if ledger_key.strip():
         parts += ["", "---", "", "The numbered record the citations point at:",
                   "", ledger_key.strip()]
-    parts += ["", "---", "", "The transcript the replay was written from:",
-              "", transcript or "(empty)"]
+    cont = _continuing(scope)
+    if cont is not None:
+        parts[0] = P.in_context(parts[0])
+        parts += ["", "---", "", CONTINUATION_SOURCE]
+    else:
+        parts += ["", "---", "", "The transcript the replay was written from:",
+                  "", transcript or "(empty)"]
     r = call(scope, "reviewer", P.REVIEWER_SYSTEM_PROMPT, "\n".join(parts),
-             max_tokens)
+             max_tokens, cont=cont)
+    release(scope)
     if r.error or not r.text:
         return original, retro, {"reviewed": False}
     new_replay, new_retro, merged = _accept_merge(r.text, original, retro,
@@ -670,9 +859,11 @@ def council(scope: Scope, replay: str, retro: str, *, transcript: str,
     each correcting the *original*, then the synthesizer."""
     halves = split_at_marker(replay)
     if halves is None:
+        release(scope)
         return strip_half_marker(replay), retro, {"reviewers": 0, "merged": False}
     first, second, source = halves
     rewritten: dict = {}
+    cont = _continuing(scope)
     for half, own, other in (("first", first, second), ("second", second, first)):
         other_name = "second" if half == "first" else "first"
         req = [P.render(P.CRITIC_PROMPT, half=half, other_half=other_name,
@@ -685,12 +876,18 @@ def council(scope: Scope, replay: str, retro: str, *, transcript: str,
         if ledger_key.strip():
             req += ["The numbered record the citations point at:", "",
                     ledger_key.strip(), "", "---", ""]
-        req += ["The transcript both halves were written from:", "",
-                transcript or "(empty)"]
+        if cont is not None:
+            req[0] = P.in_context(req[0])
+            req += [CONTINUATION_SOURCE]
+        else:
+            req += ["The transcript both halves were written from:", "",
+                    transcript or "(empty)"]
         # The summary's own cap, as the fork's critics get: a half asked to
         # come back within 10% of its length must not be cut short by a cap.
+        # Serial, each as the lane's next turn: the second finds the stream
+        # the writer and the first shared still resident.
         r = call(scope, f"critic:{half}", P.CRITIC_SYSTEM_PROMPT, "\n".join(req),
-                 max_tokens)
+                 max_tokens, cont=cont)
         if r.error or not r.text:
             continue
         text, _ = cut_echo(r.text)
@@ -703,6 +900,9 @@ def council(scope: Scope, replay: str, retro: str, *, transcript: str,
             if emitted and emitted[2] == "marker" else text)
         if kept:
             rewritten[half] = kept
+    # The synthesizer reads the halves, not the transcript: it runs on a
+    # request of its own, after the lane's slot is given back.
+    release(scope)
     if not rewritten:
         return strip_half_marker(replay), retro, {"reviewers": 0, "merged": False,
                                                   "split": source}
@@ -765,13 +965,38 @@ def transcript_budget(context_tokens: int, *, fixed_request: str,
         - budget.WINDOW_MARGIN_TOKENS
 
 
+def _continuation(scope: Scope, conversation: list[dict], system: str,
+                  request: str, summary_max: int,
+                  context_tokens: Optional[int]
+                  ) -> tuple[Optional[Continuation], str]:
+    """The continuation the writer would run as, or ``None`` and why not:
+    only when the lane's prompt, the instruction and the summary fit the
+    window (fork: run 0432 let a 92,738-token writer through at an
+    85,106-token window by counting neither)."""
+    messages = scope.wire(conversation) if scope.wire else list(conversation)
+    if context_tokens:
+        need = (budget.estimate_messages_tokens(messages, scope.model)
+                + budget.estimate_tools_tokens(scope.tools, scope.model)
+                + token_calib.estimate_tokens(len(system) + len(request) + 2,
+                                              scope.model)
+                + int(summary_max))
+        if need > int(context_tokens):
+            return None, (f"no room in the window for the writer ({need} > "
+                          f"{int(context_tokens)}); sent as text")
+    return Continuation(messages=messages, tools=scope.tools,
+                        options=dict(scope.options or {}),
+                        reason="continuation"), "continuation"
+
+
 def write_digest(scope: Scope, dropped: list[dict], *, target_tokens: int,
                  generation: int = 1,
                  previous: Optional[retrospective.Digest] = None,
                  pinned: Optional[dict] = None,
                  tail: bool = True,
                  context_tokens: Optional[int] = None,
-                 task: Optional[dict] = None) -> retrospective.Digest:
+                 task: Optional[dict] = None,
+                 conversation: Optional[list[dict]] = None,
+                 ) -> retrospective.Digest:
     """Writer → retrospective → review, on the lane's own model.
 
     The writer writes first against 70% of the generation's combined
@@ -834,26 +1059,56 @@ def write_digest(scope: Scope, dropped: list[dict], *, target_tokens: int,
     prompt = P.REPLAY_PROMPT if tail else P.FULL_PROMPT
     if full_flow:
         prompt = P.with_halfway_section(prompt)
-    writer_budget = input_budget
-    if context_tokens:
-        fixed = build_writer_request(
-            prompt, "", previous_summary=previous.summary if previous else "",
-            requests=shown, ledger_key=key)
-        writer_budget = max(input_budget, transcript_budget(
-            context_tokens, fixed_request=fixed, summary_max=summary_max,
-            model=model))
-    view = budget_projection.project(_capped(dropped), target_tokens=writer_budget,
-                                     policy_intent="summary_input", model=model)
-    retrospective._log_projection("writer", view)
-    transcript = serialize(view.messages, numbers=tool_ledger.numbers(ledger))
-    request = build_writer_request(
-        prompt, transcript,
-        previous_summary=previous.summary if previous else "",
-        requests=shown, ledger_key=key)
-    replay, winfo = write_replay(
-        scope, request, system=P.WRITER_SYSTEM_PROMPT if tail else P.FULL_SYSTEM_PROMPT,
-        max_tokens=summary_max, model=model, tail=tail,
-        calls=len(ledger))
+    system = P.WRITER_SYSTEM_PROMPT if tail else P.FULL_SYSTEM_PROMPT
+
+    def as_text() -> tuple[str, str]:
+        writer_budget = input_budget
+        if context_tokens:
+            fixed = build_writer_request(
+                prompt, "", previous_summary=previous.summary if previous else "",
+                requests=shown, ledger_key=key)
+            writer_budget = max(input_budget, transcript_budget(
+                context_tokens, fixed_request=fixed, summary_max=summary_max,
+                model=model))
+        view = budget_projection.project(_capped(dropped),
+                                         target_tokens=writer_budget,
+                                         policy_intent="summary_input",
+                                         model=model)
+        retrospective._log_projection("writer", view)
+        text = serialize(view.messages, numbers=tool_ledger.numbers(ledger))
+        return build_writer_request(
+            prompt, text, previous_summary=previous.summary if previous else "",
+            requests=shown, ledger_key=key), text
+
+    cinfo: dict = {}
+    replay, winfo = "", {}
+    if conversation is not None:
+        # The previous summary is in the conversation the writer reads;
+        # quoting it again would pay for it twice.
+        request = build_writer_request(
+            prompt, "", requests=shown, ledger_key=key,
+            in_context=describe_span(conversation, dropped, pinned))
+        cont, why = _continuation(scope, conversation, system, request,
+                                  summary_max, context_tokens)
+        cinfo = {"continuation": why}
+        if cont is not None:
+            scope.cont = cont
+            replay, winfo = write_replay(
+                scope, request, system=system, max_tokens=summary_max,
+                model=model, tail=tail, calls=len(ledger))
+            if not replay:
+                # A continuation that wrote nothing hands the fold back to
+                # the transcript-as-text path it replaced (fork).
+                release(scope)
+                scope.cont = None
+                cinfo["continuation"] = (f"{why}; the writer wrote nothing, "
+                                         "sent as text")
+    transcript = ""
+    if scope.cont is None:
+        request, transcript = as_text()
+        replay, winfo = write_replay(
+            scope, request, system=system, max_tokens=summary_max,
+            model=model, tail=tail, calls=len(ledger))
 
     retro = ""
     spent = token_calib.estimate_tokens(len(replay), model) if replay else 0
@@ -886,6 +1141,8 @@ def write_digest(scope: Scope, dropped: list[dict], *, target_tokens: int,
             replay, retro, rinfo = review(scope, replay, retro,
                                           transcript=transcript,
                                           ledger_key=key, max_tokens=summary_max)
+    release(scope)
+    scope.cont = None
     replay = strip_half_marker(replay)
     if tail:
         replay, _ = trim_fences(replay)
@@ -954,7 +1211,7 @@ def write_digest(scope: Scope, dropped: list[dict], *, target_tokens: int,
         uncited=tool_ledger.render(uncited) if final else "",
         invalid_citations=list(spliced.invalid) if spliced else [],
         flow=s.flow if tail else "full-state",
-        info={**winfo, **rinfo, "unread_lines_cut": unread_cut})
+        info={**winfo, **rinfo, **cinfo, "unread_lines_cut": unread_cut})
 
 
 # --------------------------------------------------------------------- #
@@ -978,6 +1235,29 @@ def _lock_for(session: Optional[str]) -> threading.Lock:
         else:
             _locks.move_to_end(key)
         return lock
+
+
+def continues(scope: Scope, reason: str) -> tuple[bool, str]:
+    """Whether this compaction's writer may continue the lane, and why
+    (``Settings.continuation``). Never in overflow recovery: the lane's
+    own prompt is what the provider just refused."""
+    mode = scope.settings.continuation
+    if mode == "off":
+        return False, "off"
+    if reason == "overflow":
+        return False, "overflow recovery: the lane's prompt no longer fits"
+    if mode == "on":
+        return True, "on"
+    mgr = getattr(scope.chat_client, "_placed_manager", None)
+    if mgr is None:
+        return False, "not under PolyKV"
+    try:
+        ok = mgr.continues(getattr(scope.chat_client, "_placed_inner",
+                                   scope.chat_client), scope.model)
+    except Exception:  # noqa: BLE001 — a probe never blocks a fold
+        log.exception("compaction: PolyKV continuation probe failed")
+        return False, "PolyKV probe failed"
+    return ok, "PolyKV pooled" if ok else "PolyKV root not pooled"
 
 
 @dataclass
@@ -1032,15 +1312,24 @@ def compact(scope: Scope, messages: list[dict], *, plan: "budget.Budget",
                         "reason": reason, "before": before, "target": target,
                         "trigger": trigger, "context_length": ctx}
         digests: list = []
+        cont_ok, report["continuation"] = continues(scope, reason)
+        if cont_ok and scope.tools is None:
+            scope.tools = tools
 
         def marker_for(tail: bool):
             def make(dropped, generation, pinned=None):
                 if s.flow == "basic":
                     return None
-                digest = write_digest(scope, dropped, target_tokens=target,
-                                      context_tokens=ctx, task=task,
-                                      generation=generation, previous=previous,
-                                      pinned=pinned, tail=tail)
+                try:
+                    digest = write_digest(
+                        scope, dropped, target_tokens=target,
+                        context_tokens=ctx, task=task, generation=generation,
+                        previous=previous, pinned=pinned, tail=tail,
+                        conversation=messages if cont_ok else None)
+                finally:
+                    # Every path out gives back what a continuation held.
+                    release(scope)
+                    scope.cont = None
                 digests.append(digest)
                 if digest.empty:
                     log.warning("role=%s: compaction digest came back empty "

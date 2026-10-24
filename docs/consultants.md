@@ -1424,6 +1424,44 @@ Every stated window is capped at the engine's `session_ctx_max` (`/props`
 `opencoti.kv`): a cold model's budget sized from its trained context asked
 a 96k output of a 32k engine, a 429 that never clears.
 
+A session with a live booking keeps it: the engine ignores a different
+`num_ctx` on its later calls, so a lane whose history outgrew its first
+booking is refused as `request (N tokens, S of them shareable …) exceeds
+the available context size (W private tokens)`. The manager reads the
+engine's own count from that refusal, resizes the booking (or, where `W`
+is what was asked, widens its estimate and learns the gap for the root's
+later calls: code read into a transcript takes more cells per character
+than the prose layer the ratio comes from) and resends once.
+
+**Compaction continues the lane** (`[compaction] continuation`, `auto` by
+default = under `pooled` / `assured` only; `on` for any backend, `off`):
+the writer and the half-critics (or the reduced flow's reviewer) are sent
+as the lane's next turn — its own messages, tools and `num_ctx`, with the
+instruction on the content of its last tool result — so the engine reads
+the lane's stream from its slot instead of a transcript pasted as text.
+Never as a new user turn: a Qwen-style template renders every assistant
+turn after the last user query with its `<think></think>` block, so a new
+query re-renders the whole loop and the share stops right after the
+question (render on eleven2go). A call the model answers with a tool call
+is answered as not run and asked again once, still as a continuation
+(Ollama has no `tool_choice: "none"`, and dropping the tools would change
+the head). The retrospective and the synthesizer stay requests of their
+own; after the critics the lane's slot is given back with
+`close(keep_running)` (its cells hold the transcript the replay replaces,
+and the layer covers its next call's head). It falls back to the text path
+when the lane's prompt plus the instruction and the summary do not fit the
+window, in overflow recovery, and when the continuing writer writes
+nothing. Smoke: `benchmarks/consultants/compaction_continuation_smoke.py
+--xollama URL --model M [--files N]`. On eleven2go (32k, one live slot,
+2026-10-24) the continuing writer read 19,624 of 22,340 tokens from cache
+where the text writer read none; over a whole fold the saving depends on
+the transcript dwarfing the instruction (3 reads: 8,231 vs 12,940 tokens
+prefilled, 22 vs 56 s; 4 reads: 17,158 vs 12,362, because the synthesizer
+evicted the single slot between folds). Replay quality is not yet benched
+(one sample: the continuing writer cited no `[#N]` and stated line numbers
+it was never shown). The fork's concurrent critics on a frozen P′ need
+`continue_pool` on xOllama's `/api/chat` and are not built.
+
 **Follow-ups reuse what the run built.** A completed run whose consultancy
 is still open (not accepted) is *held* instead of released: its lane
 sessions close, its owner, pinned layers and keepalive stay, for

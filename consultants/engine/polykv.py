@@ -43,6 +43,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -128,6 +129,11 @@ class Root:
     owner_model: str = ""
     #: owners this run opened and lost (closed again at settle)
     old_owners: list = field(default_factory=list)
+    #: How far short the private estimate has been here, learned from the
+    #: engine's own count on a refusal (:meth:`KvRunManager.widen`): code
+    #: read into a transcript takes more cells per character than the
+    #: prose layer the ratio comes from.
+    private_scale: float = 1.0
 
 
 @dataclass
@@ -595,7 +601,8 @@ class KvRunManager:
         out = _int(opts.get("num_predict")) or _int(payload.get("max_tokens"))
         if not out:
             return None          # no stated output: let the engine size it
-        private = int(rest_chars * cells / max(chars, 1) * PRIVATE_MARGIN)
+        private = int(rest_chars * cells / max(chars, 1) * PRIVATE_MARGIN
+                      * root.private_scale)
         window = _align(private + PRIVATE_FLOOR + out)
         # A budget sized from a cold model's trained window asked a 96k
         # output of a 32k engine: the 429 for that never clears.
@@ -746,6 +753,89 @@ class KvRunManager:
                     self.sessions.pop(s, None)
         self.events.append({"kind": "reclaimed", "root": rk, "sessions": n})
         return n
+
+    def widen(self, placement: Optional[dict], error: BaseException,
+              payload: dict) -> bool:
+        """Restate ``placement``'s window from the engine's own count when
+        it refused the call as larger than the window it holds (``request
+        (N tokens, S of them shareable …) exceeds the available context
+        size (W private tokens)``). ``True`` when there is more room to ask
+        for (resend once).
+
+        ``W`` is the window the engine granted, not the one stated: a
+        session with a live booking continues in it and a different
+        ``num_ctx`` is ignored (opencoti integration guide), so a lane whose
+        history outgrew its first booking — or a compaction writer
+        continuing it — is refused at the old size. That booking is
+        resized. Where ``W`` is what was asked, the private estimate was
+        short, and the root's later estimates learn the gap."""
+        m = _SHORT_WINDOW.search(str(error))
+        if not placement or not m or not placement.get("num_ctx"):
+            return False
+        total, shared, granted = (int(g) for g in m.groups())
+        opts = payload.get("options") or {}
+        out = _int(opts.get("num_predict")) or _int(payload.get("max_tokens"))
+        private = max(0, total - shared)
+        need = _align(private + PRIVATE_FLOOR + out)
+        root = self.roots.get(placement.get("_layer_root") or "")
+        if root is not None and root.ctx_max:
+            need = min(need, _align_down(root.ctx_max))
+        if need <= granted:
+            return False
+        asked = int(placement["num_ctx"])
+        held = granted < asked - WINDOW_ALIGN      # a live booking, not the ask
+        if root is not None and not held:
+            room = max(1, granted - PRIVATE_FLOOR - out)
+            with self._lock:
+                root.private_scale = max(root.private_scale,
+                                         min(4.0, private / room))
+        placement["num_ctx"] = max(asked, need)
+        sid = placement.get("session_id") or ""
+        resized = None
+        if held and root is not None and root.client is not None and sid:
+            try:
+                root.client.resize_session(sid, placement["num_ctx"])
+                resized = True
+            except (OpencotiError, OSError) as e:
+                log.info("polykv: resize %s: %s", sid, e)
+                resized = False
+        self.events.append({"kind": "widened", "root": root.key if root else "",
+                            "session": sid, "granted": granted, "asked": asked,
+                            "to": placement["num_ctx"], "private": private,
+                            "resized": resized})
+        return True
+
+    def continues(self, client: Any, model: str) -> bool:
+        """Whether compaction on ``(client, model)`` runs as a continuation
+        of the lane (plan F3): only where a layer covers the head, so the
+        writer shares it and the lane's slot can be dropped afterwards."""
+        if self.mode == "off" or self.released:
+            return False
+        root = self._root(client, model)
+        if root is None:
+            return False
+        self._settle_mode(root, model)
+        return root.mode in ("pooled", "assured")
+
+    def erase_session(self, session_id: str) -> bool:
+        """Drop a lane session's cells and booking without ending it
+        (``keep_running``): after a compaction its slot holds the
+        transcript the replay replaced, and the layer covers the head its
+        next call sends. ``True`` when the engine found the session."""
+        with self._lock:
+            root = self.roots.get(self.sessions.get(session_id) or "")
+            busy = session_id in self._busy
+        if root is None or root.client is None or busy:
+            return False
+        try:
+            found = root.client.close_session(session_id,
+                                              keep_running=True).found
+        except (OpencotiError, OSError) as e:
+            log.info("polykv: erase %s: %s", session_id, e)
+            return False
+        self.events.append({"kind": "erased", "root": root.key,
+                            "session": session_id, "found": found})
+        return found
 
     def layer_lost(self, placement: Optional[dict]) -> bool:
         """Forget the layer a refused call attached; ``True`` when there
@@ -1212,6 +1302,12 @@ def _owner_full(e: BaseException) -> bool:
     return getattr(e, "status", None) == 429 and "worker of" in text
 
 
+#: The engine's refusal of a call larger than its stated private window.
+_SHORT_WINDOW = re.compile(
+    r"request \((\d+) tokens, (\d+) of them shareable[^)]*\) exceeds the "
+    r"available context size \((\d+) private tokens\)")
+
+
 def _layer_gone(e: BaseException, placement: dict) -> bool:
     """A call that attached a layer was refused for its size with no share
     counted: the engine no longer has the pool. It names the share when it
@@ -1233,6 +1329,11 @@ class PlacedChat:
         self._placed_inner = client
         self._placed_manager = manager
         self._placed_role = role
+        self._placed_local = threading.local()
+
+    def last_placement(self) -> Optional[dict]:
+        """The placement of this thread's last call (``None``: unplaced)."""
+        return getattr(self._placed_local, "last", None)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._placed_inner, name)
@@ -1245,6 +1346,7 @@ class PlacedChat:
         except Exception:  # noqa: BLE001 — placement never fails a call
             log.exception("polykv: placement failed; sending unplaced")
             placement = None
+        self._placed_local.last = placement
         if not placement:
             out = getattr(self._placed_inner, method)(payload, *args, **kwargs)
             mgr.observe(None, out, role=self._placed_role)
@@ -1269,10 +1371,16 @@ class PlacedChat:
                     # Refused for room: this run's idle lanes freed theirs,
                     # or a sibling ended while this one waited.
                     pass
+                elif mgr.widen(placement, e, payload):
+                    # The estimate fell short; the engine counted for us.
+                    sent = {**payload, wire.KEY: {
+                        k: v for k, v in placement.items()
+                        if not k.startswith("_")}}
                 elif _layer_gone(e, placement) and mgr.layer_lost(placement):
                     mgr.observe(placement, None, role=self._placed_role, error=e)
                     placement = mgr.place(self._placed_inner, payload,
                                           role=self._placed_role) or {}
+                    self._placed_local.last = placement or None
                     sent = {**payload, wire.KEY: {
                         k: v for k, v in placement.items()
                         if not k.startswith("_")}} if placement else payload

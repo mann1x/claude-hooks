@@ -985,6 +985,7 @@ COMPACTION_KEYS: dict[str, Any] = {
     "file_result_max_chars": lambda v: _budget_int(v, 1_000),
     "stale_read_share": lambda v: _budget_share(v, 0.0, 1.0, lo_open=False),
     "reasoning_replay": _choice("none", "all", "inline"),
+    "continuation": _choice("auto", "on", "off"),
 }
 
 #: Keys a ``[role.X.models."<model>"]`` table takes.

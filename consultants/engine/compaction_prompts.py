@@ -352,3 +352,22 @@ __all__ = [
     "SYNTHESIZER_PROMPT", "RETROSPECTIVE_REVISION", "REVIEWER_PROMPT",
     "describe_overrun", "render", "with_halfway_section",
 ]
+
+
+#: Where a prompt says the transcript is pasted after it, and what it says
+#: when the transcript is the conversation above (compaction as a
+#: continuation, plan F3; fork ``buildSummaryRequest``
+#: ``conversationInContext``).
+_IN_CONTEXT = (
+    ("Do not continue the transcript that follows these instructions",
+     "Do not continue the conversation above these instructions"),
+    ("from the transcript that follows it", "from the conversation above"),
+)
+
+
+def in_context(prompt: str) -> str:
+    """``prompt`` for a writer or critic that reads the transcript as its
+    own conversation above the request rather than pasted after it."""
+    for old, new in _IN_CONTEXT:
+        prompt = prompt.replace(old, new)
+    return prompt

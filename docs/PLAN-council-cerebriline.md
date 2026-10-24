@@ -594,8 +594,20 @@ window is capped at `session_ctx_max` (a cold model's 96k budget on a 32k
 engine). **Capacity before Sends:** done per call rather than per Send —
 `make_room()` reads `/kv` and queues a call behind its siblings, and a full
 owner is a queue — because lanes' tool loops interleave, and gating whole
-lanes would hold a slot through each lane's tool time. Still open: the
-compaction continuation path, a live council (needs the deploy).
+lanes would hold a slot through each lane's tool time. **Compaction
+continuation built 2026-10-24** (`[compaction] continuation`, `auto` =
+under pooled / assured): writer and half-critics as the lane's next turn,
+the instruction on its last tool result (a new user turn re-renders a
+Qwen-style loop), a tool call answered as not run, the slot given back
+after the critics; live on eleven2go the writer read 19,624 of 22,340
+tokens from cache. Found with it: a live booking ignores a restated
+`num_ctx`, so a short window is now resized from the engine's own count
+(`KvRunManager.widen()`). Deviation: the half-critics run serially on the
+lane's stream, not concurrently on a frozen P′ — that needs
+`continue_pool` on xOllama `/api/chat` (xollama
+`plans/council-continue-pool.md`, waiting on an engine publish). Still
+open: the replay-quality bench (continuation on vs off), a live council
+(needs the deploy).
 
 - Held beside the chat clients through `GraphDeps`, never in council state.
 - Sessions are `<sid>~<role>~lane<k>`; `/` and other route-breaking characters are replaced with `~` (fork gotcha).
