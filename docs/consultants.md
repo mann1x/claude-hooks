@@ -1466,8 +1466,14 @@ is what was asked, widens its estimate and learns the gap for the root's
 later calls: code read into a transcript takes more cells per character
 than the prose layer the ratio comes from) and resends once.
 
-**Compaction continues the lane** (`[compaction] continuation`, `auto` by
-default = under `pooled` / `assured` only; `on` for any backend, `off`):
+**Compaction can continue the lane** (`[compaction] continuation`: `off`
+by default, `auto` = under `pooled` / `assured` only, `on` for any
+backend). Off by default since compaction-v7-cont2 (2026-10-24, qwen3.6
+27B 128k, one trial per arm): the continuing writer's replays were ~30%
+shorter, the lane re-read 7 modules instead of 113 because it trusted
+them, and of the module rows only the fold could supply it got 26% right
+(28/108) against 97% (36/37) as text — the answer's table 71/151 against
+150/151, both fixed. When on:
 the writer and the half-critics (or the reduced flow's reviewer) are sent
 as the lane's next turn — its own messages, tools and `num_ctx`, with the
 instruction on the content of its last tool result — so the engine reads

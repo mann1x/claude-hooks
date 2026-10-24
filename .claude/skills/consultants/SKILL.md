@@ -1361,7 +1361,7 @@ blocks from `config show`. Only set keys appear; the shipped defaults
 are `flow` `full`, `placement` `system`, `review` on, `target_share`
 0.25, `writer_attempts` 3, `ledger` on, `tool_result_max_chars` 32000,
 `file_result_max_chars` 50000, `stale_read_share` 0.4,
-`reasoning_replay` `none`, `continuation` `auto`. Every compaction step runs on the role's own
+`reasoning_replay` `none`, `continuation` `off`. Every compaction step runs on the role's own
 model, one call after another; nothing here changes that. Ask the scope
 first (all roles, one role, one role on one model), then:
 
@@ -1383,9 +1383,11 @@ first (all roles, one role, one role on one model), then:
 - **Past reasoning on the wire** — `--reasoning-replay none|all|inline`.
 - **Continuation** — `--continuation auto|on|off`: the writer and the
   half-critics run as the lane's next turn, sharing the prefix the server
-  already holds instead of reading the transcript again as text. `auto`
-  (default) only under PolyKV pooled / assured; `on` on any backend;
-  `off` always as text.
+  already holds instead of reading the transcript again as text. `off`
+  (default) always as text; `auto` only under PolyKV pooled / assured;
+  `on` on any backend. Off since the 2026-10-24 bench: the continuing
+  writer kept 26% of what the lane had read against 97% as text, and the
+  answer lost about half its rows — say so before turning it on.
 - **Reset** — `--clear <key>` (repeatable).
 
 The trigger itself is a budget knob: `set-budget --trigger-ratio <r>`

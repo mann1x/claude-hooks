@@ -589,3 +589,10 @@ class TestToolCallInAContinuation:
         # Two sends per attempt, then the text path takes the fold.
         assert len(writers) == 2 * compaction.DEFAULT_SETTINGS.writer_attempts
         assert "sent as text" in out.report["digest"]["continuation"]
+
+
+def test_continuation_is_off_by_default():
+    # compaction-v7-cont2 (2026-10-24): continuing kept 26% of the carried
+    # rows against 97% as text; the owner turned it off by default.
+    from consultants.engine import compaction
+    assert compaction.Settings().continuation == "off"

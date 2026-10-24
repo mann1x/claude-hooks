@@ -89,8 +89,11 @@ class Settings:
     reasoning_replay: str = "none"
     #: The writer and critics as the lane's next turn (plan F3): ``auto``
     #: under PolyKV pooled / assured only, ``on`` on any backend (a
-    #: prompt-cache continuation), ``off`` the transcript as text.
-    continuation: str = "auto"
+    #: prompt-cache continuation), ``off`` the transcript as text. Off by
+    #: default (owner, 2026-10-24): on compaction-v7-cont2 the continuing
+    #: writer kept 26% of the module rows the lane had read (28/108) where
+    #: the text path kept 97% (36/37), and the answer lost 80 of 151 rows.
+    continuation: str = "off"
     # From runtime_control, not config: whether stall protection applies
     # (a v2 run), and the operator's overrides.
     stall: bool = False

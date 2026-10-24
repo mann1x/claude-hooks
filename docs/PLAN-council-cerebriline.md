@@ -595,7 +595,9 @@ engine). **Capacity before Sends:** done per call rather than per Send —
 `make_room()` reads `/kv` and queues a call behind its siblings, and a full
 owner is a queue — because lanes' tool loops interleave, and gating whole
 lanes would hold a slot through each lane's tool time. **Compaction
-continuation built 2026-10-24** (`[compaction] continuation`, `auto` =
+continuation built 2026-10-24, off by default after its bench**
+(compaction-v7-cont2: table 71/151 against 150/151 as text, carried rows
+26% against 97%) (`[compaction] continuation`, `auto` =
 under pooled / assured): writer and half-critics as the lane's next turn,
 the instruction on its last tool result (a new user turn re-renders a
 Qwen-style loop), a tool call answered as not run, the slot given back

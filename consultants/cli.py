@@ -3447,8 +3447,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Past-turn reasoning on the wire (default none).")
     cco.add_argument("--continuation", choices=["auto", "on", "off"],
                      help="Writer and critics as the lane's next turn: auto "
-                          "(default) under PolyKV pooled / assured, on for "
-                          "any backend, off the transcript as text.")
+                          "under PolyKV pooled / assured, on for any "
+                          "backend, off (default) the transcript as text.")
     cco.add_argument("--clear", action="append", default=[], metavar="KEY")
     _add_scope_args(cco)
     cco.set_defaults(fn=cmd_config_set_compaction)
