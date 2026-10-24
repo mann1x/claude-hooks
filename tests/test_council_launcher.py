@@ -217,6 +217,20 @@ class TestInstall:
                        builder=lambda a: pytest.fail("built in a dry run")) == "current"
         assert not dst.exists()
 
+    def test_an_existing_directory_keeps_its_mode(self, tmp_path, host_x86):
+        """Only a directory the install makes gets 0755 (2026-10-24: the
+        toolchain mirror's same pattern reset /tmp from 1777)."""
+        good, pin, dst = self._setup(tmp_path)
+        dst.parent.mkdir()
+        os.chmod(dst.parent, 0o750)
+        assert install(path=dst, pin=pin, note=lambda m: None,
+                       builder=lambda a: good) == "installed"
+        assert (os.stat(dst.parent).st_mode & 0o7777) == 0o750
+        made = tmp_path / "new" / "deep" / launcher.NAME
+        assert install(path=made, pin=pin, note=lambda m: None,
+                       builder=lambda a: good) == "installed"
+        assert (os.stat(made.parent).st_mode & 0o7777) == 0o755
+
     def test_a_stale_copy_is_replaced(self, tmp_path, host_x86):
         good, pin, dst = self._setup(tmp_path)
         dst.parent.mkdir()

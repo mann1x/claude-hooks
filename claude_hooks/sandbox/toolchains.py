@@ -126,6 +126,26 @@ def _tree_bytes(path: str, limit: int) -> int:
     return total
 
 
+def _make_reachable(root: Path) -> None:
+    """Create ``root`` so the jail's uid can reach it: only the directories
+    made here are set to 0755. An existing directory is never changed — the
+    walk that set every ancestor to 0755 reset /tmp itself (sticky 1777 →
+    0755) whenever the root was under it, breaking every non-root service
+    on the host. An existing ancestor others cannot traverse is refused."""
+    missing = []
+    for d in (root, *root.parents):
+        if d.exists():
+            break
+        missing.append(d)
+    root.mkdir(parents=True, exist_ok=True)
+    for d in reversed(missing):
+        os.chmod(d, 0o755)
+    for d in (root, *root.parents):
+        if not d.stat().st_mode & stat.S_IXOTH:
+            raise OSError(f"{d} is not traversable by other users, so the "
+                          f"sandbox cannot reach the mirror under it")
+
+
 def _mirror(src: str, tool: str) -> str:
     """``src`` copied once under :func:`mirror_root`; returns the copy."""
     st = os.stat(src)
@@ -137,11 +157,7 @@ def _mirror(src: str, tool: str) -> str:
     if _tree_bytes(src, MIRROR_MAX_BYTES) > MIRROR_MAX_BYTES:
         raise OSError(f"{src} is over {MIRROR_MAX_BYTES >> 30} GiB")
     root = mirror_root()
-    root.mkdir(parents=True, exist_ok=True)
-    for d in (root, *root.parents):
-        if str(d) in ("/", "/var", "/var/cache"):
-            break
-        os.chmod(d, 0o755)
+    _make_reachable(root)
     tmp = root / f".{dst.name}.tmp{os.getpid()}"
     shutil.rmtree(tmp, ignore_errors=True)
     r = subprocess.run(["cp", "-a", "--reflink=auto", "--no-target-directory",

@@ -227,8 +227,12 @@ def _download(url: str, dst: Path, timeout: float = 60) -> None:
 
 def _place(src: Path, path: Path, want: str) -> None:
     """Copy ``src`` to ``path`` atomically, checking the hash on the copy."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o755)
+    # Only a directory made here gets its mode set: an existing one (an
+    # override such as /usr/local/bin, or anything under /tmp) is never
+    # changed; verify() refuses one others can write to.
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True)
+        os.chmod(path.parent, 0o755)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{NAME}.")
     try:
         with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
