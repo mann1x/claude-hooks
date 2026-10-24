@@ -502,6 +502,10 @@ def _isolated_inflight_index(tmp_path, monkeypatch):
     # every in-flight registration.
     monkeypatch.setenv("CONSULTANTS_COUNCIL_INDEX",
                        str(tmp_path / "consultants-councils.db"))
+    # PolyKV holds (plan F3): the engine's startup sweep releases what
+    # this file names on the real engines.
+    monkeypatch.setenv("CONSULTANTS_POLYKV_HELD",
+                       str(tmp_path / "consultants-polykv-held.json"))
     # An app's startup backfill runs in a thread that outlives the test,
     # past this fixture's teardown: on 2026-10-18 one wrote 60 finished
     # councils back to "running" in the real index.

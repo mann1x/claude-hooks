@@ -580,10 +580,22 @@ between lanes), a private `num_ctx` per attach (without it the whole
 prompt was charged again), idle sessions reclaimed and siblings waited
 for before a call with no room (a finished lane kept 10,496 cells
 booked), and never-attached layers released at settle (never swept).
-Still open: `assured` (owner booking, worker 429 grow, 60 s keepalive),
-a capacity gate before Sends (lanes queue only inside the manager now),
-the compaction continuation path, follow-up adoption and the hold until
-accept, a live council.
+**`assured` built 2026-10-24:** a per-root owner opened by a 1-token
+booking (layer + 4 lanes, floor layer + 1, capped by `/kv`), the layer
+owned by it, lanes as workers with no window, a full owner grown or waited
+on, a 60 s idle keepalive, owners closed last at settle. Live: owner
+32,768 cells, 3/3 workers shared. **Follow-up adoption + hold until accept
+built 2026-10-24:** a completed run of an open consultancy is held
+(`HOLD_S` 15 min; lanes closed, owner and pinned layers kept), a follow-up
+adopts it, accept or the deadline releases it, and an engine start
+releases holds a dead process left (`~/.claude/consultants-polykv-held.json`).
+Live, both modes: adopted, no new layer, 6/6 calls shared. Every stated
+window is capped at `session_ctx_max` (a cold model's 96k budget on a 32k
+engine). **Capacity before Sends:** done per call rather than per Send —
+`make_room()` reads `/kv` and queues a call behind its siblings, and a full
+owner is a queue — because lanes' tool loops interleave, and gating whole
+lanes would hold a slot through each lane's tool time. Still open: the
+compaction continuation path, a live council (needs the deploy).
 
 - Held beside the chat clients through `GraphDeps`, never in council state.
 - Sessions are `<sid>~<role>~lane<k>`; `/` and other route-breaking characters are replaced with `~` (fork gotcha).

@@ -42,8 +42,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -74,6 +76,16 @@ WINDOW_ALIGN = 256
 #: call with no chunk as stalled), and how often it looks again.
 WAIT_FOR_ROOM_S = 240.0
 ROOM_POLL_S = 5.0
+#: assured: the owner is sized for this many lanes at once next to the
+#: layer (it grows when full), estimated at this many characters per cell
+#: before the layer exists (an over-estimate: rendered prompts run 3.6),
+#: refreshed every :data:`OWNER_KEEPALIVE_S` while idle (the engine's idle
+#: TTL is 300 s), and grown by at least this share of its window.
+OWNER_LANES = 4
+OWNER_CHARS_PER_CELL = 3.0
+OWNER_KEEPALIVE_S = 60.0
+OWNER_GROW_SHARE = 0.5
+DEFAULT_OUTPUT = 4096
 SENTINEL = "⁣POLYKV_SENTINEL⁣"
 #: xOllama seats a plain model needs before its client pools are used.
 MIN_CLIENT_POOLS = 2
@@ -105,6 +117,17 @@ class Root:
     #: pool id -> (cells, chars) of a layer this run made, for the private
     #: window of the calls that attach it
     sizes: dict = field(default_factory=dict)
+    #: the engine's per-session ceiling (``/props`` ``opencoti.kv``); a
+    #: stated window above it is clamped, never sent
+    ctx_max: int = 0
+    #: assured: the run's owner session on this root, its granted window,
+    #: and the client + model that opened it (for the keepalive)
+    owner: Optional[str] = None
+    owner_window: int = 0
+    owner_client: Any = None
+    owner_model: str = ""
+    #: owners this run opened and lost (closed again at settle)
+    old_owners: list = field(default_factory=list)
 
 
 @dataclass
@@ -167,6 +190,14 @@ def default_root_for(client: Any, model: str) -> Optional[Root]:
     return None
 
 
+def _align(n: int) -> int:
+    return -(-int(n) // WINDOW_ALIGN) * WINDOW_ALIGN
+
+
+def _align_down(n: int) -> int:
+    return int(n) // WINDOW_ALIGN * WINDOW_ALIGN
+
+
 def _int(value: Any) -> int:
     try:
         return int(value or 0)
@@ -208,6 +239,9 @@ class KvRunManager:
         self._pending: dict[str, dict] = {}
         #: (root key, pool id) of every layer this run created
         self.created: list[tuple[str, str]] = []
+        self._keepalive: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._last_activity = clock()
 
     # ---------------------------------------------------------- probing
     def _root(self, client: Any, model: str) -> Optional[Root]:
@@ -247,9 +281,12 @@ class KvRunManager:
             root.mode = "affinity" if root.kind == "xollama" else "off"
             root.reason = f"engine not readable yet: {e}"
             return
+        root.reason = ""                 # the engine answered: a fresh verdict
         feats = set(str(f) for f in (props.get("features") or []))
         pools_on = bool(((props.get("opencoti") or {}).get("polykv") or {})
                         .get("pools_enabled"))
+        root.ctx_max = _int(((props.get("opencoti") or {}).get("kv") or {})
+                            .get("session_ctx_max")) or root.ctx_max
         if root.kind == "xollama":
             show = self._show(root.client.transport.base,
                               root.client.transport.model) or {}
@@ -262,10 +299,15 @@ class KvRunManager:
                 pools_on = False
                 root.reason = "no xOllama client-pool seats for this model"
         wanted = self.mode
-        if wanted == "assured":
-            wanted = "pooled"
         can_pool = pools_on and "polykv_shared_root_v1" in feats
-        if wanted in ("pooled", "auto"):
+        if wanted == "assured":
+            # An owner window needs pools that live inside it.
+            if pools_on and "polykv_subpools_v1" in feats:
+                root.mode = "assured"
+            else:
+                root.mode = "pooled" if can_pool else "affinity"
+                root.reason = root.reason or "the engine has no owned pools"
+        elif wanted in ("pooled", "auto"):
             root.mode = "pooled" if can_pool else "affinity"
             if not can_pool and not root.reason:
                 root.reason = "the engine has no shared pools"
@@ -287,6 +329,8 @@ class KvRunManager:
         root.generation += 1
         root.pools.clear()
         root.rebuilds.clear()
+        root.sizes.clear()
+        root.owner, root.owner_window = None, 0       # gone with the engine
         root.boot_id = boot
         self.events.append({"kind": "restart", "root": root.key,
                             "generation": root.generation})
@@ -328,7 +372,7 @@ class KvRunManager:
         return cc._ollama_messages(list(messages))
 
     def _layer(self, root: Root, client: Any, model: str, messages: list,
-               tools: Optional[list]) -> Optional[str]:
+               tools: Optional[list], payload: Optional[dict] = None) -> Optional[str]:
         wire_msgs = self._wire_messages(client, model, messages)
         head = []
         for m in wire_msgs:
@@ -369,8 +413,16 @@ class KvRunManager:
                 # unpinned, unreferenced pool during any pause (live: the
                 # layer went between two lanes and the next attach was
                 # charged in full). Unpinned or released at settle.
-                made = root.client.create_pool(prompt=cut, shared=True,
-                                               ephemeral=True, pin=True)
+                owner = (self._ensure_owner(root, client, model, cut, full,
+                                            payload or {})
+                         if root.mode == "assured" else None)
+                if owner:
+                    # Inside the owner's window; closing it releases it.
+                    made = root.client.create_pool(prompt=cut, session_id=owner,
+                                                   pin=True)
+                else:
+                    made = root.client.create_pool(prompt=cut, shared=True,
+                                                   ephemeral=True, pin=True)
             except (OpencotiError, OSError, ValueError) as e:
                 # Share less, never fail: the call goes unpooled.
                 self._give_up(root, key, f"layer refused: {e}",
@@ -389,8 +441,132 @@ class KvRunManager:
                     root.sizes[pid] = (cells, len(cut))
             self.events.append({"kind": "layer", "root": root.key, "key": key,
                                 "pool_id": pid, "chars": len(cut),
+                                "owner": owner,
                                 "reused": bool((made or {}).get("reused"))})
             return pid
+
+    # ------------------------------------------------------------ owner
+    def _ensure_owner(self, root: Root, client: Any, model: str, cut: str,
+                      full: str, payload: dict) -> Optional[str]:
+        """The run's owner session on ``root`` (assured), opened on first
+        use: a 1-token request that books ``num_ctx`` for the layer plus
+        :data:`OWNER_LANES` lanes, ``num_ctx_min`` for the layer plus one,
+        both capped by what ``/kv`` says is admissible now. ``None`` when
+        not even one lane fits (the root then pools as ``pooled``)."""
+        with self._lock:
+            if root.owner:
+                return root.owner
+        out = (_int((payload.get("options") or {}).get("num_predict"))
+               or _int(payload.get("max_tokens")) or DEFAULT_OUTPUT)
+        layer = int(len(cut) / OWNER_CHARS_PER_CELL)
+        if root.ctx_max:
+            out = min(out, root.ctx_max // 2)
+        lane = int((len(full) - len(cut)) / OWNER_CHARS_PER_CELL
+                   * PRIVATE_MARGIN) + PRIVATE_FLOOR + out
+        try:
+            kv = root.client.kv(live=True) or {}
+        except (OpencotiError, OSError) as e:
+            log.info("polykv: %s owner sizing: %s", root.key, e)
+            kv = {}
+        # 0 admissible is no room, not an unknown: only a missing field is.
+        cap = min(_int(x) for x in (kv.get("session_ctx_max"),
+                                    kv.get("largest_admissible"),
+                                    layer + OWNER_LANES * lane) if x is not None)
+        floor = _align(layer + lane)
+        window = _align_down(cap)
+        if window < floor:
+            self.events.append({"kind": "owner_refused", "root": root.key,
+                                "needs": floor, "admissible": cap})
+            return None
+        sid = wire_id(f"{self.run_id}~owner~{root.generation}"
+                      f"{'~' + str(len(root.old_owners)) if root.old_owners else ''}")
+        body = {"model": model, "messages": [{"role": "user", "content": "ready"}],
+                "stream": False, "think": False, "options": {"num_predict": 1},
+                wire.KEY: {"session_id": sid, "num_ctx": window,
+                           "num_ctx_min": floor}}
+        try:
+            reply = client.chat(body)
+        except Exception as e:  # noqa: BLE001 — no owner: share less
+            self.events.append({"kind": "owner_refused", "root": root.key,
+                                "needs": floor, "why": str(e)[:200]})
+            return None
+        granted = _int(((reply or {}).get("timings") or {}).get("polykv", {})
+                       .get("context_window")) or window
+        with self._lock:
+            root.owner, root.owner_window = sid, granted
+            root.owner_client, root.owner_model = client, model
+        self.events.append({"kind": "owner", "root": root.key, "session_id": sid,
+                            "window": granted, "asked": window, "floor": floor})
+        self._start_keepalive()
+        return sid
+
+    def grow_owner(self, placement: Optional[dict]) -> bool:
+        """A worker was refused as its owner is full: grow the owner when
+        the engine has room, else wait for a sibling lane to end. ``True``
+        when either happened (send again)."""
+        root = self.roots.get((placement or {}).get("_layer_root") or "")
+        if root is None or not root.owner or root.client is None:
+            return False
+        sid = (placement or {}).get("session_id") or ""
+        try:
+            kv = root.client.kv(live=True) or {}
+            room = _int(kv.get("largest_admissible"))
+            ceiling = _int(kv.get("session_ctx_max")) or root.owner_window * 2
+            step = max(int(root.owner_window * OWNER_GROW_SHARE), WINDOW_ALIGN)
+            new = _align_down(min(ceiling, root.owner_window + min(step, room)))
+            if room >= WINDOW_ALIGN and new > root.owner_window:
+                root.client.resize_session(root.owner, new)
+                self.events.append({"kind": "owner_grown", "root": root.key,
+                                    "from": root.owner_window, "to": new})
+                root.owner_window = new
+                return True
+        except (OpencotiError, OSError) as e:
+            log.info("polykv: %s owner grow: %s", root.key, e)
+        deadline = self._clock() + WAIT_FOR_ROOM_S
+        with self._lock:
+            others = [s for s in self._busy if s != sid
+                      and self.sessions.get(s) == root.key]
+            if not others:
+                return False
+            before = set(others)
+            while self._clock() < deadline:
+                self._freed.wait(timeout=min(deadline - self._clock(), ROOM_POLL_S))
+                if not before <= self._busy:
+                    self.events.append({"kind": "owner_waited", "root": root.key})
+                    return True
+        return False
+
+    def _start_keepalive(self) -> None:
+        with self._lock:
+            if self._keepalive is not None:
+                return
+            self._keepalive = threading.Thread(target=self._keepalive_loop,
+                                               name=f"polykv-keepalive-{self.run_id}",
+                                               daemon=True)
+        self._keepalive.start()
+
+    def _keepalive_loop(self) -> None:
+        """Every :data:`OWNER_KEEPALIVE_S`, touch each owner nobody has
+        used since: a continuation of its 1-token opener, which books
+        nothing and keeps the allocation from its idle TTL."""
+        while not self._stop.wait(OWNER_KEEPALIVE_S):
+            if self.released:
+                return
+            if self._busy or self._clock() - self._last_activity < OWNER_KEEPALIVE_S:
+                continue
+            for root in list(self.roots.values()):
+                if not root.owner or root.owner_client is None:
+                    continue
+                try:
+                    root.owner_client.chat({
+                        "model": root.owner_model, "stream": False, "think": False,
+                        "messages": [{"role": "user", "content": "ready"}],
+                        "options": {"num_predict": 1},
+                        wire.KEY: {"session_id": root.owner}})
+                    self.events.append({"kind": "owner_keepalive", "root": root.key})
+                except Exception as e:  # noqa: BLE001 — the next call reopens it
+                    log.info("polykv: %s keepalive: %s", root.key, e)
+            self._last_activity = self._clock()
 
     def _private_window(self, root: Root, pid: str, client: Any,
                         payload: dict) -> Optional[int]:
@@ -420,8 +596,10 @@ class KvRunManager:
         if not out:
             return None          # no stated output: let the engine size it
         private = int(rest_chars * cells / max(chars, 1) * PRIVATE_MARGIN)
-        need = private + PRIVATE_FLOOR + out
-        return -(-need // WINDOW_ALIGN) * WINDOW_ALIGN
+        window = _align(private + PRIVATE_FLOOR + out)
+        # A budget sized from a cold model's trained window asked a 96k
+        # output of a 32k engine: the 429 for that never clears.
+        return min(window, _align_down(root.ctx_max)) if root.ctx_max else window
 
     def _give_up(self, root: Root, key: str, why: str, *, retry: bool = False) -> None:
         log.warning("polykv: %s layer %s: %s", root.key, key, why)
@@ -446,13 +624,17 @@ class KvRunManager:
         messages = list(payload.get("messages") or [])
         placement: dict = {"session_id": self.session_for(role, model, messages,
                                                            root.key)}
-        if root.mode == "pooled":
+        self._last_activity = self._clock()
+        if root.mode in ("pooled", "assured"):
             pid = self._layer(root, client, model, messages,
-                              payload.get("tools") or None)
+                              payload.get("tools") or None, payload)
             if pid is not None:
                 placement["pool_id"] = pid
                 placement["_layer_root"] = root.key
-                window = self._private_window(root, pid, client, payload)
+                # A worker of an owned layer states no window: it is
+                # charged its private part against the owner's.
+                window = (None if root.owner and root.mode == "assured"
+                          else self._private_window(root, pid, client, payload))
                 if window:
                     placement["num_ctx"] = window
         if root.kind == "direct" and "stream_keepalive_v1" in root.features:
@@ -463,6 +645,7 @@ class KvRunManager:
     def observe(self, placement: Optional[dict], out: Optional[dict], *,
                 role: str, error: Optional[BaseException] = None) -> None:
         """Read what the engine said about a placed call."""
+        self._last_activity = self._clock()
         st = self.stats.setdefault(role, RoleStats())
         st.calls += 1
         if not placement:
@@ -555,6 +738,12 @@ class KvRunManager:
                 n += int(root.client.close_session(s).found)
             except (OpencotiError, OSError) as e:
                 log.info("polykv: reclaim %s: %s", s, e)
+                continue
+            with self._lock:
+                # Closed: forgotten, so it is never "reclaimed" again (live:
+                # a make_room loop re-closed the same sessions 150 times).
+                if s not in self._busy:
+                    self.sessions.pop(s, None)
         self.events.append({"kind": "reclaimed", "root": rk, "sessions": n})
         return n
 
@@ -566,6 +755,12 @@ class KvRunManager:
         if pid is None or root is None:
             return False
         self._drop_pool(root, str(pid), "the engine no longer has the layer")
+        with self._lock:
+            # An owned layer goes with its owner (idle TTL, a close): open
+            # a new one with the next layer.
+            if root.mode == "assured" and root.owner:
+                root.old_owners.append(root.owner)
+                root.owner, root.owner_window = None, 0
         return True
 
     def _drop_pool(self, root: Root, pid: str, why: str) -> None:
@@ -603,6 +798,20 @@ class KvRunManager:
                 report["found"] += int(r.found)
             except (OpencotiError, OSError) as e:
                 report["close_errors"].append(f"{sid}: {e}")
+        # Owners last: closing one releases every pool it owns.
+        self._stop.set()
+        report["owners_closed"] = []
+        for root in self.roots.values():
+            if root.client is None:
+                continue
+            for owner in [*root.old_owners, root.owner]:
+                if not owner:
+                    continue
+                try:
+                    if root.client.close_session(owner).found:
+                        report["owners_closed"].append(owner)
+                except (OpencotiError, OSError) as e:
+                    report["close_errors"].append(f"{owner}: {e}")
         # A layer nobody attached is never swept (the engine sweeps an
         # ephemeral pool only once it has been attached): release it here.
         # One that was attached is unpinned and left to the sweep — another
@@ -623,7 +832,7 @@ class KvRunManager:
                 root.client.release_pool(pid)
                 report["released_pools"].append(pid)
             except (OpencotiError, OSError) as e:
-                if getattr(e, "status", None) != 404:
+                if getattr(e, "status", None) not in (400, 404):   # gone
                     report["close_errors"].append(f"pool {pid}: {e}")
         for root in self.roots.values():
             if root.client is None or root.mode == "off":
@@ -668,6 +877,29 @@ class KvRunManager:
             .startswith(self.run_id + "~")
         return owned or bool(p.get("pinned")) or not p.get("attached_ever")
 
+    def hold(self) -> dict:
+        """End a run whose consultancy is still open without letting go of
+        what a follow-up reuses: close every lane session (a worker's slot
+        and, outside assured, its booked window), keep the owners, the
+        pinned layers and the keepalive."""
+        with self._lock:
+            sessions = dict(self.sessions)
+            self.sessions.clear()
+            self._busy.clear()
+        closed = 0
+        for sid, rk in sessions.items():
+            root = self.roots.get(rk)
+            if root is None or root.client is None:
+                continue
+            try:
+                closed += int(root.client.close_session(sid).found)
+            except (OpencotiError, OSError) as e:
+                log.info("polykv: hold close %s: %s", sid, e)
+        held = {k: {"owner": r.owner, "layers": sorted(r.pools.values())}
+                for k, r in self.roots.items() if r.owner or r.pools}
+        self.events.append({"kind": "held", "closed": closed, "roots": held})
+        return {"closed": closed, "held": held}
+
     # -------------------------------------------------------- durability
     def snapshot(self) -> dict:
         with self._lock:
@@ -676,7 +908,8 @@ class KvRunManager:
                                   "boot_id": r.boot_id,
                                   "generation": r.generation,
                                   "pools": dict(r.pools),
-                                  "sizes": {p: list(v) for p, v in r.sizes.items()}}
+                                  "sizes": {p: list(v) for p, v in r.sizes.items()},
+                                  "owner": r.owner, "owner_window": r.owner_window}
                               for k, r in self.roots.items()},
                     "sessions": dict(self.sessions),
                     "created": [list(c) for c in self.created]}
@@ -704,6 +937,10 @@ class KvRunManager:
         root.generation = int(r.get("generation") or 0)
         root.pools.update(r.get("pools") or {})
         root.sizes.update({p: tuple(v) for p, v in (r.get("sizes") or {}).items()})
+        # An owner kept across a suspend may have passed its idle TTL; its
+        # layer then answers lost and the next one opens a new owner.
+        root.owner = r.get("owner") or root.owner
+        root.owner_window = _int(r.get("owner_window")) or root.owner_window
 
 
 # -------------------------------------------------------------- registry
@@ -712,9 +949,13 @@ _RUNS: dict[str, KvRunManager] = {}
 _RUNS_LOCK = threading.Lock()
 
 
-def register(mgr: KvRunManager) -> KvRunManager:
+def register(mgr: KvRunManager, sid: Optional[str] = None) -> KvRunManager:
+    """Register ``mgr`` for run ``sid`` (default: its own run id). An
+    adopted manager keeps the run id it was made with — its sessions and
+    owner are named after the parent — and is registered under the
+    follow-up's sid."""
     with _RUNS_LOCK:
-        _RUNS[mgr.run_id] = mgr
+        _RUNS[wire_id(sid) if sid else mgr.run_id] = mgr
     return mgr
 
 
@@ -736,13 +977,21 @@ SNAPSHOT_NAME = "polykv.json"
 
 
 def snapshot_path(cwd: str, sid: str):
-    from pathlib import Path
     return Path(cwd) / ".claude-hooks" / "consultants" / sid / SNAPSHOT_NAME
 
 
 def start_run(sid: str, *, mode: str, cwd: str, resume: bool = False,
-              **kw) -> KvRunManager:
-    """A run's manager, registered; a resumed run takes back its snapshot."""
+              adopt_root: Optional[str] = None, **kw) -> KvRunManager:
+    """A run's manager, registered; a resumed run takes back its snapshot;
+    a follow-up adopts the manager its consultancy holds (same mode),
+    with its owner, layers and warm roots."""
+    if adopt_root:
+        held = adopt(adopt_root)
+        if held is not None and held.mode == mode:
+            held.events.append({"kind": "adopted", "by": sid})
+            return register(held, sid)
+        if held is not None:
+            held.release_all()               # the mode changed: start clean
     mgr = register(KvRunManager(sid, mode=mode, **kw))
     if resume:
         p = snapshot_path(cwd, sid)
@@ -757,17 +1006,24 @@ def start_run(sid: str, *, mode: str, cwd: str, resume: bool = False,
     return mgr
 
 
-def settle_run(sid: str, *, cwd: str, status: str) -> Optional[dict]:
+def settle_run(sid: str, *, cwd: str, status: str,
+               hold_root: Optional[str] = None) -> Optional[dict]:
     """End a run's placement: a suspended run keeps its sessions and pools
     and writes a snapshot for the resume (the engine's own TTL is the net
-    if no resume comes); any other end releases everything and writes the
-    release report. Never raises."""
+    if no resume comes); a completed run whose consultancy is still open
+    (``hold_root``) is held for a follow-up for :data:`HOLD_S`; any other
+    end releases everything and writes the release report. Never raises."""
     mgr = drop(sid)
     if mgr is None:
         return None
     try:
         if status == "suspended":
             out = {**mgr.snapshot(), "suspended": True}
+        elif status == "completed" and hold_root:
+            out = {**mgr.hold(), **mgr.snapshot(), "held": True,
+                   "hold_root": hold_root, "until": time.time() + HOLD_S}
+            p = snapshot_path(cwd, sid)
+            _hold(hold_root, mgr, p)
         else:
             out = {**mgr.release_all(), "run_id": mgr.run_id, "status": status,
                    "events": mgr.events[-200:]}
@@ -778,6 +1034,161 @@ def settle_run(sid: str, *, cwd: str, status: str) -> Optional[dict]:
     except Exception:  # noqa: BLE001 — settling never fails a run
         log.exception("polykv: settling run %s failed", sid)
         return None
+
+
+# ------------------------------------------------------------ the hold
+
+#: How long a completed run's owner and layers wait for a follow-up or the
+#: accept before they are released (the review loop's next turn is
+#: minutes away; the keepalive holds the owner meanwhile).
+HOLD_S = 900.0
+HELD_ENV = "CONSULTANTS_POLYKV_HELD"
+
+_HELD: dict[str, dict] = {}
+_HELD_LOCK = threading.Lock()
+
+
+def held_registry_path():
+    """The host's record of held runs, so an engine restart can release
+    what the previous process held (its pinned layers outlive it)."""
+    return Path(os.environ.get(HELD_ENV)
+                or Path.home() / ".claude" / "consultants-polykv-held.json")
+
+
+def _held_registry() -> dict:
+    try:
+        d = json.loads(held_registry_path().read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_held_registry(d: dict) -> None:
+    p = held_registry_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(d, indent=1), encoding="utf-8")
+        os.replace(tmp, p)
+    except OSError as e:
+        log.warning("polykv: held registry %s: %s", p, e)
+
+
+def _hold(root_sid: str, mgr: KvRunManager, path) -> None:
+    timer = threading.Timer(HOLD_S, release_held, args=(root_sid,),
+                            kwargs={"reason": "expired"})
+    timer.daemon = True
+    with _HELD_LOCK:
+        old = _HELD.pop(root_sid, None)
+        _HELD[root_sid] = {"mgr": mgr, "timer": timer, "path": str(path)}
+        reg = _held_registry()
+        reg[root_sid] = {"path": str(path), "until": time.time() + HOLD_S}
+        _write_held_registry(reg)
+    if old is not None and old["mgr"] is not mgr:
+        old["timer"].cancel()
+        old["mgr"].release_all()
+    timer.start()
+
+
+def _take(root_sid: str) -> Optional[dict]:
+    with _HELD_LOCK:
+        entry = _HELD.pop(root_sid, None)
+        if entry is None:
+            return None
+        entry["timer"].cancel()
+        reg = _held_registry()
+        if reg.pop(root_sid, None) is not None:
+            _write_held_registry(reg)
+    return entry
+
+
+def adopt(root_sid: str) -> Optional[KvRunManager]:
+    """Take the manager consultancy ``root_sid`` holds, if any."""
+    entry = _take(root_sid)
+    return entry["mgr"] if entry else None
+
+
+def release_held(root_sid: str, *, reason: str = "accepted") -> Optional[dict]:
+    """Release what consultancy ``root_sid`` holds (accept, expiry) and
+    write the release report over the held snapshot. Never raises."""
+    entry = _take(root_sid)
+    if entry is None:
+        return None
+    mgr = entry["mgr"]
+    try:
+        out = {**mgr.release_all(), "run_id": mgr.run_id, "released": reason,
+               "events": mgr.events[-200:]}
+        Path(entry["path"]).write_text(json.dumps(out, indent=1, default=str),
+                                       encoding="utf-8")
+        log.info("polykv: released the hold of %s (%s)", root_sid, reason)
+        return out
+    except Exception:  # noqa: BLE001
+        log.exception("polykv: releasing the hold of %s failed", root_sid)
+        return None
+
+
+def sweep_held() -> list[str]:
+    """At engine start: release every hold a previous process left (its
+    timers died with it; its pinned layers did not). Never raises."""
+    done = []
+    with _HELD_LOCK:
+        reg = _held_registry()
+        stale = {k: v for k, v in reg.items() if k not in _HELD}
+    for root_sid, rec in stale.items():
+        try:
+            snap = json.loads(Path(rec.get("path")).read_text(encoding="utf-8"))
+            release_snapshot(snap)
+        except (OSError, ValueError, TypeError) as e:
+            log.info("polykv: stale hold %s: %s", root_sid, e)
+        done.append(root_sid)
+    if done:
+        with _HELD_LOCK:
+            reg = _held_registry()
+            for k in done:
+                reg.pop(k, None)
+            _write_held_registry(reg)
+    return done
+
+
+def client_for_key(key: str) -> Optional[PolykvClient]:
+    """A control-plane client from a root key (``direct|<base>`` or
+    ``xollama|<base>|<model>``)."""
+    parts = str(key).split("|")
+    if parts[0] == "direct" and len(parts) == 2:
+        return PolykvClient.direct(parts[1])
+    if parts[0] == "xollama" and len(parts) == 3:
+        return PolykvClient.via_xollama(parts[1], parts[2])
+    return None
+
+
+def release_snapshot(snap: dict) -> dict:
+    """Release a held snapshot's owners and layers without its manager:
+    owners closed (their pools go with them), shared layers released when
+    never attached, else unpinned."""
+    out = {"owners_closed": [], "released_pools": [], "unpinned_pools": [],
+           "errors": []}
+    for key, r in (snap.get("roots") or {}).items():
+        c = client_for_key(key)
+        if c is None:
+            continue
+        if r.get("owner"):
+            try:
+                if c.close_session(r["owner"]).found:
+                    out["owners_closed"].append(r["owner"])
+            except (OpencotiError, OSError) as e:
+                out["errors"].append(f"{r['owner']}: {e}")
+        for pid in (r.get("pools") or {}).values():
+            try:
+                if (c.pool(pid) or {}).get("attached_ever"):
+                    c.pin_pool(pid, False)
+                    out["unpinned_pools"].append(pid)
+                else:
+                    c.release_pool(pid)
+                    out["released_pools"].append(pid)
+            except (OpencotiError, OSError) as e:
+                if getattr(e, "status", None) not in (400, 404):
+                    out["errors"].append(f"pool {pid}: {e}")
+    return out
 
 
 def placed(client: Any, mgr: Optional[KvRunManager], role: str) -> Any:
@@ -793,6 +1204,12 @@ def _admission_refused(e: BaseException) -> bool:
     """The engine refused the call for room (429), not for its content."""
     return getattr(e, "status", None) == 429 or (
         "HTTP 429" in str(e) and "admission" in str(e))
+
+
+def _owner_full(e: BaseException) -> bool:
+    """A worker refused because its owner's window is full: a queue."""
+    text = str(e)
+    return getattr(e, "status", None) == 429 and "worker of" in text
 
 
 def _layer_gone(e: BaseException, placement: dict) -> bool:
@@ -842,8 +1259,13 @@ class PlacedChat:
             try:
                 out = getattr(self._placed_inner, method)(sent, *args, **kwargs)
             except Exception as e:  # noqa: BLE001 — re-raised unless recovered
-                if _admission_refused(e) and (mgr.reclaim_idle(placement)
-                                              or mgr.make_room(placement)):
+                if _owner_full(e):
+                    # A worker's queue: idle workers hold nothing, so only
+                    # growing the owner or a sibling ending makes room.
+                    if not mgr.grow_owner(placement):
+                        raise
+                elif _admission_refused(e) and (mgr.reclaim_idle(placement)
+                                                or mgr.make_room(placement)):
                     # Refused for room: this run's idle lanes freed theirs,
                     # or a sibling ended while this one waited.
                     pass

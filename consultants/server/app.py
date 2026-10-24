@@ -1207,6 +1207,9 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         root.consultancy_status = CONSULTANCY_ACCEPTED
         root.bump_activity()
         _persist_consultancy(root)
+        # Plan F3: what the consultancy held for a follow-up goes now.
+        from consultants.engine import polykv
+        polykv.release_held(root.sid, reason="accepted")
         return {
             "ok": True,
             "sid": sid,
@@ -1456,6 +1459,13 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         # frozen to patches before anything resumes (resuming ones keep
         # theirs).
         sweep_sandbox_views(app, force=True)
+        # Plan F3: holds a previous engine left keep their layers pinned
+        # on the engines; nothing in this process will release them.
+        try:
+            from consultants.engine import polykv
+            polykv.sweep_held()
+        except Exception:  # pragma: no cover — defensive
+            log.exception("releasing stale PolyKV holds failed")
         try:
             resume_inflight_councils(app)
         except Exception:  # pragma: no cover — defensive
@@ -1794,9 +1804,17 @@ def _run_with_state(app,
             # Plan F3: release every engine session and audit before the
             # in-flight record goes; a suspended run keeps them for the
             # resume.
+            # A completed run whose consultancy is still open is held for
+            # its follow-up (released on accept or after polykv.HOLD_S).
             from consultants.engine import polykv
+            hold = None
+            if state.status == "completed":
+                root = app.state.sessions.get(_consultancy_root_sid(state))
+                if root is not None and \
+                        root.consultancy_status not in _CONSULTANCY_TERMINAL:
+                    hold = root.sid
             polykv.settle_run(state.sid, cwd=state.cwd,
-                              status=state.status or "unknown")
+                              status=state.status or "unknown", hold_root=hold)
             state._polykv = None
         _settle_inflight(state)
         # Best-effort: refresh the index entry's status + duration so

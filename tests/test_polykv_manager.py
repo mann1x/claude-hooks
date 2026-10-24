@@ -9,6 +9,7 @@ drops every pool; release closes every session and reports leaks.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 
@@ -243,6 +244,7 @@ def test_an_unloaded_xollama_engine_is_probed_again():
     t["now"] += polykv.REPROBE_S + 1
     mgr._settle_mode(root, "q")
     assert root.mode == "pooled" and root.settled
+    assert root.reason == ""               # the not-loaded reason is gone
 
 
 # -------------------------------------------------- losses and restarts
@@ -824,3 +826,545 @@ class TestMakeRoom:
         mgr = _mgr(eng)
         p = mgr.place(FakeChat(), _payload(), role="researcher")   # no output stated
         assert mgr.make_room(p) is None
+
+
+# ------------------------------------------------------------ assured
+
+class OwnerEngine(SizedEngine):
+    """Owned pools, a ``/kv`` with room, and resize."""
+
+    def __init__(self, *, admissible=60000, ctx_max=65536, **kw):
+        kw.setdefault("features", ("polykv_shared_root_v1", "polykv_subpools_v1"))
+        super().__init__(**kw)
+        self.admissible = admissible
+        self.ctx_max = ctx_max
+        self.resized = []
+
+    def handle(self, method, route, params, data):
+        if route == "kv":
+            self.requests.append((method, route, params, data))
+            return Reply(200, {"session_ctx_max": self.ctx_max,
+                               "largest_admissible": self.admissible,
+                               "cells_free": self.admissible, "allocations": []})
+        if route.endswith("/resize"):
+            self.requests.append((method, route, params, data))
+            self.resized.append(data["num_ctx"])
+            return Reply(200, {"num_ctx": data["num_ctx"]})
+        return super().handle(method, route, params, data)
+
+
+class OwnerChat(FakeChat):
+    def __init__(self):
+        super().__init__()
+        base = self.reply
+        self.reply = lambda p: {**base(p), "context_window": p.get("num_ctx")}
+
+    def owners(self):
+        return [p for p in self.payloads
+                if (p.get("placement") or {}).get("session_id", "").count("~owner~")]
+
+    def workers(self):
+        return [p for p in self.payloads if p not in self.owners()]
+
+
+def _assured(eng, **kw):
+    return _mgr(eng, mode="assured", **kw)
+
+
+class TestAssured:
+
+    def _run(self, eng=None, lanes=3, out=4000):
+        eng = eng or OwnerEngine()
+        chat = OwnerChat()
+        mgr = _assured(eng)
+        placed = polykv.PlacedChat(chat, mgr, role="researcher")
+        for i in range(lanes):
+            p = _payload(f"lane {i}")
+            p["options"] = {"num_predict": out}
+            placed.chat(p)
+        return eng, chat, mgr
+
+    def test_one_owner_books_the_window_and_owns_the_layer(self):
+        eng, chat, mgr = self._run()
+        (opener,) = chat.owners()
+        pl = opener["placement"]
+        assert pl["session_id"] == "run-1~owner~0"
+        assert opener["options"] == {"num_predict": 1}
+        assert pl["num_ctx_min"] <= pl["num_ctx"] <= 60000
+        assert pl["num_ctx"] % polykv.WINDOW_ALIGN == 0
+        (create,) = eng.creates()
+        assert create[3]["session_id"] == "run-1~owner~0"
+        assert "shared" not in create[3] and create[3]["pin"] is True
+        root = mgr.roots["direct|e"]
+        assert (root.mode, root.owner, root.owner_window) == (
+            "assured", "run-1~owner~0", pl["num_ctx"])
+
+    def test_workers_state_no_window(self):
+        _, chat, mgr = self._run()
+        ws = chat.workers()
+        assert len(ws) == 3
+        assert all(w["placement"]["pool_id"] == "0" for w in ws)
+        assert not any("num_ctx" in w["placement"] for w in ws)
+        assert mgr.stats["researcher"].pooled == 3
+
+    def test_settle_closes_workers_then_the_owner(self):
+        eng, chat, mgr = self._run()
+        eng.sessions["run-1~owner~0"] = {"window": 1}
+        report = mgr.release_all()
+        closes = [r[1] for r in eng.requests if r[1].endswith("/close")]
+        assert closes[-1] == "sessions/run-1~owner~0/close"
+        assert len(closes) == 4                    # 3 workers, then the owner
+        assert report["owners_closed"] == ["run-1~owner~0"]
+        assert report["released_pools"] == [] and report["unpinned_pools"] == []
+
+    def test_no_room_for_one_lane_pools_shared(self):
+        eng, chat, mgr = self._run(OwnerEngine(admissible=1024))
+        assert chat.owners() == []
+        assert any(e["kind"] == "owner_refused" for e in mgr.events)
+        (create,) = eng.creates()
+        assert create[3]["shared"] is True
+        assert all("num_ctx" in w["placement"] for w in chat.workers())
+
+    def test_an_engine_without_owned_pools_runs_pooled(self):
+        eng = OwnerEngine(features=("polykv_shared_root_v1",))
+        _, chat, mgr = self._run(eng)
+        root = mgr.roots["direct|e"]
+        assert root.mode == "pooled" and "owned pools" in root.reason
+        assert chat.owners() == []
+
+    def test_an_owner_refused_opener_shares_less(self):
+        eng = OwnerEngine()
+        chat = OwnerChat()
+        orig = chat.chat
+
+        def refuse_owner(payload):
+            if "~owner~" in (payload.get("placement") or {}).get("session_id", ""):
+                raise RuntimeError("HTTP 429: no room")
+            return orig(payload)
+        chat.chat = refuse_owner
+        mgr = _assured(eng)
+        p = _payload()
+        p["options"] = {"num_predict": 4000}
+        polykv.PlacedChat(chat, mgr, role="researcher").chat(p)
+        assert eng.creates()[0][3]["shared"] is True
+        assert mgr.roots["direct|e"].owner is None
+
+
+class TestOwnerFull:
+    """A worker refused as its owner is full is a queue, never a failure."""
+
+    def _full_once(self, chat):
+        from claude_hooks.get_advice.chat_client import ChatFault
+        orig = chat.chat
+        state = {"refused": 0}
+
+        def chat_fn(payload):
+            pl = payload.get("placement") or {}
+            if pl.get("pool_id") is not None and not state["refused"]:
+                state["refused"] += 1
+                raise ChatFault("ollama chat HTTP 429: session allocation full "
+                                "(worker of run-1~owner~0)",
+                                fault_class="transport", status=429)
+            return orig(payload)
+        chat.chat = chat_fn
+        return state
+
+    def test_the_owner_grows_and_the_worker_is_resent(self):
+        eng = OwnerEngine()
+        chat = OwnerChat()
+        self._full_once(chat)
+        mgr = _assured(eng)
+        p = _payload()
+        p["options"] = {"num_predict": 4000}
+        out = polykv.PlacedChat(chat, mgr, role="researcher").chat(p)
+        assert out["choices"][0]["message"]["content"] == "ok"
+        root = mgr.roots["direct|e"]
+        assert eng.resized == [root.owner_window]
+        assert any(e["kind"] == "owner_grown" for e in mgr.events)
+        assert not [r for r in eng.requests if r[1].endswith("/close")]   # nothing reclaimed
+
+    def test_no_room_to_grow_waits_for_a_sibling(self):
+        eng = OwnerEngine()
+        chat = OwnerChat()
+        mgr = _assured(eng)
+        p = _payload("lane 0")
+        p["options"] = {"num_predict": 4000}
+        polykv.PlacedChat(chat, mgr, role="researcher").chat(p)   # opens the owner
+        eng.admissible = 0
+        busy = mgr.place(chat, _payload("lane 1"), role="researcher")
+        pl2 = mgr.place(chat, _payload("lane 2"), role="researcher")
+        got = []
+        t = threading.Thread(target=lambda: got.append(mgr.grow_owner(pl2)))
+        t.start()
+        time.sleep(0.1)
+        assert t.is_alive()
+        # a lane that started after the wait began ends: not the sibling
+        late = mgr.place(chat, _payload("lane 3"), role="researcher")
+        mgr.observe(late, None, role="researcher")
+        time.sleep(0.1)
+        assert t.is_alive() and not got
+        mgr.observe(busy, None, role="researcher")
+        t.join(2)
+        assert got == [True] and eng.resized == []
+
+    def test_nothing_to_wait_for_raises_the_refusal(self):
+        from claude_hooks.get_advice.chat_client import ChatFault
+        eng = OwnerEngine()
+        chat = OwnerChat()
+        mgr = _assured(eng)
+        p = _payload("lane 0")
+        p["options"] = {"num_predict": 4000}
+        placed = polykv.PlacedChat(chat, mgr, role="researcher")
+        placed.chat(p)
+        eng.admissible = 0
+        self._full_once(chat)
+        with pytest.raises(ChatFault):
+            placed.chat({**p, "messages": _payload("lane 1")["messages"]})
+
+
+class TestOwnerLost:
+
+    def test_a_lost_owned_layer_opens_a_new_owner_and_closes_both(self):
+        from claude_hooks.get_advice.chat_client import ChatFault
+        eng = OwnerEngine()
+        chat = OwnerChat()
+        mgr = _assured(eng)
+        placed = polykv.PlacedChat(chat, mgr, role="researcher")
+        p = _payload("lane 0")
+        p["options"] = {"num_predict": 4000}
+        placed.chat(p)
+        orig = chat.chat
+        state = {"n": 0}
+
+        def gone(payload):
+            pl = payload.get("placement") or {}
+            if pl.get("pool_id") == "0" and not state["n"]:
+                state["n"] += 1
+                raise ChatFault("ollama chat HTTP 400: request (16664 tokens) "
+                                "exceeds the available context size (14592 tokens)",
+                                fault_class="context_overflow", status=400)
+            return orig(payload)
+        chat.chat = gone
+        placed.chat({**p, "messages": _payload("lane 1")["messages"]})
+        owners = [o["placement"]["session_id"] for o in chat.owners()]
+        assert owners == ["run-1~owner~0", "run-1~owner~0~1"]
+        assert eng.creates()[1][3]["session_id"] == "run-1~owner~0~1"
+        for o in owners:
+            eng.sessions[o] = {"window": 1}
+        assert mgr.release_all()["owners_closed"] == owners
+
+    def test_a_restart_forgets_the_owner(self):
+        eng = OwnerEngine()
+        chat = OwnerChat()
+        mgr = _assured(eng)
+        p = _payload()
+        p["options"] = {"num_predict": 4000}
+        polykv.PlacedChat(chat, mgr, role="researcher").chat(p)
+        root = mgr.roots["direct|e"]
+        mgr._new_generation(root, "boot-B")
+        assert root.owner is None and root.pools == {} and root.sizes == {}
+
+    def test_the_owner_rides_a_snapshot(self):
+        eng = OwnerEngine()
+        chat = OwnerChat()
+        mgr = _assured(eng)
+        p = _payload()
+        p["options"] = {"num_predict": 4000}
+        polykv.PlacedChat(chat, mgr, role="researcher").chat(p)
+        back = _assured(eng)
+        back.restore(mgr.snapshot())
+        back._root(FakeChat(), "q")
+        r = back.roots["direct|e"]
+        assert (r.owner, r.owner_window) == (mgr.roots["direct|e"].owner,
+                                             mgr.roots["direct|e"].owner_window)
+
+
+def test_the_keepalive_touches_an_idle_owner(monkeypatch):
+    monkeypatch.setattr(polykv, "OWNER_KEEPALIVE_S", 0.05)
+    eng = OwnerEngine()
+    chat = OwnerChat()
+    mgr = _assured(eng)
+    p = _payload()
+    p["options"] = {"num_predict": 4000}
+    polykv.PlacedChat(chat, mgr, role="researcher").chat(p)
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not any(
+            e["kind"] == "owner_keepalive" for e in mgr.events):
+        time.sleep(0.02)
+    touches = [x for x in chat.owners() if "num_ctx" not in x["placement"]]
+    assert touches and touches[0]["options"] == {"num_predict": 1}
+    monkeypatch.setattr(polykv, "OWNER_KEEPALIVE_S", 30)
+    time.sleep(0.1)                                # the loop is in a long wait
+    mgr.release_all()
+    mgr._keepalive.join(1)
+    assert not mgr._keepalive.is_alive()          # stopped with the run
+
+
+def test_no_admissible_room_is_no_owner():
+    eng = OwnerEngine(admissible=0)
+    chat = OwnerChat()
+    mgr = _assured(eng)
+    p = _payload()
+    p["options"] = {"num_predict": 4000}
+    polykv.PlacedChat(chat, mgr, role="researcher").chat(p)
+    assert chat.owners() == []
+    assert [e for e in mgr.events if e["kind"] == "owner_refused"][0]["admissible"] == 0
+
+
+# ------------------------------------------------------------ the hold
+
+class TestHold:
+    """A completed run whose consultancy is open keeps its owner and layers
+    for the follow-up; accept or the deadline releases them."""
+
+    def _held(self, tmp_path, mode="assured"):
+        eng = OwnerEngine()
+        chat = OwnerChat()
+        mgr = polykv.register(_mgr(eng, mode=mode))
+        p = _payload()
+        p["options"] = {"num_predict": 4000}
+        polykv.PlacedChat(chat, mgr, role="researcher").chat(p)
+        if mgr.roots["direct|e"].owner:
+            eng.sessions[mgr.roots["direct|e"].owner] = {"window": 1}
+        out = polykv.settle_run("run-1", cwd=str(tmp_path), status="completed",
+                                hold_root="root-1")
+        return eng, chat, mgr, out
+
+    def test_hold_closes_lanes_and_keeps_owner_and_layer(self, tmp_path):
+        eng, chat, mgr, out = self._held(tmp_path)
+        assert out["held"] and out["hold_root"] == "root-1"
+        closes = [r[1] for r in eng.requests if r[1].endswith("/close")]
+        assert len(closes) == 1 and "~owner~" not in closes[0]   # the lane only
+        root = mgr.roots["direct|e"]
+        assert root.owner and root.pools and list(eng.pools) == [0]
+        reg = json.loads(polykv.held_registry_path().read_text())
+        assert list(reg) == ["root-1"]
+        polykv.release_held("root-1")
+
+    def test_a_follow_up_adopts_the_hold(self, tmp_path):
+        eng, chat, mgr, _ = self._held(tmp_path)
+        child = polykv.start_run("child-1", mode="assured", cwd=str(tmp_path),
+                                 adopt_root="root-1")
+        assert child is mgr and polykv.manager_for("child-1") is mgr
+        assert json.loads(polykv.held_registry_path().read_text()) == {}
+        p = _payload("lane 1")
+        p["options"] = {"num_predict": 4000}
+        polykv.PlacedChat(chat, child, role="researcher").chat(p)
+        assert len(eng.creates()) == 1 and len(chat.owners()) == 1   # reused
+        assert chat.payloads[-1]["placement"]["pool_id"] == "0"
+        assert any(e["kind"] == "adopted" and e["by"] == "child-1"
+                   for e in mgr.events)
+        polykv.drop("child-1")
+        mgr.release_all()
+
+    def test_accept_releases_and_writes_the_report(self, tmp_path):
+        eng, chat, mgr, _ = self._held(tmp_path)
+        out = polykv.release_held("root-1", reason="accepted")
+        assert out["owners_closed"] == [mgr.roots["direct|e"].owner]
+        assert eng.pools == {}                            # went with the owner
+        saved = json.loads(polykv.snapshot_path(str(tmp_path), "run-1").read_text())
+        assert saved["released"] == "accepted"
+        assert polykv.release_held("root-1") is None      # once
+        assert polykv.adopt("root-1") is None
+
+    def test_the_hold_expires(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(polykv, "HOLD_S", 0.05)
+        eng, chat, mgr, _ = self._held(tmp_path)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not mgr.released:
+            time.sleep(0.02)
+        assert mgr.released and eng.pools == {}
+        saved = json.loads(polykv.snapshot_path(str(tmp_path), "run-1").read_text())
+        assert saved["released"] == "expired"
+
+    def test_a_follow_up_in_another_mode_starts_clean(self, tmp_path):
+        eng, chat, mgr, _ = self._held(tmp_path)
+        child = polykv.start_run("child-2", mode="affinity", cwd=str(tmp_path),
+                                 adopt_root="root-1", show=lambda b, m: {})
+        assert child is not mgr and mgr.released
+        polykv.drop("child-2")
+
+    def test_a_run_without_an_open_consultancy_is_released(self, tmp_path):
+        eng = OwnerEngine()
+        mgr = polykv.register(_mgr(eng, mode="assured"))
+        p = _payload()
+        p["options"] = {"num_predict": 4000}
+        polykv.PlacedChat(OwnerChat(), mgr, role="researcher").chat(p)
+        out = polykv.settle_run("run-1", cwd=str(tmp_path), status="completed")
+        assert mgr.released and "held" not in out
+        out = None
+        mgr2 = polykv.register(_mgr(eng, mode="assured"))
+        polykv.PlacedChat(OwnerChat(), mgr2, role="researcher").chat(p)
+        polykv.settle_run("run-1", cwd=str(tmp_path), status="failed",
+                          hold_root="root-1")
+        assert mgr2.released and polykv.adopt("root-1") is None
+
+    def test_a_stale_hold_is_released_at_engine_start(self, tmp_path, monkeypatch):
+        eng, chat, mgr, _ = self._held(tmp_path, mode="pooled")
+        pid = next(iter(mgr.roots["direct|e"].pools.values()))
+        # The process that held it is gone: its timer and memory with it.
+        with polykv._HELD_LOCK:
+            entry = polykv._HELD.pop("root-1")
+        entry["timer"].cancel()
+        monkeypatch.setattr(polykv, "client_for_key", lambda key: PolykvClient.direct(
+            "http://e", fetch=direct_fetch(eng)) if key == "direct|e" else None)
+        assert polykv.sweep_held() == ["root-1"]
+        assert int(pid) not in eng.pools                  # never attached: released
+        assert json.loads(polykv.held_registry_path().read_text()) == {}
+        assert polykv.sweep_held() == []
+
+
+def test_client_for_key_reads_both_kinds():
+    d = polykv.client_for_key("direct|http://h:8240")
+    x = polykv.client_for_key("xollama|http://h:22434|m:q")
+    assert d.transport.kind == "direct" and x.transport.model == "m:q"
+    assert polykv.client_for_key("cloud|x") is None
+
+
+def test_run_with_state_holds_a_run_whose_consultancy_is_open(tmp_path, monkeypatch):
+    from consultants.server import app as app_mod
+    seen = {}
+    monkeypatch.setattr(polykv, "settle_run",
+                        lambda sid, **kw: seen.update(kw))
+    monkeypatch.setattr(app_mod, "_settle_inflight", lambda st: None)
+    root = app_mod.SessionState(sid="root-9", question="q", cwd=str(tmp_path),
+                                effort="high", topology="council")
+    st = app_mod.SessionState(sid="child-9", question="q", cwd=str(tmp_path),
+                              effort="high", topology="council")
+    st.root_sid = "root-9"
+    st._polykv = object()
+    monkeypatch.setattr(app_mod, "_persist_consultancy", lambda r: None)
+    app = type("A", (), {"state": type("S", (), {"sessions": {"root-9": root}})()})()
+
+    def run(state, runner_input):
+        state.status = "completed"
+    app_mod._run_with_state(app, run, st, {})
+    assert seen["hold_root"] == "root-9"
+    root.consultancy_status = app_mod.CONSULTANCY_ACCEPTED
+    st._polykv = object()
+    app_mod._run_with_state(app, run, st, {})
+    assert seen["hold_root"] is None
+
+
+class TestHoldEdges:
+
+    def _hold(self, tmp_path, run_id, root="root-1"):
+        eng = OwnerEngine()
+        mgr = polykv.register(polykv.KvRunManager(
+            run_id, mode="assured", show=lambda b, m: {},
+            root_for=lambda c, m: polykv.Root(
+                key="direct|e", kind="direct",
+                client=PolykvClient.direct("http://e", fetch=direct_fetch(eng)))))
+        p = _payload()
+        p["options"] = {"num_predict": 4000}
+        polykv.PlacedChat(OwnerChat(), mgr, role="researcher").chat(p)
+        polykv.settle_run(run_id, cwd=str(tmp_path), status="completed",
+                          hold_root=root)
+        return eng, mgr
+
+    def test_an_adopted_holds_timer_never_releases_the_next_hold(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(polykv, "HOLD_S", 0.1)
+        _, mgr = self._hold(tmp_path, "run-a")
+        child = polykv.start_run("run-b", mode="assured", cwd=str(tmp_path),
+                                 adopt_root="root-1")
+        monkeypatch.setattr(polykv, "HOLD_S", 30)
+        polykv.settle_run("run-b", cwd=str(tmp_path), status="completed",
+                          hold_root="root-1")
+        time.sleep(0.4)                        # past the first deadline
+        assert not child.released and polykv.adopt("root-1") is child
+        child.release_all()
+
+    def test_a_hold_closes_its_lanes_once(self, tmp_path):
+        eng, mgr = self._hold(tmp_path, "run-c")
+        polykv.release_held("root-1")
+        lanes = [r[1] for r in eng.requests
+                 if r[1].endswith("/close") and "~owner~" not in r[1]]
+        assert len(lanes) == len(set(lanes)) == 1
+
+    def test_a_second_hold_of_one_consultancy_releases_the_first(self, tmp_path):
+        _, first = self._hold(tmp_path, "run-d")
+        _, second = self._hold(tmp_path, "run-e")
+        assert first.released and not second.released
+        polykv.release_held("root-1")
+
+
+def test_the_follow_up_runner_adopts(tmp_path):
+    import inspect
+    from consultants.server import runner
+    src = inspect.getsource(runner.make_follow_up_runner)
+    assert "_polykv_manager(cfg, state, cwd, runner_input, adopt=True)" in src
+
+    class Cfg:
+        polykv = type("P", (), {"enabled": True, "mode": "assured"})()
+    held = polykv.KvRunManager("run-p", mode="assured", show=lambda b, m: {})
+    polykv._hold("root-p", held, tmp_path / "polykv.json")
+    st = type("St", (), {"sid": "child-p", "root_sid": "root-p", "_polykv": None})()
+    assert runner._polykv_manager(Cfg, st, str(tmp_path), {}, adopt=True) is held
+    st2 = type("St", (), {"sid": "root-q", "root_sid": "root-q", "_polykv": None})()
+    fresh = runner._polykv_manager(Cfg, st2, str(tmp_path), {}, adopt=True)
+    assert fresh is not held                      # a root never adopts itself
+    polykv.drop("child-p"), polykv.drop("root-q")
+
+
+class TestColdBudget:
+    """A cold model's budget asked a 96k output of a 32k engine; the
+    make_room loop then re-closed the same sessions 150 times."""
+
+    class Ceiling(SizedEngine):
+        def handle(self, method, route, params, data):
+            if route == "props" and self.refuse is None:
+                self.requests.append((method, route, params, data))
+                return Reply(200, {"features": self.features, "opencoti": {
+                    "polykv": {"pools_enabled": True},
+                    "kv": {"session_ctx_max": 32768}}})
+            if route == "kv":
+                self.requests.append((method, route, params, data))
+                return Reply(200, {"cells_free": 1000, "allocations": []})
+            if route.endswith("/close"):
+                self.requests.append((method, route, params, data))
+                return Reply(200, {"found": True, "released": True})
+            return super().handle(method, route, params, data)
+
+    def test_a_window_above_the_engine_ceiling_is_clamped(self):
+        eng = self.Ceiling()
+        chat = FakeChat()
+        p = _payload()
+        p["options"] = {"num_predict": 96000}
+        mgr = _mgr(eng)
+        polykv.PlacedChat(chat, mgr, role="researcher").chat(p)
+        assert mgr.roots["direct|e"].ctx_max == 32768
+        assert chat.payloads[-1]["placement"]["num_ctx"] == 32768
+
+    def test_make_room_reclaims_once_and_forgets_what_it_closed(self):
+        eng = self.Ceiling()
+        mgr = _mgr(eng)
+        a = mgr.place(FakeChat(), _payload("lane 0"), role="researcher")
+        mgr.observe(a, None, role="researcher")
+        p = _payload("lane 1")
+        p["options"] = {"num_predict": 4000}
+        b = mgr.place(FakeChat(), p, role="researcher")
+        assert mgr.make_room(b, wait_s=0) is False
+        closes = [r[1] for r in eng.requests if r[1].endswith("/close")]
+        assert closes == [f"sessions/{a['session_id']}/close"]
+        assert a["session_id"] not in mgr.sessions
+        assert b["session_id"] in mgr.sessions        # the caller is kept
+
+
+def test_a_cold_budget_still_opens_an_owner():
+    class CeilingOwner(OwnerEngine):
+        def handle(self, method, route, params, data):
+            if route == "props" and self.refuse is None:
+                self.requests.append((method, route, params, data))
+                return Reply(200, {"features": self.features, "opencoti": {
+                    "polykv": {"pools_enabled": True},
+                    "kv": {"session_ctx_max": 65536}}})
+            return super().handle(method, route, params, data)
+    eng = CeilingOwner(admissible=65536)
+    chat = OwnerChat()
+    mgr = _assured(eng)
+    p = _payload()
+    p["options"] = {"num_predict": 96000}           # a cold model's 96k cap
+    polykv.PlacedChat(chat, mgr, role="researcher").chat(p)
+    assert len(chat.owners()) == 1
+    assert chat.owners()[0]["placement"]["num_ctx_min"] <= 65536

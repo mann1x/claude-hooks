@@ -694,7 +694,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
             and parent_state._chat_clients is not None
             else {}
         )
-        pk_fu = _polykv_manager(cfg, state, cwd, runner_input)
+        pk_fu = _polykv_manager(cfg, state, cwd, runner_input, adopt=True)
         chat_clients = {}
         for role in enabled_t:
             raw = warm_clients.get(role)
@@ -2048,15 +2048,18 @@ def _write_failed_artifacts(state, cwd: str, question: str,
         log.warning("failed-artifact write failed: %s", e)
 
 
-def _polykv_manager(cfg, state, cwd: str, runner_input: dict):
+def _polykv_manager(cfg, state, cwd: str, runner_input: dict, *,
+                    adopt: bool = False):
     """The run's PolyKV manager (plan F3), or ``None`` when ``[polykv]`` is
     off, which leaves every role client unwrapped and every request as it
-    was."""
+    was. A follow-up (``adopt``) takes the manager its consultancy holds."""
     pk = getattr(cfg, "polykv", None)
     if pk is None or not pk.enabled or pk.mode == "off":
         return None
-    mgr = polykv_mod.start_run(state.sid, mode=pk.mode, cwd=cwd,
-                               resume=bool(runner_input.get("resume")))
+    mgr = polykv_mod.start_run(
+        state.sid, mode=pk.mode, cwd=cwd,
+        resume=bool(runner_input.get("resume")),
+        adopt_root=getattr(state, "root_sid", None) if adopt else None)
     state._polykv = mgr
     return mgr
 

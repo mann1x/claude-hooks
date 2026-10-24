@@ -48,6 +48,9 @@ def main(argv=None) -> int:
     ap.add_argument("--lanes", type=int, default=3)
     ap.add_argument("--mode", default="pooled", choices=polykv.MODES)
     ap.add_argument("--cwd", default=str(ROOT))
+    ap.add_argument("--follow-up", action="store_true",
+                    help="settle as held, adopt it from a second run, run "
+                         "the lanes again, then release as on accept")
     ap.add_argument("--sequential", action="store_true",
                     help="one lane at a time (an engine with room for one "
                          "lane's window next to the layer)")
@@ -79,21 +82,44 @@ def main(argv=None) -> int:
 
     # Lane 0 first, alone: it makes the layer. The rest attach concurrently
     # unless --sequential.
-    lane(0)
-    if args.sequential:
-        for i in range(1, args.lanes):
-            lane(i)
+    def run_lanes():
+        lane(0)
+        if args.sequential:
+            for i in range(1, args.lanes):
+                lane(i)
+        else:
+            threads = [threading.Thread(target=lane, args=(i,))
+                       for i in range(1, args.lanes)]
+            [t.start() for t in threads]
+            [t.join() for t in threads]
+
+    run_lanes()
+    follow = None
+    if args.follow_up:
+        first = dict(results)
+        polykv.settle_run(mgr.run_id, cwd=args.cwd, status="completed",
+                          hold_root=mgr.run_id)
+        child = polykv.start_run(mgr.run_id + "-fu", mode=args.mode,
+                                 cwd=args.cwd, adopt_root=mgr.run_id)
+        placed._placed_manager = child
+        creates = sum(1 for e in child.events if e["kind"] == "layer")
+        results.clear()
+        run_lanes()
+        follow = {"adopted": child is mgr, "first": first,
+                  "new_layers": sum(1 for e in child.events
+                                    if e["kind"] == "layer") - creates}
+        polykv.drop(mgr.run_id + "-fu")
+        polykv._hold(mgr.run_id, child,
+                     polykv.snapshot_path(args.cwd, mgr.run_id))
+        report = polykv.release_held(mgr.run_id, reason="accepted")
     else:
-        threads = [threading.Thread(target=lane, args=(i,))
-                   for i in range(1, args.lanes)]
-        [t.start() for t in threads]
-        [t.join() for t in threads]
-    report = polykv.settle_run(mgr.run_id, cwd=args.cwd, status="completed")
+        report = polykv.settle_run(mgr.run_id, cwd=args.cwd, status="completed")
     st = (report or {}).get("stats", {}).get("researcher", {})
-    layers = [e for e in mgr.events if e["kind"] in ("layer", "layer_refused",
-                                                     "pool_dropped", "root")]
+    layers = list(mgr.events)
+    want = args.lanes * (2 if follow else 1)
     ok = (all(r.get("ok") for r in results.values())
-          and st.get("pooled") == args.lanes and st.get("shared_tokens", 0) > 0
+          and (follow is None or (follow["adopted"] and follow["new_layers"] == 0))
+          and st.get("pooled") == want and st.get("shared_tokens", 0) > 0
           and not (report or {}).get("leaked_allocations")
           and not (report or {}).get("leaked_pools"))
     print(json.dumps({"run": mgr.run_id, "grounding_chars": sum(
@@ -102,10 +128,11 @@ def main(argv=None) -> int:
         "lanes": {str(k): v for k, v in sorted(results.items())},
         "closed": (report or {}).get("closed"),
         "settle": {k: (report or {}).get(k) for k in (
-            "released_pools", "unpinned_pools", "close_errors")},
+            "released_pools", "unpinned_pools", "owners_closed",
+            "close_errors")},
         "leaked": [(report or {}).get("leaked_allocations"),
                    (report or {}).get("leaked_pools")],
-        "ok": ok}, indent=1, default=str))
+        "follow_up": follow, "ok": ok}, indent=1, default=str))
     return 0 if ok else 1
 
 

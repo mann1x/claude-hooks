@@ -1391,8 +1391,17 @@ manager (`consultants/engine/polykv.py`) places every role call:
   with no window it charged the whole prompt again on top of the pool.
 - **`auto`:** pools where the engine advertises pools and shared
   roots, and falls back to affinity elsewhere.
-- **`assured`:** one owner window per run. It is not built yet and
-  runs as `pooled`.
+- **`assured`:** one owner window per run and root, on engines with
+  owned pools (`polykv_subpools_v1`). The first pooled call opens the
+  owner with a 1-token request booking `num_ctx` for the layer plus 4
+  lanes and `num_ctx_min` for the layer plus one, both capped by what
+  `/kv` admits now; the layer is created inside it, and every lane is a
+  worker (its own session, `pool_id`, no `num_ctx`), charged only its
+  private part against the owner. A worker refused as its owner is full
+  (429 `worker of …`) grows the owner when the engine has room, else
+  waits for a sibling lane to end, then is resent. The owner is touched
+  every 60 s while idle (the engine's idle TTL is 300 s). An owner that
+  does not fit, or an engine without owned pools, runs as `pooled`.
 
 Cloud and plain Ollama calls in the same council are never touched.
 
@@ -1410,6 +1419,20 @@ Failures never fail a call; the call is sent with less sharing:
   lost by a refusal for size that names no share (the engine charges an
   attach to a missing pool in full rather than refusing it).
 - A changed `boot_id` drops every pool.
+
+Every stated window is capped at the engine's `session_ctx_max` (`/props`
+`opencoti.kv`): a cold model's budget sized from its trained context asked
+a 96k output of a 32k engine, a 429 that never clears.
+
+**Follow-ups reuse what the run built.** A completed run whose consultancy
+is still open (not accepted) is *held* instead of released: its lane
+sessions close, its owner, pinned layers and keepalive stay, for
+`polykv.HOLD_S` (15 min). A follow-up in the same mode adopts it (no new
+owner, no new layer; 2026-10-24 on eleven2go: 6/6 calls shared across the
+two runs, both modes). `accept` or the deadline releases it. Holds are
+listed in `~/.claude/consultants-polykv-held.json`
+(`CONSULTANTS_POLYKV_HELD`); an engine start releases any a previous
+process left, since their pins outlive it.
 
 When the run ends, every session it used is closed; every layer it made
 is released if nobody attached it (the engine never sweeps those) and

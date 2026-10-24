@@ -379,3 +379,33 @@ class TestColdReopen:
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ----------------------- PolyKV hold (plan F3) -------------------- #
+
+class TestPolykvHold:
+    def test_accept_releases_what_the_consultancy_holds(
+            self, isolated_home, project_dir, monkeypatch):
+        from consultants.engine import polykv
+        released = []
+        monkeypatch.setattr(polykv, "release_held",
+                            lambda sid, **kw: released.append((sid, kw)))
+        app = _make_app()
+        with TestClient(app) as client:
+            root = _ask(client, project_dir)
+            _wait_completed(client, root)
+            child = client.post(f"/v1/consult/{root}/follow-up", json={
+                "message": "drill in", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_completed(client, child)
+            client.post(f"/v1/consult/{child}/accept",
+                        json={"cwd": str(project_dir)})
+        assert released == [(root, {"reason": "accepted"})]
+
+    def test_engine_start_releases_stale_holds(self, isolated_home, monkeypatch):
+        from consultants.engine import polykv
+        swept = []
+        monkeypatch.setattr(polykv, "sweep_held", lambda: swept.append(1) or [])
+        create_app(run_council=_stub_runner, start_reaper=False,
+                   resume_inflight=True)
+        assert swept == [1]
