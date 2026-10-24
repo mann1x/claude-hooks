@@ -1187,6 +1187,23 @@ class ToolsTests(StoreHarness):
         out = self.them.call("mailbox-ack", {"id": 1, "note": "second"})
         self.assertIn("frozen", out)
 
+    def test_ack_takes_ids_as_mailbox_read_does(self):
+        # xollama 2026-10-24: ids='["1882"]' got "KeyError: 'id'".
+        for n in range(2):
+            self.me.call("mailbox-send", {"to": "osync", "subject": f"s{n}",
+                                          "body": "b"})
+        self.them.call("mailbox-read", {"ids": [1, 2]})
+        out = self.them.call("mailbox-ack", {"ids": '["1", "2"]',
+                                             "note": "thanks"})
+        self.assertIn("note on #1", out)
+        self.assertIn("note on #2", out)
+        out = self.them.call("mailbox-ack", {"ids": [1]})
+        self.assertIn("empty one would announce nothing", out)
+        self.assertNotIn("KeyError", out)
+        self.assertIn("Pass id", self.them.call("mailbox-ack",
+                                                {"note": "x"}))
+        self.assertIn("Pass id", self.me.call("mailbox-cancel", {}))
+
     def test_edit_then_refused_after_read(self):
         self.me.call("mailbox-send", {"to": "osync", "subject": "v1",
                                       "body": "b"})

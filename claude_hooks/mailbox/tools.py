@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Optional, Sequence
+from typing import Any, Optional
 
 from claude_hooks.mailbox.addressing import AddressError, describe_recipients
 from claude_hooks.mailbox.announce import ago
@@ -131,9 +131,11 @@ def tool_catalog() -> list[dict]:
                 "type": "object",
                 "properties": {
                     "id": {"type": "integer"},
+                    "ids": {"type": "array", "items": {"type": "integer"},
+                            "description": "Several messages, one note."},
                     "note": {"type": "string"},
                 },
-                "required": ["id", "note"],
+                "required": ["note"],
             },
         },
         {
@@ -418,28 +420,40 @@ class MailboxTools:
         return "\n".join(out)
 
     def _mailbox_ack(self, args: dict) -> str:
-        res = self.store.ack(
-            int(args["id"]), str(args.get("note") or ""),
-            session_id=self.session_id or "?", alias=self.alias,
-            host=self.host)
-        verb = "Attached" if res["action"] == "attached" else "Replaced"
-        return (f"{verb} the note on #{res['id']}. The sender will see it "
-                f"next time they check in.")
+        # ``ids`` too: mailbox-read takes a list, and a session that
+        # passed one here got a bare ``KeyError: 'id'`` (2026-10-24).
+        ids = _int_list(args.get("ids")) + _int_list(args.get("id"))
+        if not ids:
+            return "Pass id (or ids) — the message(s) the note answers."
+        note = str(args.get("note") or "")
+        out = []
+        for mid in dict.fromkeys(ids):
+            try:
+                res = self.store.ack(
+                    mid, note, session_id=self.session_id or "?",
+                    alias=self.alias, host=self.host)
+            except MailboxError as e:
+                out.append(f"#{mid}: {e}")
+                continue
+            verb = "Attached" if res["action"] == "attached" else "Replaced"
+            out.append(f"{verb} the note on #{res['id']}. The sender will "
+                       f"see it next time they check in.")
+        return "\n".join(out)
 
     def _mailbox_edit(self, args: dict) -> str:
         res = self.store.edit(
-            int(args["id"]), from_alias=self.alias, from_host=self.host,
+            _one_id(args), from_alias=self.alias, from_host=self.host,
             subject=args.get("subject"), body=args.get("body"),
             priority=(int(args["priority"])
                       if args.get("priority") is not None else None))
         if res["broadcast_group"]:
             return (f"Updated {res['updated']} unread copy/copies of that "
                     f"broadcast. Copies already read were left alone.")
-        return (f"Updated." if res["updated"]
+        return ("Updated." if res["updated"]
                 else "Nothing changed — it may have just been read.")
 
     def _mailbox_cancel(self, args: dict) -> str:
-        res = self.store.cancel(int(args["id"]), from_alias=self.alias,
+        res = self.store.cancel(_one_id(args), from_alias=self.alias,
                                 from_host=self.host)
         if res["broadcast_group"]:
             return (f"Withdrew {res['cancelled']} unread copy/copies of that "
@@ -561,9 +575,22 @@ def _page_footer(pg, tool: str, f: ListFilter, *,
     return out
 
 
+def _one_id(args: dict) -> int:
+    ids = _int_list(args.get("id")) or _int_list(args.get("ids"))
+    if len(ids) != 1:
+        raise MailboxError("Pass id — one message id.")
+    return ids[0]
+
+
 def _int_list(value: Any) -> list[int]:
     if value is None:
         return []
+    if isinstance(value, str) and value.lstrip().startswith("["):
+        # A client that serialised the array: '["1882"]'.
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return []
     if isinstance(value, (int, str)):
         value = [value]
     out: list[int] = []
