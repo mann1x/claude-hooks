@@ -651,7 +651,13 @@ first user turn (after the question, after the plan, before the last
 report, from the builders' headers) and one at the longest prefix two
 calls of the run share (snapped to a paragraph end); a call attaches the
 deepest, its private window leaves out what the layer covers, settle
-releases leaves first. Not done: grounding for the judges (they have no
+releases leaves first. Live on eleven2go (xOllama,
+`mannix/omnimerge-v4-mtp:IQ2_M`, `benchmarks/consultants/polykv_layout_smoke.py`,
+critic → synthesizer → meta-critic on the same three 4,000-char reports):
+the synthesizer forked the critic's layer through the last report and the
+meta-critic attached the fork; the three calls prefilled 2,480 tokens
+against 10,037 as built (≈ 5,950 against ≈ 11,340 counting the layers'
+own prefill), 11.8 s against 20.6 s, nothing leaked. Not done: grounding for the judges (they have no
 grounding and other tools, so they share nothing with the lanes beyond
 the preamble), and the answer-quality A/B below.
 
