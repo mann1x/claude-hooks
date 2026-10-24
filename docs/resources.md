@@ -97,7 +97,9 @@ Other hosts cannot see that process, so they trust a **lease**
 (`--lease`, default 30 min) that the holder's host renews from its hooks
 (once a minute at most), its waiters, `run` wrappers, and the hook
 daemon's maintenance thread (every 5 min). A host that goes dark has its
-claims dropped when the lease lapses. `--ttl` ends a claim regardless.
+claims dropped when the lease lapses. `--ttl` ends a claim regardless,
+counted from its **grant**: a claim queued behind a long job keeps its
+whole TTL for the time it actually holds the resource.
 
 Every grant, release, expiry and holder exit is logged
 (`claude-hooks-res events`), 30 days.

@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from claude_hooks.resources.store import parse_iso
+
 from claude_hooks.resources import model
 from claude_hooks.resources.model import (
     EXCLUSIVE, QUIET, SHARED, Claim, Item, SpecError, decide, items_conflict,
@@ -192,6 +194,53 @@ class TestStore:
         assert st.get(a.claim.id) is not None
         clock.t += 2
         assert st.get(a.claim.id) is None
+
+    def test_a_queued_claims_ttl_starts_at_its_grant(self, db):
+        # 2026-10-24: queued 2nd behind a 2 h job with --ttl 2h, the claim
+        # would have expired in the queue before it was ever held.
+        clock = Clock()
+        st = mk(db, clock=clock)
+        a = st.request(items("eleven2go"), owner("A", pid=1))
+        b = st.request(items("eleven2go"), owner("B", pid=2), ttl_s=60)
+        assert not b.granted and b.claim.expires_at == ""
+        clock.t += 3600
+        assert st.get(b.claim.id) is not None      # still queued
+        st.release([a.claim.id], force=True)
+        held = st.get(b.claim.id)
+        assert held.granted
+        # The expiry status shows is the grant's, not the request's.
+        assert parse_iso(held.claim.expires_at) == pytest.approx(clock.t + 60)
+        clock.t += 59
+        assert st.get(b.claim.id) is not None
+        clock.t += 2
+        assert st.get(b.claim.id) is None
+        assert st.events(1)[0]["event"] == "expired"
+
+    def test_a_grant_from_older_code_is_still_bounded_by_its_ttl(self, db):
+        clock = Clock()
+        st = mk(db, clock=clock)
+        a = st.request(items("eleven2go"), owner("A", pid=1), ttl_s=60)
+        st._run(lambda cur: cur.execute(st._q(
+            "UPDATE resource_claims SET expires_at = '' WHERE id = ?"),
+            (a.claim.id,)))
+        clock.t += 59
+        assert st.get(a.claim.id) is not None
+        clock.t += 2
+        assert st.get(a.claim.id) is None
+
+    def test_a_table_from_before_ttl_s_is_migrated_in_place(self, db):
+        st = mk(db)
+        st._run(lambda cur: None)
+        if st.dialect != "sqlite":
+            pytest.skip("the ALTER is exercised on sqlite")
+        conn = st._connect()
+        conn.execute("ALTER TABLE resource_claims DROP COLUMN ttl_s")
+        conn.commit()
+        conn.close()
+        old = mk(db)
+        assert old.snapshot() == []                 # read before migrating
+        a = old.request(items("eleven2go"), owner("A", pid=1), ttl_s=60)
+        assert a.granted and a.claim.ttl_s == 60
 
     def test_reuse_returns_the_covering_claim(self, db):
         st = mk(db)
@@ -387,6 +436,22 @@ class TestPostgresLive:
         yield f"{PG}{sep}options=-csearch_path%3D{schema_name}"
         with psycopg.connect(PG, autocommit=True) as c:
             c.execute(f"DROP SCHEMA {schema_name} CASCADE")
+
+    def test_a_table_from_before_ttl_s_is_migrated_in_place(self, pgdsn):
+        import psycopg
+        st = ResourceStore("postgres", pgdsn, host="solidpc",
+                           alive=lambda p, s: True)
+        st._run(lambda cur: None)
+        with psycopg.connect(pgdsn, autocommit=True) as c:
+            c.execute("ALTER TABLE resource_claims DROP COLUMN ttl_s")
+        old = ResourceStore("postgres", pgdsn, host="solidpc",
+                            alive=lambda p, s: True)
+        assert old.snapshot() == []
+        a = old.request(items("gpu0"), owner("A"))
+        b = old.request(items("gpu0"), owner("B"), ttl_s=60)
+        assert b.claim.ttl_s == 60 and b.claim.expires_at == ""
+        old.release([a.claim.id], force=True)
+        assert old.get(b.claim.id).claim.expires_at
 
     def test_listen_wakes_waiter_fast(self, pgdsn):
         st = ResourceStore("postgres", pgdsn, host="solidpc",

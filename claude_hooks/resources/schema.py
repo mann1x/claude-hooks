@@ -31,7 +31,8 @@ _CLAIMS_COLS = """
     granted_at TEXT NOT NULL DEFAULT '',
     renewed_at TEXT NOT NULL,
     expires_at TEXT NOT NULL DEFAULT '',
-    lease_s INTEGER NOT NULL DEFAULT 0
+    lease_s INTEGER NOT NULL DEFAULT 0,
+    ttl_s INTEGER NOT NULL DEFAULT 0
 """
 
 _EVENTS_COLS = """
@@ -78,4 +79,17 @@ def statements(dialect: str) -> list[str]:
 
 CLAIM_COLUMNS = ("seq", "id", "items", "state", "session_id", "alias", "host",
                  "pid", "pid_started", "reason", "cwd", "created_at",
-                 "granted_at", "renewed_at", "expires_at", "lease_s")
+                 "granted_at", "renewed_at", "expires_at", "lease_s", "ttl_s")
+#: A table made before ``ttl_s`` existed (2026-10-24), read until the
+#: first locked write migrates it.
+LEGACY_CLAIM_COLUMNS = CLAIM_COLUMNS[:-1]
+
+
+def migrations(dialect: str, columns: set[str]) -> list[str]:
+    """Columns added after the table was first made. ``ttl_s`` lets a
+    queued claim's TTL start at its grant: counted from the request, a
+    claim queued behind a long job expired before it was ever held."""
+    if "ttl_s" in columns:
+        return []
+    return ["ALTER TABLE resource_claims ADD COLUMN ttl_s INTEGER "
+            "NOT NULL DEFAULT 0"]

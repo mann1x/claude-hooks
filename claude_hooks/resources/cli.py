@@ -72,7 +72,8 @@ def _items(specs) -> tuple:
 
 def _fmt_claim(c: Claim) -> str:
     since = (c.granted_at or c.created_at)[:19].replace("T", " ")
-    ttl = f", until {c.expires_at[:19].replace('T', ' ')}" if c.expires_at else ""
+    ttl = (f", until {c.expires_at[:19].replace('T', ' ')}" if c.expires_at
+           else f", for {c.ttl_s // 60} min once granted" if c.ttl_s else "")
     why = f" — {c.reason}" if c.reason else ""
     return f"{c.label()}  [{c.owner}, since {since} UTC{ttl}, id {c.id}]{why}"
 

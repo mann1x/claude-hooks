@@ -221,6 +221,9 @@ class ResourceStore:
                     if not self._ready:
                         for stmt in schema.statements(self.dialect):
                             cur.execute(stmt)
+                        for stmt in schema.migrations(
+                                self.dialect, self._columns(cur)):
+                            cur.execute(stmt)
                     out = fn(cur)
                     if self.dialect == "postgres":
                         conn.commit()
@@ -251,12 +254,22 @@ class ResourceStore:
 
     # ─── rows ────────────────────────────────────────────────────────
 
-    def _claims(self, cur) -> list[Claim]:
-        cur.execute("SELECT " + ", ".join(schema.CLAIM_COLUMNS)
+    def _columns(self, cur) -> set[str]:
+        if self.dialect == "postgres":
+            cur.execute("SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'resource_claims' "
+                        "AND table_schema = current_schema()")
+            return {r[0] for r in cur.fetchall()}
+        cur.execute("PRAGMA table_info(resource_claims)")
+        return {r[1] for r in cur.fetchall()}
+
+    def _claims(self, cur,
+                columns: Sequence[str] = schema.CLAIM_COLUMNS) -> list[Claim]:
+        cur.execute("SELECT " + ", ".join(columns)
                     + " FROM resource_claims ORDER BY seq")
         out = []
         for row in cur.fetchall():
-            r = dict(zip(schema.CLAIM_COLUMNS, row))
+            r = dict(zip(columns, row))
             try:
                 items = model.items_from(json.loads(r["items"]))
             except (ValueError, model.SpecError):
@@ -276,7 +289,8 @@ class ResourceStore:
                 granted_at=r["granted_at"] or "",
                 renewed_at=r["renewed_at"] or "",
                 expires_at=r["expires_at"] or "",
-                lease_s=int(r["lease_s"] or 0)))
+                lease_s=int(r["lease_s"] or 0),
+                ttl_s=int(r.get("ttl_s") or 0)))
         return out
 
     def _capacity(self, cur) -> dict[str, int]:
@@ -301,6 +315,10 @@ class ResourceStore:
     def ended(self, c: Claim, now: float) -> Optional[str]:
         """Why claim ``c`` no longer stands, or None."""
         exp = parse_iso(c.expires_at)
+        if exp is None and c.ttl_s > 0 and c.state == "granted":
+            # Granted by code that predates ``ttl_s`` and set no expiry.
+            granted = parse_iso(c.granted_at)
+            exp = granted + c.ttl_s if granted is not None else None
         if exp is not None and exp <= now:
             return "expired"
         if c.host == self.host and c.pid:
@@ -334,10 +352,15 @@ class ResourceStore:
         waiting = [c for c in live if c.state == "waiting"]
         now_iso = self._now_iso()
         for c in model.decide(granted, waiting, capacity):
+            # The TTL bounds the hold, so it starts here, not at the request.
+            exp = (iso(datetime.fromtimestamp(now + c.ttl_s, timezone.utc))
+                   if c.ttl_s > 0 else c.expires_at)
             cur.execute(self._q(
                 "UPDATE resource_claims SET state = 'granted', granted_at = ?, "
-                "renewed_at = ? WHERE id = ?"), (now_iso, now_iso, c.id))
+                "renewed_at = ?, expires_at = ? WHERE id = ?"),
+                (now_iso, now_iso, exp, c.id))
             c.state, c.granted_at, c.renewed_at = "granted", now_iso, now_iso
+            c.expires_at = exp
             self._event(cur, c, "granted", c.reason)
             changed = True
         if changed:
@@ -374,27 +397,25 @@ class ResourceStore:
                             and model.covers(c, items)):
                         return Outcome(c, True, reused=True)
             now_iso = self._now_iso()
-            expires = (iso(datetime.fromtimestamp(self._clock() + ttl_s,
-                                                  timezone.utc))
-                       if ttl_s and ttl_s > 0 else "")
+            # No expiry while queued: the grant sets it from ``ttl_s``.
             cid = uuid.uuid4().hex[:12]
             cur.execute(self._q(
                 "INSERT INTO resource_claims (id, items, state, session_id, "
                 "alias, host, pid, pid_started, reason, cwd, created_at, "
-                "renewed_at, expires_at, lease_s) VALUES "
-                "(?, ?, 'waiting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
+                "renewed_at, expires_at, lease_s, ttl_s) VALUES "
+                "(?, ?, 'waiting', ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)"),
                 (cid, json.dumps([i.as_list() for i in items]),
                  owner.session_id, owner.alias, owner.host or self.host,
                  owner.pid, owner.pid_started, reason[:500], owner.cwd,
-                 now_iso, now_iso, expires, int(lease_s)))
+                 now_iso, now_iso, int(lease_s),
+                 int(ttl_s) if ttl_s and ttl_s > 0 else 0))
             live, capacity, _ = self._settle(cur)
             mine = next((c for c in live if c.id == cid), None)
             if mine is None:
-                # Settled away at once: the process it follows is gone,
-                # or the TTL is already over.
+                # Settled away at once: the process it follows is gone.
                 raise model.SpecError(
                     "the claim ended as soon as it was made: the process it "
-                    "follows is not running, or its ttl is already over")
+                    "follows is not running")
             if mine.state != "granted":
                 self._event(cur, mine, "queued", reason)
                 self._notify(cur)
@@ -510,7 +531,16 @@ class ResourceStore:
                     cur = conn.cursor()
                     if not self._ready:
                         cur.execute("SELECT 1 FROM resource_claims LIMIT 1")
-                    claims = self._claims(cur)
+                    try:
+                        claims = self._claims(cur)
+                    except Exception as e:
+                        if "ttl_s" not in str(e):
+                            raise
+                        # Not migrated yet; this path never writes.
+                        self._rollback(conn, False)
+                        cur = conn.cursor()
+                        claims = self._claims(
+                            cur, schema.LEGACY_CLAIM_COLUMNS)
                     if self.dialect == "postgres":
                         conn.rollback()
                     break

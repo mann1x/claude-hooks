@@ -150,6 +150,8 @@ class Claim:
     renewed_at: str = ""
     expires_at: str = ""
     lease_s: int = 0
+    #: Hold time asked for; ``expires_at`` is set from it at the grant.
+    ttl_s: int = 0
     extra: dict = field(default_factory=dict)
 
     @property
