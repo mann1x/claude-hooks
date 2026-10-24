@@ -18,6 +18,8 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable, Optional
 from claude_hooks import ollama_slots
+from claude_hooks.polykv import client as polykv_client
+from claude_hooks.polykv import wire
 
 log = logging.getLogger("claude_hooks.get_advice.chat_client")
 
@@ -364,6 +366,22 @@ def _early_length_cut(data: dict, body: dict) -> Optional[str]:
     return (f"cut for length after {used} of {allowed} output tokens with "
             f"no content at {data.get('prompt_eval_count')} prompt tokens; "
             f"the server ran out of context")
+
+
+def _placement_reply(data: dict) -> dict:
+    """What :func:`claude_hooks.polykv.client.observe` reads from a reply
+    in Ollama's shape: opencoti's ``opencoti`` block when the wire carried
+    it, and the cached prompt count (opencoti ``cache_n``, xOllama
+    ``prompt_eval_cached_count``), which is the share on xOllama."""
+    out: dict = {}
+    if isinstance(data.get("opencoti"), dict):
+        out["opencoti"] = data["opencoti"]
+    cached = data.get("cached_prompt_tokens")
+    if cached is None:
+        cached = data.get("prompt_eval_cached_count")
+    if isinstance(cached, int):
+        out["timings"] = {"cache_n": cached}
+    return out
 
 
 def _timings(data: dict, *, wall_s: float, queue_s: float,
@@ -1253,6 +1271,14 @@ class ChatClient:
                     # The record keeps the quantity the guard fired on.
                     out["reasoning_loop"] = data["reasoning_loop"]
                     self.last_timings["reasoning_loop"] = data["reasoning_loop"]
+                placement = wire.placement_of(payload)
+                if placement is not None:
+                    self.last_timings["polykv"] = wire.observation_record(
+                        polykv_client.observe(
+                            dict(resp_headers.items()) if resp_headers else {},
+                            _placement_reply(data),
+                            pool_id=placement.get("pool_id")),
+                        placement)
                 out["timings"] = self.last_timings
                 self._note_grant(payload, self.last_timings)
                 return out
@@ -1562,7 +1588,7 @@ class ChatClient:
         # Structured output: ``"json"`` or a JSON schema, passed through.
         if payload.get("format"):
             body["format"] = payload["format"]
-        return body
+        return wire.to_ollama(body, wire.placement_of(payload))
 
     def _from_ollama(self, data: dict) -> dict:
         msg = dict(data.get("message") or {})
@@ -1765,7 +1791,7 @@ class OpenAICompatChatClient(ChatClient):
                 "json_schema": {"name": "result", "schema": fmt}}
         if stream:
             body["stream_options"] = {"include_usage": True}
-        return body
+        return wire.to_openai(body, wire.placement_of(payload), stream=stream)
 
     # ---- reply -------------------------------------------------------- #
 
@@ -1804,8 +1830,11 @@ class OpenAICompatChatClient(ChatClient):
         msg.setdefault("role", "assistant")
         if msg.get("content") is None:
             msg["content"] = ""
-        return self._ollama_shape(msg, ch.get("finish_reason"),
-                                  data.get("usage"), data.get("timings"))
+        out = self._ollama_shape(msg, ch.get("finish_reason"),
+                                 data.get("usage"), data.get("timings"))
+        if isinstance(data.get("opencoti"), dict):
+            out["opencoti"] = data["opencoti"]
+        return out
 
     def _consume_ndjson(self, resp, *,
                         on_token: Optional[Callable[[str], None]],
@@ -1826,6 +1855,7 @@ class OpenAICompatChatClient(ChatClient):
         timings: Optional[dict] = None
         guard = rlg.ReasoningLoopGuard()
         verdict = None
+        placed: Optional[dict] = None
         for raw in resp:
             if verdict is not None:
                 # Plan D1: stop reading; closing the connection stops
@@ -1861,6 +1891,15 @@ class OpenAICompatChatClient(ChatClient):
                 usage = obj["usage"]
             if obj.get("timings"):
                 timings = obj["timings"]
+            if isinstance(obj.get("opencoti"), dict):
+                placed = obj["opencoti"]
+            if obj.get("prompt_progress") is not None and on_token is not None:
+                # Prefill progress: the engine is working before its first
+                # token (opencoti bug-2280), so it counts as liveness.
+                try:
+                    on_token("")
+                except Exception:  # pragma: no cover
+                    log.exception("on_token raised; ignored")
             for ch in obj.get("choices") or []:
                 delta = ch.get("delta") or {}
                 piece = delta.get("content") or ""
@@ -1902,8 +1941,11 @@ class OpenAICompatChatClient(ChatClient):
         if verdict is not None:
             out = self._ollama_shape(msg, rlg.DONE_REASON, usage, timings)
             out["reasoning_loop"] = verdict.public_dict()
-            return out
-        return self._ollama_shape(msg, finish, usage, timings)
+        else:
+            out = self._ollama_shape(msg, finish, usage, timings)
+        if placed is not None:
+            out["opencoti"] = placed
+        return out
 
 
 def parse_endpoint_ref(model_ref: str) -> Optional[tuple[str, Optional[str]]]:

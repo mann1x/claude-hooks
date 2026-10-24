@@ -522,6 +522,15 @@ Cerebriline's. xOllama council chat is out of scope.
 
 ### F1. Client
 
+**Built 2026-10-24.** `claude_hooks/polykv/client.py` (control plane,
+both transports) and `claude_hooks/polykv/wire.py` (the `placement`
+payload key on both chat wires, recorded in `timings["polykv"]`). Live
+gate `scripts/polykv_probe.py` passed on eleven2go xOllama: 2 workers
+shared a 2840-token tree, 0 leaks. Found live: xOllama's `/api/chat`
+carries no `opencoti` block, so its share is `prompt_eval_cached_count`.
+Not yet ported: `_StallWatch`'s two budgets and the 2 s keepalive expiry
+(F3, with streaming placement).
+
 - Port, not import, `opencoti_langgraph`. It pins newer langchain-core/langgraph than our env, and we don't use its chat-model class. Take:
   - its payload builders and error mapping;
   - its stream stall watch;

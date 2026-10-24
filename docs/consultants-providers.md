@@ -95,6 +95,51 @@ on it reports 2,097,152, the whole pool, so the budget follows without a
 code change. The output cap is then the 96k ceiling. One PolyKV session
 can carry up to 32 workers; using that is Milestone F (the plan's F3).
 
+### PolyKV client and placement (plan F1)
+
+`claude_hooks/polykv/client.py` is the engine's control plane, stdlib
+only. It is ported from opencoti's `opencoti_langgraph/client.py` (payload
+builders, error mapping, `Capacity`) and covers the rest of the surface:
+- owner / `shared` / `unowned` pools, copy-on-write `branch_pos`;
+- `/kv`, capacity with the 0338 window fields, admission policy;
+- session close (body form for ids the path cannot carry, `found` read
+  back), resize, slot erase;
+- `/apply-template` (`continue_pool` too), `/tokenize`, `boot_id`,
+  `/metrics`, `/polykv/sampling`.
+
+It speaks to the engine directly (`PolykvClient.direct(root)`) or through
+xOllama's `/api/engine` envelope (`PolykvClient.via_xollama(base, model)`),
+where the engine's own status inside the envelope is the one raised. Pool
+ids are strings, because pool 0 is real.
+
+A chat request asks for a placement with one internal payload key,
+`placement` (`claude_hooks/polykv/wire.py`):
+- **opencoti `/v1/chat/completions`:** top-level `session_id`,
+  `pool_id`, `continue_pool`, `num_ctx` / `num_ctx_min`, `cache_prompt`
+  and `chat_template_kwargs`; on a stream also `stream_options.keepalive`
+  and `return_progress`.
+- **xOllama native `/api/chat`:** `session_id` and
+  `placement{pool_id, num_ctx, num_ctx_min}`, never `options.num_ctx`.
+
+Without the key, both bodies are byte-identical to before. The reply's
+placement is recorded under `timings["polykv"]`:
+- `X-Context-Window`, `X-OpenCoti-Boot-Id`, and the `opencoti` block
+  (`n_pool_shared`, `pool_match`, `pool_len`, `pool_unknown`);
+- on xOllama, which sends no block, the cached prompt count stands in
+  for the share.
+
+A pool named with nothing shared is recorded as a warning rather than
+passing as a success. Prefill `prompt_progress` frames and `: keepalive`
+comments count as stream liveness.
+
+Live gate: `scripts/polykv_probe.py --xollama URL --model M` (or
+`--direct URL`). It opens one owner, builds a two-layer tree cut from
+`/apply-template` and checks it is a byte prefix of the full render, runs
+two workers, then releases everything and audits. On 2026-10-24, on
+eleven2go with `mannix/omnimerge-v4-mtp:IQ2_M` (the only plain model
+there with `client_pools`), both workers got 2840 cached tokens of a
+2840-token tree, the owner used 2865 of 32768 cells, and nothing leaked.
+
 ## Capabilities: `claude_hooks/provider_caps.py`
 
 One `ProviderCaps` record per `(base_url, model)`, cached for 10 minutes.
