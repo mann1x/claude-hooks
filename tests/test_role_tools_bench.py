@@ -878,6 +878,36 @@ if __name__ == "__main__":
 class TestTypedArm(unittest.TestCase):
     """Plan G6: the same critic on the typed protocol, and the cost knob."""
 
+    def test_the_typed_critic_reads_the_report_as_a_record(self):
+        # Plan G7: a typed researcher hands on JSON, so the typed arm's
+        # critic gets the same words as a council_report.
+        from benchmarks.consultants.role_tools_bench import (
+            report_record, run_detect_trial)
+        from consultants.engine import typed_results as tr
+        q = load_detect_questions()[0]
+        rec = tr.loads(report_record(q.research), tr.REPORT)
+        words = sorted(" ".join(q.research.split()).split())
+        said = " ".join([rec["summary"]] + [c["claim"] for c in rec["claims"]])
+        self.assertEqual(words, sorted(said.split()))
+        self.assertIn(("retry.py", 3), [(c["path"], c["line"]) for c in rec["claims"]])
+        sent = []
+
+        class Chat:
+            def chat(self, payload):
+                sent.append(payload["messages"])
+                return {"choices": [{"message": {"role": "assistant",
+                        "content": "DECISION: ready\nok"}}],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+        run_detect_trial(q, arm="tooled-typed", trial_idx=0,
+                         chat_client=Chat(), model="m")
+        user = "\n".join(m["content"] for m in sent[0] if m["role"] == "user")
+        self.assertIn('"record": "council_report"', user)
+        run_detect_trial(q, arm="tooled", trial_idx=0, chat_client=Chat(),
+                         model="m")
+        user = "\n".join(m["content"] for m in sent[-1] if m["role"] == "user")
+        self.assertNotIn('"record"', user)
+
     def test_a_typed_correction_is_caught_through_the_record(self):
         # Plan G7: the verdict is JSON, which has no CORRECTIONS: header.
         from benchmarks.consultants.role_tools_bench import run_detect_trial

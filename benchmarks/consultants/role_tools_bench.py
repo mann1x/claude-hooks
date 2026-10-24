@@ -185,6 +185,28 @@ def load_detect_questions(suite_dir: Path = SUITE_DIR) -> list[DetectQuestion]:
 # ====================================================================== #
 # Scoring
 # ====================================================================== #
+_SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[A-Z`(])")
+#: A cite in the planted reports: ``retry.py:3``, bare file names included.
+_FILE_LINE = re.compile(r"([\w./-]+\.[A-Za-z]\w{0,5}):(\d+)")
+
+
+def report_record(research: str) -> str:
+    """``research`` as the ``council_report`` a typed researcher hands on
+    (plan G7): each sentence citing ``path:line`` is a claim at its first
+    cite, the others are the summary. The words are the prose arm's."""
+    from consultants.engine import typed_results
+    summary, claims = [], []
+    for sent in _SENTENCE.split(" ".join((research or "").split())):
+        cite = _FILE_LINE.search(sent)
+        if cite:
+            claims.append({"claim": sent, "path": cite.group(1),
+                           "line": int(cite.group(2))})
+        elif sent:
+            summary.append(sent)
+    return typed_results.dumps(typed_results.REPORT, {
+        "summary": " ".join(summary), "claims": claims, "gaps": []})
+
+
 def flagged(verdict: str, token: str) -> bool:
     """Whether ``verdict`` doubts ``token``.
 
@@ -398,6 +420,9 @@ def run_detect_trial(q: DetectQuestion, *, arm: str, trial_idx: int,
     if arm.endswith("-typed"):
         # Plan G6: the same critic on the typed protocol (council_verdict).
         state["runtime_control"] = {"typed_protocol": True}
+        # Plan G7: and it reads what a typed researcher hands on, the
+        # report as a record, the same words in claim fields.
+        state["research"] = [report_record(q.research)]
     t0 = time.monotonic()
     try:
         out = council.critic_node(

@@ -6,15 +6,15 @@
 
 ## Active (4)
 
-- [ch-13](.claude-hooks/tasks/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 1m
+- [ch-13](.claude-hooks/tasks/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 56m
 - [ch-15](.claude-hooks/tasks/ch-15.md) **H** `consultants.providers` Ollama Cloud direct (https://ollama.com, no local Ollama) for consultants / get-advice / caliber — 4d
 - [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 5d
-- [ch-12](.claude-hooks/tasks/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 5d
+- [ch-12](.claude-hooks/tasks/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 16m
 
 ## Ready (2)
 
 - [ch-10](.claude-hooks/tasks/ch-10.md) `consultants.polykv` Council F — PolyKV, complete (opencoti + xOllama), last — 9d
-- [ch-11](.claude-hooks/tasks/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 4d
+- [ch-11](.claude-hooks/tasks/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 1m
 
 ## By plan
 
@@ -23,9 +23,9 @@
 
 ## Recently closed (11 of 11)
 
-- [ch-16](.claude-hooks/tasks/archive/ch-16.md) **H** `resources` Resource manager: shared/exclusive/quiet locks on hosts, GPUs, pods, cloud — real-time waiters, no mail — 1h
-- [ch-17](.claude-hooks/tasks/archive/ch-17.md) `benchmarks.models` Model eval 2026-10-22: minimax-m3.1-flash full bench + gemma4 council re-run with thinking fixed — 2h
-- [ch-14](.claude-hooks/tasks/archive/ch-14.md) **H** `consultants.compaction` Compaction: the writer is never shown the task (bug-1087) — port the fork's pinned-prompt rule, re-bench — 3h
+- [ch-16](.claude-hooks/tasks/archive/ch-16.md) **H** `resources` Resource manager: shared/exclusive/quiet locks on hosts, GPUs, pods, cloud — real-time waiters, no mail — 2h
+- [ch-17](.claude-hooks/tasks/archive/ch-17.md) `benchmarks.models` Model eval 2026-10-22: minimax-m3.1-flash full bench + gemma4 council re-run with thinking fixed — 3h
+- [ch-14](.claude-hooks/tasks/archive/ch-14.md) **H** `consultants.compaction` Compaction: the writer is never shown the task (bug-1087) — port the fork's pinned-prompt rule, re-bench — 4h
 - [ch-8](.claude-hooks/tasks/archive/ch-8.md) `consultants.guards` Council D — lane robustness: always-on loop guards, strict nudge profile, named terminal actions — 8d
 - [ch-5](.claude-hooks/tasks/archive/ch-5.md) **H** `consultants.providers` Council A — providers, capability probe, Ollama account, calibration, timings — 8d
 - [ch-7](.claude-hooks/tasks/archive/ch-7.md) **H** `consultants.compaction` Council C — compaction: reduced replay default, full 5-step per role, condensation, overflow — 9d
