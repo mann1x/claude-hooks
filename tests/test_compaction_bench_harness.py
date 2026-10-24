@@ -330,3 +330,30 @@ def test_regrade_recomputes_the_fix_from_the_saved_answer(tmp_path):
     assert out["grader"] == cb.GRADER_VERSION
     # No order (nothing saved to rebuild it from): the fix is left as graded.
     assert cb.regrade(trial, tmp_path, P)["fixed"] is True
+
+
+def test_a_digest_row_for_a_module_never_seen_is_counted_as_invented():
+    """compaction-v7-g2 / -cite: every first fold, in both flows, gave
+    fields for 66-118 modules the lane had not read, none right."""
+    marker = {"role": "user", "_compaction_marker": True,
+              "_compaction_generation": 1, "content": (
+                  "- src/a/lease_router.py: tier, codec\n"          # was read
+                  "- src/b/shard_keeper.py: tier, weight\n"          # invented
+                  "- src/b/shard_keeper.py: tier, weight\n"          # again
+                  "- src/c/span_loader.py: tenant_id, fence_token\n"  # invented
+                  "- src/c/span_loader.py — still to read\n")}
+    calls = [{"messages": HEAD + _read(1, "src/a/lease_router.py", A_BODY)},
+             {"messages": HEAD + [marker]},
+             {"messages": HEAD + [marker]}]               # same generation
+    got = cb.invented_rows(calls, P)
+    assert got == {"invented": 2, "right": 1,
+                   "folds": [{"gen": 1, "invented": 2, "right": 1}]}
+    # A module whose fields a grep had shown is not invented.
+    grep = _grep(2, 'src/b/shard_keeper.py:3:out["lineage"] = 1\n'
+                    'src/b/shard_keeper.py:4:out["weight"] = 2')
+    calls[0]["messages"] = calls[0]["messages"] + grep
+    assert cb.invented_rows(calls, P)["invented"] == 1
+    assert cb.invented_rows([{"messages": HEAD}], P)["folds"] == []
+    # Naming a module without giving it fields claims nothing.
+    plan = {**marker, "content": "- src/c/span_loader.py — still to read"}
+    assert cb.invented_rows([{"messages": HEAD + [plan]}], P)["invented"] == 0

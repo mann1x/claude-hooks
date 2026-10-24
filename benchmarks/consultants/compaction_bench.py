@@ -605,6 +605,47 @@ def grade_table(answer: str, purposes: dict[str, tuple[str, str]],
     return {k: by[k] for k in STATUSES if k in by}
 
 
+def invented_rows(calls: list[dict], purposes: dict[str, tuple[str, str]]
+                  ) -> dict:
+    """Modules a digest gives fields for that the lane had not seen when it
+    was folded: per new digest generation, the lines naming one graded module
+    and any graded field name for a module none of whose fields had been
+    raw in front of the lane (:func:`evidence_in`) before that fold, and
+    how many of them are right. compaction-v7-g2 / -cite: every first fold,
+    in both flows, wrote 66-118 such rows and none was right — the writer
+    or a critic completing the task's table. Read from the saved researcher
+    calls; a measurement of the flow, not a validity check."""
+    vocab = {f for fs in purposes.values() for f in fs}
+    names = {p: _module_names(p) for p in purposes}
+    seen: set[str] = set()
+    done: set[int] = set()
+    folds = []
+    for c in calls:
+        msgs = c.get("messages") or []
+        for m in msgs:
+            gen = int(m.get("_compaction_generation") or 0) \
+                if m.get("_compaction_marker") else 0
+            if not gen or gen in done:
+                continue
+            done.add(gen)
+            got: dict[str, bool] = {}     # module → any of its lines right
+            for ln in str(m.get("content") or "").lower().splitlines():
+                hits = [p for p, rx in names.items() if rx.search(ln)]
+                if len(hits) != 1 or hits[0] in seen:
+                    continue
+                rest = names[hits[0]].sub("", ln.replace(hits[0].lower(), ""))
+                if not any(re.search(rf"\b{re.escape(v)}\b", rest)
+                           for v in vocab):
+                    continue
+                got[hits[0]] = got.get(hits[0], False) or all(
+                    f in rest for f in purposes[hits[0]])
+            folds.append({"gen": gen, "invented": len(got),
+                          "right": sum(got.values())})
+        seen |= set(evidence_in(msgs, purposes))
+    return {"invented": sum(f["invented"] for f in folds),
+            "right": sum(f["right"] for f in folds), "folds": folds}
+
+
 def grade(answer: str, order: list[str]) -> dict:
     text = answer or ""
     low = text.lower()
@@ -886,6 +927,7 @@ def regrade(trial: dict, out: Path, purposes: dict[str, tuple[str, str]],
                         if order else {}),
             "grader": GRADER_VERSION, "status": status,
             "status_where": where,
+            "invented": invented_rows(calls, purposes),
             "table": grade_table(trial.get("answer") or "", purposes, status)}
 
 
@@ -1084,6 +1126,9 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
         "read_phase": executor.phase,
         "grader": GRADER_VERSION, "history": history,
         "status": status, "status_where": where,
+        "invented": invented_rows(
+            [c for c in rec.history if c["role"] == "researcher"],
+            purposes or {}),
         #: {status: [right, total]} of the module table (task v7).
         "table": grade_table(answer, purposes or {}, status),
         "stop_reason": (final.get("_stop_reason") if error is None
@@ -1136,6 +1181,22 @@ def render_report(trials: list[dict], meta: dict) -> str:
             f"/{meta['modules']} | "
             f"{sum(r['re_reads'] for r in rows) / len(rows):.1f} | "
             f"{sum(1 for r in rows if r['error'])} |")
+    lines += ["", "## Rows the digests invented", "",
+              "Rows a digest gave for modules the lane had not seen when it "
+              "was folded (no field of theirs raw before that fold), and how "
+              "many were right. A flow that keeps only what happened writes "
+              "none; these are guesses written as findings.", "",
+              "| arm | modules invented (right) | per fold |", "|---|---|---|"]
+    for arm in arms:
+        rows = [t for t in trials if t["arm"] == arm and t.get("invented")]
+        if not rows:
+            lines.append(f"| {arm} | — | — |")
+            continue
+        inv = sum(r["invented"]["invented"] for r in rows)
+        ok = sum(r["invented"]["right"] for r in rows)
+        per = "; ".join(" ".join(f"g{f['gen']}:{f['invented']}"
+                                 for f in r["invented"]["folds"]) for r in rows)
+        lines.append(f"| {arm} | {inv} ({ok}) | {per} |")
     lines += ["", "## Module table by what the answer had in front of it", "",
               "Share of graded modules whose row (naming no other module) "
               "names both fields its main operation writes, read from the "
