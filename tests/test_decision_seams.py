@@ -401,3 +401,21 @@ def test_meta_critic_node_gets_the_advice(monkeypatch):
     out = council.meta_critic_node(st, chat_client=None, model="m")
     assert out["confidence"] == [0.7]
     assert "p = 0.12" in seen["msgs"][-1]["content"]
+
+
+def test_a_score_made_on_a_cut_answer_says_how_much_was_cut(monkeypatch):
+    # 2026-10-18 audit councils: answers of 14.6k-27.5k characters were
+    # scored on their 12,000-character head and tail, and the events did
+    # not say so.
+    fake = Fake({"sound": {"type": "noul", "noul": 0.14}})
+    monkeypatch.setattr(dc, "evaluate", fake)
+    rec = Rec()
+    long_answer = "a" * (dc.MAX_PART_CHARS + 5_000)
+    decision.review_answer(_shadow(["confidence"]), "q", long_answer,
+                           recorder=rec)
+    cut = rec.events[0]["payload"]["cut"]
+    assert set(cut) == {"answer"} and 5_000 <= cut["answer"] <= 5_100
+    rec2 = Rec()
+    decision.review_answer(_shadow(["confidence"]), "q", "short",
+                           recorder=rec2)
+    assert "cut" not in rec2.events[0]["payload"]

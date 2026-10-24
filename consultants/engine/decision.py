@@ -36,6 +36,7 @@ answer cannot carry a whole transcript to the scorer.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional
 
 from claude_hooks import decision_client as dc
@@ -103,17 +104,45 @@ def ask(state: Optional[dict], seam: str, decision_state: Any,
         log.exception("decision %s raised", seam)
     _record(recorder, seam=seam, role=role, round=round, lane_idx=lane_idx,
             model=ep.model, resp=resp, error=error,
-            shadow=tuple(d.get("shadow") or ()))
+            shadow=tuple(d.get("shadow") or ()), cut=cut_parts(decision_state))
     return resp
 
 
+_CUT = re.compile(r"…\[(\d+) chars cut\]…")
+
+
+def cut_parts(decision_state: Any) -> dict[str, int]:
+    """Characters :func:`decision_client.bound_text` cut from each top-level
+    part of the state. The score was made on what was left: on the
+    2026-10-18 audit councils every answer past 12,000 characters (14.6k to
+    27.5k) and every evidence set was scored on its head and tail only."""
+    out: dict[str, int] = {}
+
+    def walk(v) -> int:
+        if isinstance(v, str):
+            return sum(int(n) for n in _CUT.findall(v))
+        if isinstance(v, dict):
+            return sum(walk(x) for x in v.values())
+        if isinstance(v, (list, tuple)):
+            return sum(walk(x) for x in v)
+        return 0
+    if isinstance(decision_state, dict):
+        for k, v in decision_state.items():
+            n = walk(v)
+            if n:
+                out[str(k)] = n
+    return out
+
+
 def _record(recorder, *, seam, role, round, lane_idx, model, resp, error,
-            shadow=()):
+            shadow=(), cut=None):
     if recorder is None or not hasattr(recorder, "record_event"):
         return
     payload = {"seam": seam, "model": model, "error": error}
     if shadow:
         payload["shadow"] = list(shadow)
+    if cut:
+        payload["cut"] = dict(cut)
     if resp is not None:
         payload.update(served_by=resp.model, dialect=resp.dialect,
                        duration_ms=resp.duration_ms, answers=resp.answers,

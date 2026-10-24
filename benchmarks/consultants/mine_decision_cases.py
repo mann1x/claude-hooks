@@ -305,7 +305,8 @@ def live_scores(con) -> list[dict]:
             continue
         out.append({"model": body.get("served_by") or body.get("model"),
                     "sound": sound, "next": nxt,
-                    "shadow": body.get("shadow") or []})
+                    "shadow": body.get("shadow") or [],
+                    "cut": body.get("cut") or {}})
     return out
 
 

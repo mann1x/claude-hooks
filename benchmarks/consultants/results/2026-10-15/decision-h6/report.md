@@ -278,3 +278,41 @@ Acts when p points no with confidence ≥ the floor; the live floor is 0.6. Cell
 - `xollama:clef-flash:latest` review-1324 (truth False): p=0.706, confidence=0.412
 - `xollama:clef-flash:latest` review-1325 (truth False): p=0.7415, confidence=0.483
 - `xollama:clef-flash:latest` review-1327 (truth False): p=0.793, confidence=0.5859
+
+## Live shadow scores, 2026-10-18 to 10-22 (added 2026-10-24)
+
+Every council since shadow mode deployed asked `jev-latest` the
+`confidence` seam and recorded the answer without acting on it: 11
+councils, 34 events, no errors. Read from each council's
+`transcript.db` (`runtime_events` kind `decision`).
+
+| council | graded (owner) | synthesizer `sound` p | critic `enough` p | answer chars (12k bound) |
+|---|---|---|---|---|
+| cline-sync run 1 (1033-5a67) | weak | 0.14 | 0.18 | 5,654 whole |
+| run 2 (1120-95ce) | weak | 0.17 | 0.10, 0.17 | 5,047 whole |
+| run 3 (1257-42d3) | weak | 0.14 | 0.13, 0.10 | 5,567 whole |
+| run 4 (1358-a02b) | weak | 0.12 | 0.19, 0.06 | 6,469 whole |
+| run 5 (1458-cb89) | weak | 0.11 | 0.16, 0.24 | 14,605 cut |
+| run 6 (1554-40e9) | lost a finding | 0.19 | 0.17, 0.31 | 17,037 cut |
+| run 7 (1747-c73d) | research best yet | 0.16 | 0.22, 0.25 | 16,537 cut |
+| run 8 (1911-d11b) | best answer of the eight | 0.14 | 0.22, 0.13 | 19,951 cut |
+| run 9 (2314-4c0f) | best run yet | 0.16 | 0.24, 0.14 | 27,516 cut |
+| giano (1804-ad1f) | accepted | 0.46 | 0.31, 0.28 | 15,147 cut |
+| giano (2241-1d84) | accepted | 0.30 | 0.29, 0.41 | 45,295 cut |
+
+Findings:
+
+- On the nine audit councils Jev's answer score is flat, 0.11-0.19, while
+  the owner's grades run from weak (runs 1-5) to the best yet (runs 7-9):
+  means 0.136 (runs 1-5) against 0.153 (runs 7-9). It does not rank them.
+- Every one of those scores is below the label the advice would give it
+  ("accepted averaged p 0.46, wrong ones 0.20"). Acting, the critic of
+  the best run would be told its evidence scores like a wrong answer's.
+- The score is made on a cut copy more often than not: every answer past
+  `MAX_PART_CHARS` (12,000) is sent as its head and tail, and the critic's
+  `evidence` (all reports) is always cut. Runs 1-4 were sent whole and
+  are just as flat, so the cut is not the whole story, but the events did
+  not record it. From 2026-10-24 each event carries `cut` (characters
+  removed per part, `decision.cut_parts()`) and the miner keeps it.
+
+Not a basis for acting: `confidence` stays in shadow.

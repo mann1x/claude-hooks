@@ -135,7 +135,8 @@ def test_live_scores_and_accepted_answers(tmp_path):
                     (float(i), role, json.dumps(body)))
     con.commit()
     assert m.live_scores(con) == [{"model": "jev-1.13", "sound": 0.31,
-                                   "next": None, "shadow": ["confidence"]}]
+                                   "next": None, "shadow": ["confidence"],
+                                   "cut": {}}]
     con.close()
     (sdir / "consultancy.json").write_text(json.dumps(
         {"status": "accepted", "root_sid": "csl-a", "child_sids": ["csl-b"]}))
