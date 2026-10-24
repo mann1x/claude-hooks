@@ -755,9 +755,10 @@ class TestMakeRoom:
             if route == "kv":
                 eng.requests.append((method, route, params, data))
                 return Reply(200, {"cells_free": eng.free, "allocations": []})
-            if route.endswith("/close"):
+            out = orig(method, route, params, data)
+            if route.endswith("/close") and (out.body or {}).get("found"):
                 eng.free += 10000
-            return orig(method, route, params, data)
+            return out
         eng.handle = handle
         return eng
 
@@ -826,6 +827,62 @@ class TestMakeRoom:
         mgr = _mgr(eng)
         p = mgr.place(FakeChat(), _payload(), role="researcher")   # no output stated
         assert mgr.make_room(p) is None
+
+    def _full(self, item="plan"):
+        # An unpooled call asking the engine's whole window again.
+        p = _payload(item)
+        p["options"] = {"num_ctx": 32768, "num_predict": 4000}
+        return p
+
+    def test_the_callers_own_cells_are_dropped_for_a_full_window(self):
+        # csl-2026-10-24-1700-78ca: the planner's third call asked 32,768 of
+        # a 32,768-cell engine while its own session held 1,151 — refused
+        # for 47 min, nothing else of the run to close.
+        eng = self._eng(free=40000)
+        mgr = _mgr(eng, min_layer_chars=10 ** 6)       # no layer: unpooled
+        chat = FakeChat()
+        placed = polykv.PlacedChat(chat, mgr, role="planner")
+        placed.chat(self._full())
+        sid = chat.payloads[0]["placement"]["session_id"]
+        eng.sessions[sid] = {"window": 1151}
+        eng.free = 31617
+        placed.chat(self._full())
+        closes = [r for r in eng.requests if r[1].endswith("/close")]
+        assert [r[1] for r in closes] == [f"sessions/{sid}/close"]
+        assert closes[0][3].get("keep_running") is True
+        assert any(e["kind"] == "dropped_own" and e["session"] == sid
+                   for e in mgr.events)
+        assert len(chat.payloads) == 2
+        assert chat.payloads[1]["placement"]["session_id"] == sid
+
+    def test_a_first_call_with_nothing_to_drop_is_sent_once(self):
+        eng = self._eng(free=1000)
+        mgr = _mgr(eng, min_layer_chars=10 ** 6)
+        chat = FakeChat()
+        polykv.PlacedChat(chat, mgr, role="planner").chat(self._full())
+        assert len(chat.payloads) == 1
+        assert not any(e["kind"] == "dropped_own" for e in mgr.events)
+        assert any(e["kind"] == "no_room" for e in mgr.events)
+
+    def test_the_payload_window_is_judged_when_the_placement_states_none(self):
+        eng = self._eng(free=0)
+        mgr = _mgr(eng, min_layer_chars=10 ** 6)
+        p = self._full()
+        pl = mgr.place(FakeChat(), p, role="planner")
+        assert "num_ctx" not in pl
+        assert mgr.make_room(pl) is None              # nothing it can see
+        assert mgr.make_room(pl, payload=p, wait_s=0) is False
+
+    def test_room_refusals_include_xollamas_no_room_503(self):
+        from claude_hooks.get_advice.chat_client import ChatFault
+        no_room = ChatFault(
+            'ollama chat HTTP 503: {"error":"the engine has had no room for '
+            'this request for 2m0s; it is refusing new work rather than '
+            'queueing it"}', fault_class="transport", status=503)
+        assert polykv._admission_refused(no_room)
+        assert not polykv._admission_refused(ChatFault(
+            "ollama chat HTTP 503: model not loaded", fault_class="transport",
+            status=503))
 
 
 # ------------------------------------------------------------ assured

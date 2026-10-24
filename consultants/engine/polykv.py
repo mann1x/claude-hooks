@@ -255,6 +255,8 @@ class KvRunManager:
         self._client_roots: dict[tuple, Optional[str]] = {}
         self.sessions: dict[str, str] = {}        # wire id -> root key
         self._busy: set[str] = set()
+        #: Sessions that finished a call: the engine may hold their cells.
+        self._held: set[str] = set()
         self.stats: dict[str, RoleStats] = {}
         self.events: list[dict] = []
         self.released = False
@@ -824,6 +826,8 @@ class KvRunManager:
         if not placement:
             return
         self._done(placement.get("session_id") or "")
+        with self._lock:
+            self._held.add(placement.get("session_id") or "")
         st.placed += 1
         if error is not None or not out:
             return
@@ -845,16 +849,26 @@ class KvRunManager:
                 self._drop_pool(root, str(placement["pool_id"]), rec["warnings"][0])
 
     def make_room(self, placement: Optional[dict], *,
+                  payload: Optional[dict] = None,
                   wait_s: Optional[float] = None) -> Optional[bool]:
-        """Before a call that states a window: if the engine has fewer free
-        cells than it asks, close this run's idle sessions; if that is not
-        enough while sibling lanes of this run are mid-call, wait for one
-        to end (at most ``wait_s``) and try again. ``True`` when the engine
-        was seen to have the room, ``False`` when it has not, ``None`` when
-        there is nothing to judge (no stated window, an unreadable ``/kv``). Lanes of one run queue on each other this way instead of
-        each spending the chat client's Retry-After loop (live: 60 s per
-        lane) and then failing."""
-        window = _int((placement or {}).get("num_ctx"))
+        """Before a call that asks a window — the placement's, else the
+        payload's own ``options.num_ctx``: if the engine has fewer free
+        cells than it asks, close this run's idle sessions, then drop the
+        caller's own cached cells; if that is not enough while sibling
+        lanes of this run are mid-call, wait for one to end (at most
+        ``wait_s``) and try again. ``True`` when the engine was seen to have
+        the room, ``False`` when it has not, ``None`` when there is nothing
+        to judge (no window asked, an unreadable ``/kv``). Lanes of one run
+        queue on each other this way instead of each spending the chat
+        client's Retry-After loop (live: 60 s per lane) and then failing.
+
+        The caller's own cells count: an unpooled call asks its whole
+        window again, and the engine does not credit what the session
+        already holds (live, csl-2026-10-24-1700-78ca: the planner's third
+        call asked 32,768 of a 32,768-cell engine while its own session
+        held 1,151, and was refused for 47 min)."""
+        window = (_int((placement or {}).get("num_ctx"))
+                  or _int(((payload or {}).get("options") or {}).get("num_ctx")))
         sid = (placement or {}).get("session_id") or ""
         with self._lock:
             rk = self.sessions.get(sid)
@@ -862,7 +876,7 @@ class KvRunManager:
         if not window or root is None or root.client is None:
             return None
         deadline = self._clock() + (WAIT_FOR_ROOM_S if wait_s is None else wait_s)
-        waited = False
+        waited = own_dropped = False
         while True:
             try:
                 free = _int((root.client.kv(live=True) or {}).get("cells_free"))
@@ -875,6 +889,10 @@ class KvRunManager:
                 return True
             if self.reclaim_idle(placement):
                 continue
+            if not own_dropped:
+                own_dropped = True
+                if self._drop_own(sid, root):
+                    continue
             with self._lock:
                 others = [s for s in self._busy
                           if s != sid and self.sessions.get(s) == rk]
@@ -919,6 +937,26 @@ class KvRunManager:
                     self.sessions.pop(s, None)
         self.events.append({"kind": "reclaimed", "root": rk, "sessions": n})
         return n
+
+    def _drop_own(self, sid: str, root: Root) -> bool:
+        """Drop the calling session's cached cells and booking, keeping
+        the session (``keep_running``). Its KV is only a cache — the next
+        call re-prefills its private tokens. ``True`` when the engine had
+        the session; a session that never finished a call holds nothing
+        and is not asked."""
+        with self._lock:
+            if sid not in self._held:
+                return False
+            self._held.discard(sid)
+        try:
+            found = root.client.close_session(sid, keep_running=True).found
+        except (OpencotiError, OSError) as e:
+            log.info("polykv: drop own %s: %s", sid, e)
+            return False
+        if found:
+            self.events.append({"kind": "dropped_own", "root": root.key,
+                                "session": sid})
+        return bool(found)
 
     def widen(self, placement: Optional[dict], error: BaseException,
               payload: dict) -> bool:
@@ -1459,9 +1497,12 @@ def placed(client: Any, mgr: Optional[KvRunManager], role: str) -> Any:
 
 
 def _admission_refused(e: BaseException) -> bool:
-    """The engine refused the call for room (429), not for its content."""
-    return getattr(e, "status", None) == 429 or (
-        "HTTP 429" in str(e) and "admission" in str(e))
+    """The engine refused the call for room (429, or xOllama's 503 after
+    two minutes without any), not for its content."""
+    text = str(e)
+    return (getattr(e, "status", None) == 429
+            or ("HTTP 429" in text and "admission" in text)
+            or ("503" in text and "no room for this request" in text))
 
 
 def _owner_full(e: BaseException) -> bool:
@@ -1528,7 +1569,7 @@ class PlacedChat:
         sent = {**payload, wire.KEY: {k: v for k, v in placement.items()
                                       if not k.startswith("_")}}
         try:
-            mgr.make_room(placement)
+            mgr.make_room(placement, payload=payload)
         except Exception:  # noqa: BLE001 — room is advice, never a failure
             log.exception("polykv: make_room failed; sending as is")
         try:
@@ -1540,8 +1581,9 @@ class PlacedChat:
                     # growing the owner or a sibling ending makes room.
                     if not mgr.grow_owner(placement):
                         raise
-                elif _admission_refused(e) and (mgr.reclaim_idle(placement)
-                                                or mgr.make_room(placement)):
+                elif _admission_refused(e) and (
+                        mgr.reclaim_idle(placement)
+                        or mgr.make_room(placement, payload=payload)):
                     # Refused for room: this run's idle lanes freed theirs,
                     # or a sibling ended while this one waited.
                     pass
