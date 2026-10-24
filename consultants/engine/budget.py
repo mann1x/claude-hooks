@@ -237,9 +237,12 @@ def resolve_window(chat_client: Any, model: str,
     (``[budget]`` / ``[role.X.models."<m>"]``).
 
     Local Ollama is sent the resolved window as ``options.num_ctx``, the
-    same value on every call so the model never reloads; nothing else is
-    (cloud ignores it, xOllama reloads on it, opencoti's window is
-    Milestone F's). A client without a capability record keeps the old
+    same value on every call so the model never reloads; a local xOllama
+    is sent only a pinned one (an unpinned xOllama keeps the window it
+    loaded). Nothing else is (cloud ignores it, opencoti's window is
+    Milestone F's). xOllama loads at its default without one: a model
+    loaded at 262,144 was reloaded at 32,768 by the next council call
+    that stated none (csl-2026-10-24-1927-bc05). A client without a capability record keeps the old
     probe (:func:`context_length_of`).
     """
     granted = getattr(chat_client, "granted_window", None)
@@ -257,7 +260,9 @@ def resolve_window(chat_client: Any, model: str,
     local = (caps is not None and caps.backend == "ollama"
              and caps.cloud is False)
     if pinned:
-        return Window(pinned, "pinned", pinned if local else None)
+        sent = local or (caps is not None and caps.backend == "xollama"
+                         and caps.cloud is False)
+        return Window(pinned, "pinned", pinned if sent else None)
     if caps is None:
         ctx = context_length_of(chat_client, model)
         return Window(ctx, "probe" if ctx else "unknown")

@@ -124,12 +124,20 @@ def test_a_pin_below_the_trained_context_wins_on_local_ollama():
     assert (w.tokens, w.source, w.send_num_ctx) == (32_768, "pinned", 32_768)
 
 
-def test_pinned_window_is_sent_only_to_local_ollama():
+def test_pinned_window_is_sent_to_local_ollama_and_xollama_only():
     pin = budget.knobs_from({"num_ctx": 16_384})
     local = budget.resolve_window(_Caps(_caps(cloud=False)), "m", pin)
     cloud = budget.resolve_window(_Caps(_caps(cloud=True)), "m", pin)
+    xo = budget.resolve_window(
+        _Caps(_caps(backend="xollama", cloud=False)), "m", pin)
+    oc = budget.resolve_window(
+        _Caps(_caps(backend="opencoti", declared_num_ctx=8192)), "m", pin)
     assert (local.tokens, local.send_num_ctx) == (16_384, 16_384)
     assert (cloud.tokens, cloud.send_num_ctx) == (16_384, None)
+    # xOllama loads at its default without one (csl-2026-10-24-1927-bc05:
+    # a 262,144 load came back at 32,768); a pin is the same every call.
+    assert (xo.tokens, xo.send_num_ctx) == (16_384, 16_384)
+    assert (oc.tokens, oc.send_num_ctx) == (16_384, None)
 
 
 def test_granted_window_wins_and_no_caps_keeps_the_old_probe():
