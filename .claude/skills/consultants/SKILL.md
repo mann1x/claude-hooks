@@ -1346,7 +1346,7 @@ model declares none). Same scope question, then:
 
 Read `compaction` (global) and each role's `compaction` / `models`
 blocks from `config show`. Only set keys appear; the shipped defaults
-are `flow` `reduced`, `placement` `system`, `review` on, `target_share`
+are `flow` `full`, `placement` `system`, `review` on, `target_share`
 0.25, `writer_attempts` 3, `ledger` on, `tool_result_max_chars` 32000,
 `file_result_max_chars` 50000, `stale_read_share` 0.4,
 `reasoning_replay` `none`. Every compaction step runs on the role's own
@@ -1357,7 +1357,7 @@ first (all roles, one role, one role on one model), then:
   [--model M]] --flow reduced|full|basic`. `reduced`: a present-tense
   replay writer, a retrospective and one reviewer (3 calls). `full`: the
   writer marks a halfway point, two critics each rewrite a half, a
-  synthesizer joins them (5 calls) — for small models, opt-in per role.
+  synthesizer joins them (5 calls) — the default.
   `basic`: no model call, only the elision note.
 - **Placement** — `--placement system|user`: the role of the message
   that replaces the folded span.

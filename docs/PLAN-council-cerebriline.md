@@ -282,7 +282,7 @@ lanes:
 | **reduced** (replay) | 1. present-tense **replay writer** → 2. **retrospective** → 3. **reviewer/synthesizer** of the whole replay | **every role, every model** — the shipped default |
 | **full (5-step agentic)** | 1. replay writer with `<<<HALFWAY>>>` marker → 2. retrospective → 3. critic, first half → 4. critic, second half → 5. synthesizer (joins halves, sole reviser of the retrospective) | opt-in **per role** by the user; small models need it, so it must work as well as the fork's |
 
-- `roles.<role>.compaction.flow = "reduced" | "full"`, default `reduced` (owner, 2026-10-10). The per-(role, model) layer of §0.2 applies like any other knob.
+- `roles.<role>.compaction.flow = "reduced" | "full"`, default `full` (owner, 2026-10-24; was `reduced` from 2026-10-10 — compaction-v7-g2: full carried 62/62 digest-only rows and fixed the bug, reduced got the fix wrong). The per-(role, model) layer of §0.2 applies like any other knob.
 - **No automatic detection** of small or local models, and **no link to the guards profile**: the full flow is on only where the user turned it on for that role.
 - Note from 02 §0: Cerebriline itself has no reduced flow; every model there gets all five calls. The reduced flow is our default by the owner's design. The one-call fold is xOllama's and is **not** adopted.
 - **Writer:**

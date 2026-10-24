@@ -3387,9 +3387,10 @@ def build_parser() -> argparse.ArgumentParser:
     cco.add_argument("--role", choices=list(cc.ROLES))
     cco.add_argument("--model", help="Model exactly as the role names it.")
     cco.add_argument("--flow", choices=["reduced", "full", "basic"],
-                     help="reduced (default): replay writer, retrospective, "
-                          "one reviewer. full: halfway marker, two "
-                          "half-critics, synthesizer. basic: no model call.")
+                     help="full (default): halfway marker, two "
+                          "half-critics, synthesizer. reduced: replay "
+                          "writer, retrospective, one reviewer. basic: no "
+                          "model call.")
     cco.add_argument("--placement", choices=["system", "user"],
                      help="Role of the message that replaces the folded "
                           "span (default system).")

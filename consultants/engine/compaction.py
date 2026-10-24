@@ -69,7 +69,10 @@ class Settings:
     ``[compaction]``, ``[role.X.compaction]`` and
     ``[role.X.models."<m>"]`` merged over them, plus the run's stall
     overrides. Built by :func:`settings_from`."""
-    flow: str = "reduced"
+    #: ``full`` by the owner's ruling, 2026-10-24: on compaction-v7-g2 it
+    #: carried 62 of 62 rows only the digest held and fixed the bug, where
+    #: ``reduced`` got the fix wrong.
+    flow: str = "full"
     #: Role of the message that replaces the folded span. ``system`` is
     #: ours; ``user`` is the fork's. An A/B on the C bench decides the
     #: default (plan §11.2).

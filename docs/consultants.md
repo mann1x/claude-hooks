@@ -1696,8 +1696,8 @@ fault) is waited out: without bound for the writer, three times on a
 
 | flow | calls | what it is for |
 |---|---|---|
-| `reduced` (default) | writer → retrospective → reviewer | every role, every model |
-| `full` | writer (with a `<<<HALFWAY>>>` mark) → retrospective → critic, first half → critic, second half → synthesizer | small models; opt-in per role |
+| `full` (default) | writer (with a `<<<HALFWAY>>>` mark) → retrospective → critic, first half → critic, second half → synthesizer | every role, every model (default since 2026-10-24, compaction-v7-g2) |
+| `reduced` | writer → retrospective → reviewer | opt-in; about half the folding time, but it lost the fix on compaction-v7-g2 |
 | `basic` | none | the deterministic elision note only |
 
 The **writer** is the fork's present-tense replay prompt, verbatim: a

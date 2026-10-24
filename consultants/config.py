@@ -969,8 +969,8 @@ def _choice(*allowed: str):
 
 
 #: Compaction (plan C). Defaults live in
-#: ``consultants.engine.compaction.Settings``: flow "reduced" (replay
-#: writer → retrospective → reviewer), placement "system", review true,
+#: ``consultants.engine.compaction.Settings``: flow "full" (halfway
+#: writer → retrospective → two half-critics → synthesizer), placement "system", review true,
 #: target_share 0.25, writer_attempts 3, ledger true, tool results
 #: middle-truncated past 32000 chars (file contents 50000), stale reads
 #: rewritten at 0.4 of the window, reasoning_replay "none".
@@ -2159,9 +2159,9 @@ def _render(cfg: ConsultantsConfig, *,
     L.append("")
     L.append("[compaction]")
     L.append("# Compaction (plan C). Unset keys use the defaults: flow = "
-             "\"reduced\" (replay writer, retrospective, one reviewer; "
-             "\"full\" adds the halfway marker, two half-critics and a "
-             "synthesizer; \"basic\" makes no model call), placement = "
+             "\"full\" (halfway marker, retrospective, two half-critics, "
+             "synthesizer; \"reduced\" is a replay writer, retrospective "
+             "and one reviewer; \"basic\" makes no model call), placement = "
              "\"system\", review = true, target_share = 0.25, "
              "writer_attempts = 3, ledger = true, tool_result_max_chars = "
              "32000, file_result_max_chars = 50000, stale_read_share = 0.4, "

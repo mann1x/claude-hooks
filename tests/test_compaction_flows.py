@@ -816,3 +816,11 @@ def test_the_last_turn_ceiling_is_a_share_of_the_usable_input():
     assert fork_ceiling < turn < budget.LAST_TURN_CEILING_SHARE * window
     cut = budget.plan_cut(msgs, keep_tokens=20_000, context_length=window)
     assert cut.reason == "last-turn-ceiling" and cut.pinned_index == 3
+
+
+def test_the_shipped_flow_is_full():
+    # Owner's ruling, 2026-10-24 (compaction-v7-g2): full carried every
+    # digest-only row and fixed the bug; reduced got the fix wrong.
+    from consultants.engine import compaction
+    assert compaction.Settings().flow == "full"
+    assert compaction.settings_from({}, "researcher", "m").flow == "full"
