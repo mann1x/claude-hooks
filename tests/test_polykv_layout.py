@@ -261,3 +261,43 @@ def test_config_layout_round_trip(tmp_path):
         assert "layout" in str(e)
     else:
         raise AssertionError("a bad layout was accepted")
+
+
+class _SizedForks(SizedEngine):
+    """Forks answer their sizes, with a 32k per-session ceiling."""
+
+    def handle(self, method, route, params, data):
+        from claude_hooks.polykv.client import Reply
+        if route == "props" and self.refuse is None:
+            self.requests.append((method, route, params, data))
+            return Reply(200, {"features": self.features, "opencoti": {
+                "polykv": {"pools_enabled": True},
+                "kv": {"session_ctx_max": 32768}}})
+        out = super().handle(method, route, params, data)
+        if route.endswith("/fork") and out.status == 200:
+            cid = out.body["pool_id"]
+            parent = self.pools[out.body["parent"]]
+            own = len(data.get("prompt") or "") // 2
+            self.pools[cid]["own_len"] = own
+            self.pools[cid]["prefix_len"] = (parent.get("prefix_len")
+                                             or parent.get("own_len", 0)) + own
+            out = Reply(200, dict(self.pools[cid]))
+        return out
+
+
+def test_a_fork_attach_leaves_room_for_the_whole_chain():
+    eng, chat = _SizedForks(), FakeChat()
+    mgr = _mgr(eng)
+    _send(mgr, chat, "critic", critic())
+    sent = _send(mgr, chat, "synthesizer", synth())
+    pid = str(sent["placement"]["pool_id"])
+    chain = mgr.roots["direct|e"].chain_cells[pid]
+    assert chain == eng.pools[int(pid)]["prefix_len"]
+    assert chain > eng.pools[int(pid)]["own_len"]       # the parents count
+    # A 96k cold-budget output would ask the ceiling: it gets what is left.
+    big = synth()
+    p = {"model": "q", "messages": big, "options": {"num_predict": 96000}}
+    polykv.PlacedChat(chat, mgr, role="synthesizer").chat(p)
+    placed = chat.payloads[-1]["placement"]
+    assert placed["num_ctx"] + mgr.roots["direct|e"].chain_cells[
+        str(placed["pool_id"])] <= 32768

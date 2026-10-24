@@ -125,6 +125,10 @@ class Root:
     #: pool id -> (cells, chars) of a layer this run made, for the private
     #: window of the calls that attach it
     sizes: dict = field(default_factory=dict)
+    #: pool id -> cells of the whole chain up to that layer (its
+    #: ``prefix_len``): what an attaching call shares, and so what its
+    #: private window can never also take
+    chain_cells: dict = field(default_factory=dict)
     #: the engine's per-session ceiling (``/props`` ``opencoti.kv``); a
     #: stated window above it is clamped, never sent
     ctx_max: int = 0
@@ -355,6 +359,7 @@ class KvRunManager:
         root.pools.clear()
         root.rebuilds.clear()
         root.sizes.clear()
+        root.chain_cells.clear()
         root.owner, root.owner_window = None, 0       # gone with the engine
         root.boot_id = boot
         self.events.append({"kind": "restart", "root": root.key,
@@ -464,6 +469,8 @@ class KvRunManager:
                 self.created.append((root.key, pid))
                 if cells:
                     root.sizes[pid] = (cells, len(cut))
+                    root.chain_cells[pid] = (
+                        _int((made or {}).get("prefix_len")) or cells)
             self.events.append({"kind": "layer", "root": root.key, "key": key,
                                 "pool_id": pid, "chars": len(cut),
                                 "owner": owner,
@@ -627,7 +634,21 @@ class KvRunManager:
         window = _align(private + PRIVATE_FLOOR + out)
         # A budget sized from a cold model's trained window asked a 96k
         # output of a 32k engine: the 429 for that never clears.
-        return min(window, _align_down(root.ctx_max)) if root.ctx_max else window
+        cap = self._window_cap(root, pid)
+        return min(window, cap) if cap else window
+
+    @staticmethod
+    def _window_cap(root: Root, pid: Optional[str]) -> int:
+        """The largest private window a call attaching ``pid`` can be
+        admitted with: the engine's ceiling less the layer chain it shares,
+        which the engine holds in the same cells. Asking the ceiling itself
+        beside a layer can never be admitted (live, csl-2026-10-24-1803-00d6:
+        32,768 private asked next to a 1,151-cell layer on a 32,768-cell
+        engine; 429 then 503 until cancelled). 0 when no ceiling is known."""
+        if not root.ctx_max:
+            return 0
+        held = root.chain_cells.get(str(pid), 0) if pid is not None else 0
+        return max(WINDOW_ALIGN, _align_down(root.ctx_max - held))
 
     def _give_up(self, root: Root, key: str, why: str, *, retry: bool = False) -> None:
         log.warning("polykv: %s layer %s: %s", root.key, key, why)
@@ -774,6 +795,8 @@ class KvRunManager:
                 self._covered[pid] = covered
                 if cells:
                     root.sizes[pid] = (cells, len(text))
+                    root.chain_cells[pid] = (
+                        _int((made or {}).get("prefix_len")) or cells)
             self.events.append({"kind": "layer", "root": root.key, "key": key,
                                 "pool_id": pid, "chars": len(text),
                                 "parent": parent, "owner": owner,
@@ -983,7 +1006,7 @@ class KvRunManager:
         need = _align(private + PRIVATE_FLOOR + out)
         root = self.roots.get(placement.get("_layer_root") or "")
         if root is not None and root.ctx_max:
-            need = min(need, _align_down(root.ctx_max))
+            need = min(need, self._window_cap(root, placement.get("pool_id")))
         if need <= granted:
             return False
         asked = int(placement["num_ctx"])

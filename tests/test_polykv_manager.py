@@ -1390,8 +1390,28 @@ class TestColdBudget:
         p["options"] = {"num_predict": 96000}
         mgr = _mgr(eng)
         polykv.PlacedChat(chat, mgr, role="researcher").chat(p)
-        assert mgr.roots["direct|e"].ctx_max == 32768
-        assert chat.payloads[-1]["placement"]["num_ctx"] == 32768
+        root = mgr.roots["direct|e"]
+        assert root.ctx_max == 32768
+        place = chat.payloads[-1]["placement"]
+        # The layer it attaches sits in the same cells: asking the whole
+        # ceiling beside it can never be admitted (csl-2026-10-24-1803-00d6).
+        layer = root.chain_cells[str(place["pool_id"])]
+        assert layer > 0
+        assert place["num_ctx"] + layer <= 32768
+        assert place["num_ctx"] == polykv._align_down(32768 - layer)
+
+    def test_widen_never_asks_past_the_ceiling_less_the_layer(self):
+        eng = self.Ceiling()
+        mgr = _mgr(eng)
+        p = _payload()
+        p["options"] = {"num_predict": 4000}
+        pl = mgr.place(FakeChat(), p, role="researcher")
+        layer = mgr.roots["direct|e"].chain_cells[str(pl["pool_id"])]
+        err = Exception("request (40000 tokens, 1000 of them shareable from "
+                        "pool 0) exceeds the available context size "
+                        f"({pl['num_ctx']} private tokens)")
+        mgr.widen(pl, err, p)
+        assert pl["num_ctx"] + layer <= 32768
 
     def test_make_room_reclaims_once_and_forgets_what_it_closed(self):
         eng = self.Ceiling()
