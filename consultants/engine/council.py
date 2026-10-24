@@ -4252,7 +4252,8 @@ def _settled_audit(chat_client, model, text, *, state, cwd, recorder
     ``synthesizer:settled-audit``."""
     from consultants.engine import memory
     try:
-        findings = memory.settled_findings(cwd, state.get("question") or "")
+        findings = memory.settled_findings(cwd, state.get("question") or "",
+                                           state.get("research") or ())
         items = memory.answer_items(text) if findings else []
     except Exception:  # noqa: BLE001 — memory never fails a council
         log.exception("settled audit: ledger unreadable")

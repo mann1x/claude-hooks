@@ -174,3 +174,69 @@ class TestRun9:
         assert "needs a run" not in one and "needs a run" in two
         assert memory.apply_settled_audit(out, [f, other], items, {1: 1, 2: 2},
                                           examined=ex)[1] == 0
+
+
+class TestReportPaths:
+    """ch-13, after SCM: keyed on the question alone, a settled finding at
+    a file the reports cite never reached the judges."""
+
+    def _ledger(self, tmp_path):
+        lg = Ledger(tmp_path)
+        asked, _ = lg.record("Create then edit refused", "the editor refuses "
+                             "a file apply_patch created", paths=[PATH])
+        cited, _ = lg.record("Delimiter walk off by one per CRLF line",
+                             "the offset walk counts one character early",
+                             paths=["src/tools/delimiter-balance.ts:479"])
+        lg.settle(cited.id, "refuted", "CRLF is normalised before the walk",
+                  by="user")
+        worded, _ = lg.record("Editor tools refuse audit edits", "words only",
+                              paths=["src/other/place.ts:9"])
+        return asked, cited, worded
+
+    def test_a_settled_finding_at_a_cited_file_reaches_the_judges(self, tmp_path):
+        asked, cited, worded = self._ledger(tmp_path)
+        state = {"cwd": str(tmp_path), "question": f"audit the editor, {PATH}",
+                 "research": ["The walk at src/tools/delimiter-balance.ts:470 "
+                              "skips CRLF."]}
+        for role in ("critic", "meta_critic", "synthesizer"):
+            text = memory.with_known_findings(_msgs(), state, role)[-1]["content"]
+            assert f"{cited.id} [refuted]" in text, role
+            assert asked.id in text
+        # The planner runs before any report, and a question alone is as before.
+        plan = memory.with_known_findings(
+            _msgs(), {**state, "research": []}, "planner")[-1]["content"]
+        assert cited.id not in plan
+        assert [f.id for f in memory.settled_findings(
+            str(tmp_path), state["question"], state["research"])] == [cited.id]
+        assert memory.settled_findings(str(tmp_path), state["question"]) == []
+
+    def test_the_question_findings_come_first_and_stay(self, tmp_path):
+        asked, cited, worded = self._ledger(tmp_path)
+        q = f"audit the editor tools, {PATH}"
+        alone = [f.id for f in memory.known_findings(str(tmp_path), q)]
+        with_reports = [f.id for f in memory.known_findings(
+            str(tmp_path), q, reports=["see src/tools/delimiter-balance.ts:1"])]
+        assert with_reports[:len(alone)] == alone
+        assert with_reports[len(alone):] == [cited.id]
+
+    def test_shared_words_alone_add_nothing(self, tmp_path):
+        # Past the question's own bound, a finding the question's words
+        # match is not added for the reports: only a shared place is.
+        asked, cited, worded = self._ledger(tmp_path)
+        q = f"audit the editor tools, {PATH}"
+        out = [f.id for f in memory.known_findings(
+            str(tmp_path), q, k=1,
+            reports=["src/tools/delimiter-balance.ts:479"])]
+        assert out == [asked.id, cited.id]
+
+    def test_the_settled_audit_checks_what_the_judges_were_shown(self, tmp_path):
+        from consultants.engine.council import _settled_audit
+        asked, cited, worded = self._ledger(tmp_path)
+        state = {"cwd": str(tmp_path), "question": f"audit the editor, {PATH}",
+                 "research": ["src/tools/delimiter-balance.ts:470 skips CRLF"]}
+        answer = ("## Ranked defects\n\n1. **CRLF walk off by one** — "
+                  "`src/tools/delimiter-balance.ts:479`.\n")
+        c = _Seq("I1: S1 — restates it")
+        _settled_audit(c, "m", answer, state=state, cwd=str(tmp_path),
+                       recorder=None)
+        assert c.calls and cited.id in c.calls[0]["messages"][-1]["content"]

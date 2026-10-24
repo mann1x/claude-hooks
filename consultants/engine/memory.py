@@ -24,6 +24,16 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 KNOWN_MAX = 12
+#: Findings added for the files the research reports cite, on top of the
+#: question's (ch-13, after SCM's recall on what the turn touches): keyed on
+#: the question alone, a settled finding about a file the reports cite never
+#: reached the judges unless the question named that file. Offline replay
+#: over the 8 cline-sync councils of 2026-10-18 (current ledger): 5-9 added
+#: each, csf-13/14 (refuted) in 7-8, csf-11 (by_design) in 4, nothing taken
+#: away; at most 9, so the bound holds all of them (a cap of 6 kept the
+#: fixed ones and dropped the settled).
+REPORT_EXTRA = 12
+REPORT_PATHS_MAX = 200
 CLAIM_CHARS = 400
 
 #: What each role is told to do with a finding of each status.
@@ -82,9 +92,19 @@ def paths_in(text: str) -> list[str]:
     return [p for p in _PATH.findall(text or "") if "/" in p or ":" in p][:40]
 
 
-def known_findings(cwd: str, question: str, *, k: int = KNOWN_MAX) -> list:
-    """The ledger's findings relevant to ``question``; ``[]`` when the
-    project has no ledger or it cannot be read."""
+def report_paths(reports) -> list[str]:
+    """The files the research reports cite, in order, each once."""
+    found = [p for r in reports or () for p in _PATH.findall(str(r or ""))
+             if "/" in p or ":" in p]
+    return list(dict.fromkeys(found))[:REPORT_PATHS_MAX]
+
+
+def known_findings(cwd: str, question: str, *, k: int = KNOWN_MAX,
+                   reports=()) -> list:
+    """The ledger's findings relevant to ``question``, then up to
+    :data:`REPORT_EXTRA` more at a file the ``reports`` cite (a shared
+    place, not shared words; never displacing the question's); ``[]`` when
+    the project has no ledger or it cannot be read."""
     if not cwd:
         return []
     try:
@@ -95,7 +115,17 @@ def known_findings(cwd: str, question: str, *, k: int = KNOWN_MAX) -> list:
         lg = Ledger(findings_root(cwd))
         if not lg.exists:
             return []
-        return lg.relevant(question, paths_in(question), k=k)
+        asked = paths_in(question)
+        found = lg.relevant(question, asked, k=k)
+        cited = report_paths(reports)
+        if cited:
+            from claude_hooks.findings.ledger import place_score
+            have = {f.id for f in found}
+            found += [f for f in lg.relevant(question, asked + cited,
+                                             k=k + REPORT_EXTRA)
+                      if f.id not in have and place_score(f.paths, cited) > 0
+                      ][:REPORT_EXTRA]
+        return found
     except Exception:  # noqa: BLE001 — memory never fails a council
         log.exception("known findings unreadable for %s", cwd)
         return []
@@ -135,7 +165,8 @@ def with_known_findings(msgs: list[dict], state: dict, role: str) -> list[dict]:
     if not msgs or msgs[-1].get("role") != "user":
         return msgs
     block = findings_block(
-        known_findings(state.get("cwd") or "", state.get("question") or ""),
+        known_findings(state.get("cwd") or "", state.get("question") or "",
+                       reports=state.get("research") or ()),
         role)
     if not block:
         return msgs
@@ -173,9 +204,10 @@ _SETTLED_LINE = re.compile(r"^\W*I(\d{1,3})\W*[:.)\]-]\s*\**S(\d{1,3})\b"
                            r"\**\s*(?:[—–:-]+\s*)?(.*)$", re.M)
 
 
-def settled_findings(cwd: str, question: str) -> list:
-    """The by_design and refuted findings relevant to ``question``."""
-    return [f for f in known_findings(cwd, question)
+def settled_findings(cwd: str, question: str, reports=()) -> list:
+    """The by_design and refuted findings relevant to ``question`` and the
+    files the ``reports`` cite: the same set the judges were shown."""
+    return [f for f in known_findings(cwd, question, reports=reports)
             if f.status in SETTLED_AGAINST]
 
 

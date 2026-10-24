@@ -350,7 +350,7 @@ def test_item7_the_council_notes_a_settled_finding_listed_again(tmp_path, monkey
     from consultants.engine import council
     f = SimpleNamespace(id="csf-12", status="by_design", title="grep full-file credit",
                         decision="Deliberate.")
-    monkeypatch.setattr(memory, "settled_findings", lambda cwd, q: [f])
+    monkeypatch.setattr(memory, "settled_findings", lambda cwd, q, reports=(): [f])
     sent = []
 
     def chat(payload):
@@ -362,7 +362,7 @@ def test_item7_the_council_notes_a_settled_finding_listed_again(tmp_path, monkey
         state=_state(), cwd=str(tmp_path), recorder=None)
     assert sent[0][0]["content"].startswith(memory.SETTLED_AUDIT_SYSTEM)
     assert "restates csf-12" in next(ln for ln in text.split("\n") if "Narrow" in ln)
-    monkeypatch.setattr(memory, "settled_findings", lambda cwd, q: [])
+    monkeypatch.setattr(memory, "settled_findings", lambda cwd, q, reports=(): [])
     sent.clear()
     same, _, _ = council._settled_audit(
         SimpleNamespace(chat=chat), "m", "x", state=_state(), cwd=str(tmp_path),
