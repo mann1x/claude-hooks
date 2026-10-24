@@ -564,6 +564,27 @@ Not yet ported: `_StallWatch`'s two budgets and the 2 s keepalive expiry
 
 ### F3. Per-run `KvRunManager`
 
+**Built 2026-10-24 (modes off / affinity / pooled / auto).**
+`consultants/engine/polykv.py`: `KvRunManager` + `PlacedChat`, wrapped
+around each role client by the runner when `[polykv]` is on (no state
+key; off wraps nothing). One layer so far, the leading system run
+(grounding + role prompt + tools) as a shared ephemeral root, before F4
+splits more. Release + audit in `_run_with_state`'s finally, snapshot on
+suspend, restore on resume (`polykv.json`). Live smoke on eleven2go
+(xOllama, 32k cells, `benchmarks/consultants/polykv_smoke.py`): 3/3
+researcher lanes pooled, 49,809 of 49,997 prompt tokens shared, nothing
+leaked, concurrent and sequential — after five fixes the first runs
+forced: layers cut from xOllama's own render (the engine's shared 1,050
+of 16,557 tokens), pinned while in use (an unpinned layer was swept
+between lanes), a private `num_ctx` per attach (without it the whole
+prompt was charged again), idle sessions reclaimed and siblings waited
+for before a call with no room (a finished lane kept 10,496 cells
+booked), and never-attached layers released at settle (never swept).
+Still open: `assured` (owner booking, worker 429 grow, 60 s keepalive),
+a capacity gate before Sends (lanes queue only inside the manager now),
+the compaction continuation path, follow-up adoption and the hold until
+accept, a live council.
+
 - Held beside the chat clients through `GraphDeps`, never in council state.
 - Sessions are `<sid>~<role>~lane<k>`; `/` and other route-breaking characters are replaced with `~` (fork gotcha).
 - **Prefix layers** (requires the prompt reorder, F4):

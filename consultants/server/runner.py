@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from consultants import config as cc
 from consultants.engine import council as council_mod
+from consultants.engine import polykv as polykv_mod
 from consultants.engine import storage
 from consultants.engine.run_control import RunSuspended
 
@@ -150,9 +151,11 @@ def make_runner(*, ollama_base_url: str):
         # existing native ``/api/chat`` ChatClient. Both expose the
         # same ``chat(payload) -> dict`` + ``last_usage`` so the
         # TracedChat wrapper and agent loop are unchanged.
+        pk = _polykv_manager(cfg, state, cwd, runner_input)
         chat_clients = {
             r: TracedChat(
-                _role_client(cfg, r, ollama_base_url),
+                polykv_mod.placed(_role_client(cfg, r, ollama_base_url),
+                                  pk, r),
                 role=r, tracer=tracer,
             )
             for r in enabled
@@ -183,8 +186,10 @@ def make_runner(*, ollama_base_url: str):
                         coder_clients_by_model[m] = chat_clients["coder"]
                         continue
                     coder_clients_by_model[m] = TracedChat(
-                        make_agent_chat_client(m, ollama_base_url,
-                                               endpoints=cfg.endpoints),
+                        polykv_mod.placed(
+                            make_agent_chat_client(m, ollama_base_url,
+                                                   endpoints=cfg.endpoints),
+                            pk, "coder"),
                         role="coder", tracer=tracer,
                     )
 
@@ -689,9 +694,13 @@ def make_follow_up_runner(*, ollama_base_url: str):
             and parent_state._chat_clients is not None
             else {}
         )
+        pk_fu = _polykv_manager(cfg, state, cwd, runner_input)
         chat_clients = {}
         for role in enabled_t:
             raw = warm_clients.get(role)
+            # A warm client the parent's run placed is taken bare: this run
+            # has its own manager (or none).
+            raw = getattr(raw, "_placed_inner", raw)
             if raw is None:
                 # Parent's clients went away (closed, reaped, or
                 # the parent didn't run that role). Cold-start —
@@ -706,7 +715,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
                     "(no warm parent client; model=%s)",
                     state.sid, role, role_model,
                 )
-            chat_clients[role] = TracedChat(raw, role=role, tracer=tracer)
+            chat_clients[role] = TracedChat(polykv_mod.placed(raw, pk_fu, role),
+                                            role=role, tracer=tracer)
 
         # Task #111: per-model coder clients (mirrors the primary
         # runner's logic). Re-use warm parent clients when present;
@@ -739,7 +749,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
                         raw = make_agent_chat_client(
                             m, ollama_base_url, endpoints=cfg.endpoints)
                     coder_clients_by_model_fu[m] = TracedChat(
-                        raw, role="coder", tracer=tracer,
+                        polykv_mod.placed(raw, pk_fu, "coder"),
+                        role="coder", tracer=tracer,
                     )
 
         # Models: prefer parent's recorded models so the follow-up
@@ -2035,6 +2046,19 @@ def _write_failed_artifacts(state, cwd: str, question: str,
         storage.write_consultation(result, cwd=Path(cwd))
     except Exception as e:  # pragma: no cover
         log.warning("failed-artifact write failed: %s", e)
+
+
+def _polykv_manager(cfg, state, cwd: str, runner_input: dict):
+    """The run's PolyKV manager (plan F3), or ``None`` when ``[polykv]`` is
+    off, which leaves every role client unwrapped and every request as it
+    was."""
+    pk = getattr(cfg, "polykv", None)
+    if pk is None or not pk.enabled or pk.mode == "off":
+        return None
+    mgr = polykv_mod.start_run(state.sid, mode=pk.mode, cwd=cwd,
+                               resume=bool(runner_input.get("resume")))
+    state._polykv = mgr
+    return mgr
 
 
 def _role_client(cfg, role: str, ollama_base_url: str):

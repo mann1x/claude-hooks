@@ -1361,6 +1361,72 @@ DECISION line decides. The exchanges and rulings are appended to the
 critique the synthesizer reads. Once per round. With the setting off,
 nothing is added to the graph.
 
+### PolyKV placement (`[polykv]`, off by default)
+
+```
+claude-consultants config set-polykv on [--mode auto|affinity|pooled|assured|off]
+```
+
+On an opencoti endpoint (`[endpoints.X] backend = "opencoti"`), or an
+xOllama model with client-pool seats (`/api/show`
+`xollama.session.client_pools` ≥ 2, not a council model), a run's
+manager (`consultants/engine/polykv.py`) places every role call:
+- **`affinity`:** each conversation gets its own engine session.
+  The session id is `<sid>~<role>~<hash>`, and the hash covers role,
+  model, the system turns and the first user turn, so a tool loop's
+  turns land on their warm slot.
+- **`pooled`:** also makes the leading system run (grounding, role
+  prompt, tools) a shared root pool. It is rendered the way the
+  inference path renders it (`PolykvClient.render_chat()`: the engine's
+  `/apply-template` direct, xOllama's own `/api/chat`
+  `_debug_render_only` behind xOllama, whose template trims each turn —
+  an engine render shared 1,050 of 16,557 tokens there), cut at a
+  sentinel turn, and byte-prefix-checked against the full render. Every
+  lane with the same head attaches to it, so the grounding is prefilled
+  once rather than once per lane. The layer is pinned while the run uses
+  it (the engine sweeps an unpinned, unreferenced pool during any pause).
+  A call that attaches it states a private window (`num_ctx` = its
+  prompt past the layer, estimated at the layer's chars per cell × 1.3,
+  plus its `num_predict`), so the engine charges only private tokens;
+  with no window it charged the whole prompt again on top of the pool.
+- **`auto`:** pools where the engine advertises pools and shared
+  roots, and falls back to affinity elsewhere.
+- **`assured`:** one owner window per run. It is not built yet and
+  runs as `pooled`.
+
+Cloud and plain Ollama calls in the same council are never touched.
+
+Lanes of one run queue on each other for room. Before a call that states
+a window, the manager reads `/kv`; if the engine has fewer free cells
+than the window, it closes the run's idle sessions (a finished lane keeps
+its window booked), and if that is not enough while sibling lanes are
+mid-call it waits for one to end, up to 240 s (below the 300 s stall
+threshold). A 429 for room gets the same treatment and one resend.
+
+Failures never fail a call; the call is sent with less sharing:
+- A layer the engine refuses is skipped.
+- A head that is not a byte prefix of the full render is never pooled.
+- A pool the engine lost is rebuilt up to 3 times, including one found
+  lost by a refusal for size that names no share (the engine charges an
+  attach to a missing pool in full rather than refusing it).
+- A changed `boot_id` drops every pool.
+
+When the run ends, every session it used is closed; every layer it made
+is released if nobody attached it (the engine never sweeps those) and
+unpinned otherwise. The engines are then audited for anything carrying the
+run's prefix and for its own layers still pinned or never attached, each
+candidate confirmed by id (the engine's pool list keeps pools it dropped). The report (sessions
+closed, leaks, per-role shared and cached tokens) goes to
+`.claude-hooks/consultants/<sid>/polykv.json`. A suspended run releases
+nothing: it writes its snapshot there and takes it back on resume. Attached
+roots are left to the engine's ephemeral sweep, because another council
+may be attached. Live gate for the client: `scripts/polykv_probe.py`; for
+the manager on the council's prompt path,
+`benchmarks/consultants/polykv_smoke.py --xollama URL --model M
+[--lanes 3] [--sequential]` (2026-10-24 on eleven2go: 3/3 lanes pooled,
+49,809 of 49,997 prompt tokens shared, nothing leaked, concurrent and
+sequential).
+
 ### Verify budget — the skeptic-panel cap
 
 `verify_budget` (`minimal` = 2 claims / 1 round, `bounded` = 3 default,

@@ -152,6 +152,9 @@ class SessionState:
     # The follow-up runner reuses these to skip the /api/show probe
     # and the upstream warmup.
     _chat_clients: Optional[dict] = field(default=None, repr=False)
+    # Plan F3: the run's PolyKV manager (runtime-only; settled in
+    # ``_run_with_state``'s ``finally``).
+    _polykv: Optional[Any] = field(default=None, repr=False)
     # Task #111: per-model raw ChatClients for the coder role's
     # failover chain. Same warm-reuse pattern as ``_chat_clients``
     # but keyed by Ollama model tag (not role). ``None`` on parents
@@ -1787,6 +1790,14 @@ def _run_with_state(app,
                     "consultancy ready-flip failed for sid=%s", state.sid,
                 )
     finally:
+        if getattr(state, "_polykv", None) is not None:
+            # Plan F3: release every engine session and audit before the
+            # in-flight record goes; a suspended run keeps them for the
+            # resume.
+            from consultants.engine import polykv
+            polykv.settle_run(state.sid, cwd=state.cwd,
+                              status=state.status or "unknown")
+            state._polykv = None
         _settle_inflight(state)
         # Best-effort: refresh the index entry's status + duration so
         # /v1/sessions reflects terminal state without re-reading the

@@ -1542,6 +1542,16 @@ def cmd_config_set_cross_examination(args, base: str) -> int:
     return _emit_config(cfg, args)
 
 
+def cmd_config_set_polykv(args, base: str) -> int:
+    try:
+        cfg = cc.set_polykv(
+            enabled=None if args.state is None else args.state == "on",
+            mode=args.mode, **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
 def cmd_config_set_xauto_retry(args, base: str) -> int:
     cfg = cc.set_xauto_retry(enabled=args.state == "on",
                              **_resolve_active_scope(args))
@@ -3292,6 +3302,17 @@ def build_parser() -> argparse.ArgumentParser:
     ccx.add_argument("state", choices=["on", "off"])
     _add_scope_args(ccx)
     ccx.set_defaults(fn=cmd_config_set_cross_examination)
+
+    cpk = cfg_sub.add_parser(
+        "set-polykv",
+        help="Plan F: PolyKV placement on opencoti and xOllama models "
+             "with client-pool seats — an engine session per conversation "
+             "and the council's shared prompt head as one pool, prefilled "
+             "once. Other backends are never touched. Default off.")
+    cpk.add_argument("state", nargs="?", choices=["on", "off"])
+    cpk.add_argument("--mode", choices=list(cc.POLYKV_MODES))
+    _add_scope_args(cpk)
+    cpk.set_defaults(fn=cmd_config_set_polykv)
 
     cde = cfg_sub.add_parser(
         "set-decision",

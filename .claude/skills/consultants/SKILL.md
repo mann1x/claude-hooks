@@ -1004,6 +1004,14 @@ and **More…** opens the next batch (ending with **Done**):
     at all (each layer, and what is missing). `--mode write` (git
     roots: a private worktree per lane, changes held as patches) and
     `--held-ttl-days` are here too; only `net=none` exists so far.
+19. **PolyKV** — `claude-consultants config set-polykv on|off
+    [--mode auto|affinity|pooled|assured|off]` (default off, mode
+    `auto`). On opencoti endpoints and xOllama models with client-pool
+    seats, each conversation gets its own engine session and the
+    council's shared prompt head (grounding + role prompt + tools) is one
+    pool, prefilled once; `affinity` keeps only the sessions. Cloud and
+    plain Ollama are never touched. The run's `show` reports the shared
+    tokens and any leak.
 
 Loop back to step 1 after each successful change; exit on **Done**.
 

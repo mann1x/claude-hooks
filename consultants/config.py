@@ -1078,6 +1078,25 @@ class CriticConfig:
     cross_examination: bool = False
 
 
+POLYKV_MODES = ("off", "affinity", "pooled", "assured", "auto")
+
+
+@dataclass
+class PolykvConfig:
+    """PolyKV placement (plan Milestone F, ``consultants/engine/polykv.py``):
+    on opencoti and on xOllama models with client-pool seats, each
+    conversation gets its own engine session and the shared head of the
+    council's prompts is one pool, prefilled once. ``auto`` pools where
+    the engine can and keeps session affinity elsewhere. Other backends
+    are never touched. Off by default until a live council has shown
+    it."""
+    enabled: bool = False
+    mode: str = "auto"
+
+    def is_default(self) -> bool:
+        return self == PolykvConfig()
+
+
 def check_guard_profile(value: Any) -> str:
     v = str(value or "").strip().lower()
     if v not in GUARD_PROFILES:
@@ -1216,6 +1235,7 @@ class ConsultantsConfig:
     guards: GuardsConfig = field(default_factory=GuardsConfig)
     escalation: EscalationConfig = field(default_factory=EscalationConfig)
     critic: CriticConfig = field(default_factory=CriticConfig)
+    polykv: PolykvConfig = field(default_factory=PolykvConfig)
     decision: DecisionConfig = field(default_factory=DecisionConfig)
     # Plan B: ``[budget]`` / ``[sampling]`` — only the keys a layer set.
     budget: dict[str, Any] = field(default_factory=dict)
@@ -1715,6 +1735,21 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
             log.warning("consultants config: critic.cross_examination "
                         "ignored: must be true or false")
 
+    # PolyKV placement (plan F)
+    pk = raw.get("polykv") or {}
+    if isinstance(pk, dict):
+        if isinstance(pk.get("enabled"), bool):
+            base.polykv.enabled = pk["enabled"]
+        elif "enabled" in pk:
+            log.warning("consultants config: polykv.enabled ignored: must be "
+                        "true or false")
+        if "mode" in pk:
+            if pk["mode"] in POLYKV_MODES:
+                base.polykv.mode = pk["mode"]
+            else:
+                log.warning("consultants config: polykv.mode ignored: must be "
+                            "one of %s", ", ".join(POLYKV_MODES))
+
     # decision model (plan H)
     dec = raw.get("decision") or {}
     if isinstance(dec, dict) and dec:
@@ -2185,6 +2220,14 @@ def _render(cfg: ConsultantsConfig, *,
         L.append(f"expert_model = {_toml_value(es.expert_model)}")
         L.append(f"max_per_council = {es.max_per_council}")
         L.append("")
+    if not cfg.polykv.is_default():
+        L.append("[polykv]")
+        L.append("# PolyKV placement on opencoti / xOllama: an engine session "
+                 "per conversation, the council's shared prompt head one pool. "
+                 "mode: auto | affinity | pooled | assured | off.")
+        L.append(f"enabled = {'true' if cfg.polykv.enabled else 'false'}")
+        L.append(f"mode = {_toml_value(cfg.polykv.mode)}")
+        L.append("")
     if cfg.critic.cross_examination:
         L.append("[critic]")
         L.append("# cross_examination: a critic names the claims it doubts "
@@ -2599,6 +2642,20 @@ def set_cross_examination(*, enabled: bool, scope: str = "user",
     """Set ``[critic] cross_examination`` (plan council-memory M5)."""
     cfg = _load_for_edit(scope, cwd)
     cfg.critic.cross_examination = bool(enabled)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_polykv(*, enabled: Optional[bool] = None, mode: Optional[str] = None,
+               scope: str = "user",
+               cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set ``[polykv]`` (plan F)."""
+    if mode is not None and mode not in POLYKV_MODES:
+        raise ValueError(f"mode must be one of {', '.join(POLYKV_MODES)}")
+    cfg = _load_for_edit(scope, cwd)
+    if enabled is not None:
+        cfg.polykv.enabled = bool(enabled)
+    if mode is not None:
+        cfg.polykv.mode = mode
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 

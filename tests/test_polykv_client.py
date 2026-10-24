@@ -394,3 +394,39 @@ def test_without_a_block_the_cached_count_is_the_share():
     assert missed.degraded and "nothing cached" in missed.warnings[0]
     blind = observe({}, {}, pool_id="3")
     assert not blind.degraded and "no opencoti block" in blind.warnings[0]
+
+
+class TestRenderChat:
+    """Layers are cut from what the inference path renders: xOllama trims
+    each turn's content, so the engine's apply-template diverged at the
+    first turn ending in a newline (1,050 of 16,557 tokens shared)."""
+
+    MSGS = [{"role": "system", "content": "S\n"}, {"role": "user", "content": "U"}]
+
+    def test_direct_is_the_engines_apply_template(self):
+        eng = FakeEngine()
+        c = PolykvClient.direct("http://e:8240", fetch=direct_fetch(eng))
+        orig = eng.handle
+        eng.handle = lambda m, r, p, d: (Reply(200, {"prompt": "ENGINE"})
+                                         if r == "apply-template" else orig(m, r, p, d))
+        assert c.render_chat(self.MSGS) == "ENGINE"
+
+    def test_xollama_is_its_own_render(self):
+        seen = []
+
+        def fetch(method, url, *, data=None, headers=None, timeout=None):
+            seen.append((method, url, data))
+            return Reply(200, {"_debug_info": {"rendered_template": "XOLLAMA"}})
+        c = PolykvClient.via_xollama("http://x:22434", "m", fetch=fetch)
+        assert c.render_chat(self.MSGS, tools=[{"t": 1}]) == "XOLLAMA"
+        method, url, body = seen[0]
+        assert (method, url) == ("POST", "http://x:22434/api/chat")
+        assert body["_debug_render_only"] is True and body["model"] == "m"
+        assert body["messages"] == self.MSGS and body["tools"] == [{"t": 1}]
+
+    def test_xollama_without_a_render_is_an_error(self):
+        c = PolykvClient.via_xollama(
+            "http://x:22434", "m",
+            fetch=lambda *a, **k: Reply(200, {"message": {"content": "hi"}}))
+        with pytest.raises(OpencotiError):
+            c.render_chat(self.MSGS)

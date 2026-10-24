@@ -571,6 +571,32 @@ class PolykvClient:
         got = self._post("apply-template", body)
         return str((got or {}).get("prompt") or "")
 
+    def render_chat(self, messages: list, *, tools: Optional[list] = None,
+                    think: Any = None) -> str:
+        """The prompt the inference path will send for ``messages``.
+
+        Direct, that is the engine's ``/apply-template``. Behind xOllama it
+        is xOllama's own render (``/api/chat`` with ``_debug_render_only``):
+        xOllama's template trims each turn's content, so an engine render
+        of the same messages diverges at the first turn ending in a
+        newline — a pool cut from it shared 1,050 of 16,557 tokens."""
+        t = self.transport
+        if not isinstance(t, XollamaTransport):
+            return self.apply_template(messages, tools=tools)
+        body: dict[str, Any] = {"model": t.model, "messages": messages,
+                                "_debug_render_only": True, "stream": False}
+        if tools:
+            body["tools"] = tools
+        if think is not None:
+            body["think"] = think
+        got = raise_for(t._fetch("POST", f"{t.base}/api/chat", data=body,
+                                 headers=t._headers,
+                                 timeout=self.control_timeout))
+        rendered = ((got or {}).get("_debug_info") or {}).get("rendered_template")
+        if not isinstance(rendered, str):
+            raise OpencotiError("xOllama answered no rendered_template")
+        return rendered
+
     def tokenize(self, content: str, *, add_special: bool = False) -> list:
         """Serving tokenizes with ``add_special=true``; ``/tokenize``
         defaults to false. Say which one is meant."""
