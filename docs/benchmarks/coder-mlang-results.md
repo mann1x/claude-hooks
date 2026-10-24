@@ -1,5 +1,13 @@
 # Coder skill-eval — per-language results (`coder_mlang` v1.0.1)
 
+> **Invalid (2026-10-24).** Every number on this page comes from a run in
+> which the coder was never shown the question's spec: the harness sent
+> only the one-line `task`, and this suite kept its API, constraints and
+> output format in the body. Two oracles also could not load. "10 of 13
+> questions defeat every model" is that, not difficulty. Fixed in suite
+> v1.1.0 (see its `SUITE.md` changelog). The shipped per-language routes
+> come from coder_med, not from this page.
+
 > ↟ [Benchmark index](index.md) · suite design:
 > [`consultants-skill-eval-mlang-suite.md`](../consultants-skill-eval-mlang-suite.md) ·
 > ledger row: [`consultants-skill-eval-baselines.md`](../consultants-skill-eval-baselines.md#v101-mlang-baseline-2026-05-17--per-language-winners) ·

@@ -20,7 +20,7 @@ and [`gemma4-31b-cloud-2026-10-22`](../../../../docs/benchmarks/gemma4-31b-cloud
 | coder (python) | 100 / 88 / 100% | — |
 | coder_easy | 96 / 98 / 97% | minimax-m3 98% |
 | coder_med | 93 / 90 / 88% | deepseek-v4.1-flash 100%, glm-5.3-flash 97%, minimax-m3 97% (2026-09-23) |
-| coder_mlang (18 q) | 39 / 33 / 39%, fails the rubric | not comparable: the 2026-05-17 baseline ran 13 of the questions |
+| coder_mlang (18 q) | 39 / 33 / 39% — **invalid**: the coder was never shown the spec and 2 oracles could not load (fixed in suite v1.1.0, 2026-10-24) | — |
 | stall tier 1 (12 trials) | no errors; recommends stall 30 s / hard cap 840 s | — |
 
 Coder runs were judged by the default panel (glm-5.3-flash + deepseek-v4.1-flash,

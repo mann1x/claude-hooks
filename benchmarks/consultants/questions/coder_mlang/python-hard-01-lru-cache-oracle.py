@@ -4,6 +4,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 SANDBOX = Path(os.environ["CODER_SANDBOX"])
 sys.path.insert(0, str(SANDBOX))
 

@@ -5,6 +5,7 @@ source: cs-classic
 task: 'Parser combinator library: Lit, Seq, Or, Many + parse(). No backtracking; commit-on-consume semantics for Or.'
 sandbox_path: solution.py
 oracle: python-very_hard-01-parser-combinator-oracle.py
+spec: body
 ---
 
 # python-very_hard-01-parser-combinator

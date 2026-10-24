@@ -5,6 +5,7 @@ source: rust-idiom
 task: "Build a custom Iterator adapter WindowPairs<I> + extension trait WindowPairsExt; emit consecutive pairs from stdin's int sequence."
 sandbox_path: solution.rs
 oracle: rust-hard-01-iter-window-pairs-oracle.py
+spec: body
 ---
 
 # rust-hard-01-iter-window-pairs

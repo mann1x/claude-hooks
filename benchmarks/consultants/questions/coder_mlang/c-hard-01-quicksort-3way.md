@@ -5,6 +5,7 @@ source: bentley-mcilroy
 task: 'In-place 3-way Dutch-flag quicksort with median-of-three pivot. Stdin: n, values. No qsort() allowed.'
 sandbox_path: solution.c
 oracle: c-hard-01-quicksort-3way-oracle.py
+spec: body
 ---
 
 # c-hard-01-quicksort-3way

@@ -116,6 +116,19 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
     return _parse_simple_yaml(fm_text), body
 
 
+def task_of(fm: dict, body: str) -> str:
+    """What the coder (and every judge) is told. ``task`` alone, unless
+    the question declares ``spec: body``: then its markdown body follows,
+    as written — coder_mlang keeps its API, constraints and output format
+    there, and sending only the one-line ``task`` graded every model
+    against rules it was never shown (2026-10-24)."""
+    task = (fm.get("task") or "").strip()
+    if (fm.get("spec") or "").strip() != "body" or not body.strip():
+        return task
+    spec = re.sub(r"\A\s*# [^\n]*\n", "", body).strip()
+    return f"{task}\n\n{spec}" if task else spec
+
+
 def _strip_quotes(s: str) -> str:
     """Strip a single layer of surrounding ASCII quotes."""
     if (s.startswith('"') and s.endswith('"')) \
@@ -288,7 +301,7 @@ def load_questions(
         out.append(BenchQuestion(
             id=qid, tier=tier,
             source=fm.get("source") or "",
-            task=fm.get("task") or "",
+            task=task_of(fm, body),
             sandbox_path=fm.get("sandbox_path") or "",
             oracle_path=oracle_path,
             notes=fm.get("notes") or "",

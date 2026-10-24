@@ -5,6 +5,7 @@ source: cs-classic
 task: "Recursive-descent evaluator for `expr := term (('+'|'-') term)*; term := factor (('*'|'/') factor)*; factor := NUMBER | '(' expr ')'`."
 sandbox_path: solution.cpp
 oracle: cpp-hard-01-expr-eval-oracle.py
+spec: body
 ---
 
 # cpp-hard-01-expr-eval
