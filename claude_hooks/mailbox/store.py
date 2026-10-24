@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import socket
 import sys
 import uuid
@@ -66,6 +67,21 @@ DEFAULT_EVICT_HOURS = 24
 #: answer it did not see — and it is short enough that a deliberate
 #: re-send of the same text is only delayed, never prevented.
 DEFAULT_DEDUP_WINDOW_SECONDS = 600
+
+#: A durable alias's name and host: what an alias is everywhere else.
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+
+#: The registry fields that belong to an ``(alias, host)`` slot rather
+#: than to the session holding it, so every path that replaces the row
+#: hands them to the new one.
+DURABLE_FIELDS = ("durable", "owner", "durable_until")
+
+
+def durable_session_id(alias: str, host: str) -> str:
+    """The registry key of a durable alias with no session behind it —
+    ``cloud-<alias>`` for ``<alias>@cloud``, the key the file relay
+    already uses, so both reach one mailbox."""
+    return f"{host}-{alias}"
 
 
 def utcnow() -> datetime:
@@ -216,6 +232,25 @@ class MailboxStore:
             (alias, host, session_id))
         return cur.rowcount or 0
 
+    def _slot_meta(self, cur, alias: str, host: str) -> Optional[dict]:
+        """The durable fields of ``(alias, host)``, or None when the slot
+        is not durable. Read before a path deletes the row, so the row
+        that replaces it stays durable (ch-18): durability belongs to the
+        address, not to whichever session last held it."""
+        cur.execute(self._q(
+            "SELECT durable, owner, durable_until FROM session_registry "
+            "WHERE alias = ? AND host = ? AND durable = 1"), (alias, host))
+        row = cur.fetchone()
+        return dict(zip(DURABLE_FIELDS, row)) if row else None
+
+    def _apply_meta(self, cur, session_id: str,
+                    meta: Optional[dict]) -> None:
+        if meta:
+            cur.execute(self._q(
+                "UPDATE session_registry SET durable = 1, owner = ?, "
+                "durable_until = ? WHERE session_id = ?"),
+                (meta["owner"], meta["durable_until"], session_id))
+
     def register(self, session_id: str, alias: str, *, cwd: str = "",
                  host: Optional[str] = None,
                  client: Optional[tuple] = None) -> list[Session]:
@@ -232,6 +267,7 @@ class MailboxStore:
             conn = self._connect()
             try:
                 with _cursor(conn) as cur:
+                    meta = self._slot_meta(cur, alias, h)
                     cur.execute(self._q(
                         "DELETE FROM session_registry WHERE session_id = ?"),
                         (session_id,))
@@ -239,6 +275,7 @@ class MailboxStore:
                                                      session_id)
                     self._insert_row(cur, session_id, alias, h, cwd, now,
                                      client)
+                    self._apply_meta(cur, session_id, meta)
                     # Same-host duplicates are gone by construction now,
                     # so this only ever returns *other hosts* — which is
                     # the collision actually worth warning about, since
@@ -372,6 +409,12 @@ class MailboxStore:
                                            (cand, h))
                         if (holder is None
                                 or holder["session_id"] == session_id
+                                # A durable slot nobody is running in is
+                                # an address waiting for a session, not
+                                # a session: the one starting here takes
+                                # it and keeps it durable.
+                                or (holder.get("durable")
+                                    and not holder.get("client_pid"))
                                 or same_process(holder["client_pid"],
                                                 holder["client_started"],
                                                 pid, started)
@@ -392,6 +435,7 @@ class MailboxStore:
                             "WHERE session_id = ?"),
                             (now, pid, started, session_id))
                     else:
+                        meta = self._slot_meta(cur, chosen, h)
                         cur.execute(self._q(
                             "DELETE FROM session_registry "
                             "WHERE session_id = ?"), (session_id,))
@@ -400,6 +444,7 @@ class MailboxStore:
                         self._insert_row(cur, session_id, chosen, h,
                                          cwd or (mine or {}).get("cwd") or "",
                                          now, client)
+                        self._apply_meta(cur, session_id, meta)
                         if mine is not None and mine["host"] == h:
                             cur.execute(self._q(
                                 "UPDATE session_messages SET to_alias = ? "
@@ -479,10 +524,19 @@ class MailboxStore:
             conn = self._connect()
             try:
                 with _cursor(conn) as cur:
+                    # A durable slot outlives the session that held it:
+                    # its process is forgotten, the address is kept.
                     cur.execute(self._q(
-                        "DELETE FROM session_registry WHERE session_id = ?"),
+                        "UPDATE session_registry SET client_pid = NULL, "
+                        "client_started = NULL "
+                        "WHERE session_id = ? AND durable = 1"),
                         (session_id,))
-                    gone = cur.rowcount or 0
+                    kept = cur.rowcount or 0
+                    cur.execute(self._q(
+                        "DELETE FROM session_registry WHERE session_id = ? "
+                        "AND (durable IS NULL OR durable <> 1)"),
+                        (session_id,))
+                    gone = (cur.rowcount or 0) + kept
                 conn.commit()
             except Exception:
                 self._rollback(conn)
@@ -523,9 +577,11 @@ class MailboxStore:
                         # exists precisely for the case where something
                         # does: the row was evicted, by the sweep or by a
                         # newer session, while this one was quiet.
+                        meta = self._slot_meta(cur, alias, h)
                         self._claim_alias_host(cur, alias, h, session_id)
                         self._insert_row(cur, session_id, alias, h, cwd,
                                          now, client)
+                        self._apply_meta(cur, session_id, meta)
                 conn.commit()
             except Exception:
                 self._rollback(conn)
@@ -606,8 +662,12 @@ class MailboxStore:
             params.append(os_filter)
         if not include_stale:
             hours = (DEFAULT_LIVE_HOURS if live_hours is None else live_hours)
-            where.append("last_seen >= ?")
-            params.append(self._at(utcnow() - timedelta(hours=hours)))
+            # A durable registration is live until its owner's expiry,
+            # however quiet: it is an address, not a heartbeat.
+            where.append("(last_seen >= ? OR (durable = 1 AND "
+                         "(durable_until IS NULL OR durable_until > ?)))")
+            params += [self._at(utcnow() - timedelta(hours=hours)),
+                       self._now()]
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY alias, host"
@@ -635,15 +695,26 @@ class MailboxStore:
             conn = self._connect()
             try:
                 with _cursor(conn) as cur:
-                    cur.execute(self._q(
-                        "DELETE FROM session_registry WHERE last_seen < ?"),
-                        (cutoff,))
-                    n = cur.rowcount or 0
+                    n = self._delete_quiet(cur, cutoff)
                 conn.commit()
             except Exception:
                 self._rollback(conn)
                 raise
         return n
+
+    def _delete_quiet(self, cur, cutoff) -> int:
+        """Delete rows quiet since ``cutoff``, never a durable one whose
+        owner's expiry has not passed. A passed expiry first makes the
+        row ordinary again, so the quiet rule then applies to it."""
+        cur.execute(self._q(
+            "UPDATE session_registry SET durable = NULL, owner = NULL, "
+            "durable_until = NULL WHERE durable = 1 "
+            "AND durable_until IS NOT NULL AND durable_until <= ?"),
+            (self._now(),))
+        cur.execute(self._q(
+            "DELETE FROM session_registry WHERE last_seen < ? "
+            "AND (durable IS NULL OR durable <> 1)"), (cutoff,))
+        return cur.rowcount or 0
 
     def evict_stale(self, *, hours: float = DEFAULT_EVICT_HOURS) -> int:
         """Physically remove registrations nobody has touched in ``hours``.
@@ -665,10 +736,7 @@ class MailboxStore:
             conn = self._connect()
             try:
                 with _cursor(conn) as cur:
-                    cur.execute(self._q(
-                        "DELETE FROM session_registry WHERE last_seen < ?"),
-                        (cutoff,))
-                    n = cur.rowcount or 0
+                    n = self._delete_quiet(cur, cutoff)
                 conn.commit()
             except Exception:
                 self._rollback(conn)
@@ -676,6 +744,185 @@ class MailboxStore:
         if n:
             log.info("mailbox: evicted %d stale registration(s)", n)
         return n
+
+    # ─── durable aliases (ch-18) ─────────────────────────────────────
+
+    def _live_holder(self, row: dict, now) -> bool:
+        """Is a non-durable registry row a session still running? Its
+        process when it is on this host and recorded, else seen within
+        the live window — a cloud or other-host row has no process here
+        to look at."""
+        from claude_hooks.mailbox.identity import process_alive
+        pid, started = row.get("client_pid"), row.get("client_started")
+        if row.get("host") == host_name() and pid and started is not None:
+            return process_alive(pid, started)
+        seen = row.get("last_seen")
+        if isinstance(seen, str):
+            try:
+                seen = datetime.fromisoformat(seen.replace("Z", "+00:00"))
+            except ValueError:
+                return False
+        if seen is None:
+            return False
+        if seen.tzinfo is None:
+            seen = seen.replace(tzinfo=timezone.utc)
+        return now - seen < timedelta(hours=DEFAULT_LIVE_HOURS)
+
+    def register_durable(self, alias: str, host: str, *, owner: str,
+                         until: Optional[datetime] = None, cwd: str = "",
+                         force: bool = False) -> dict:
+        """Make ``alias@host`` a lasting registration owned by ``owner``.
+
+        Kept until :meth:`release_durable` or ``until``, however quiet —
+        what a cloud thread linked to a machine needs, since it has no
+        session of its own to stay alive with. Refused (``MailboxError``)
+        when the slot is another owner's durable alias, when a live
+        session holds it, or when a live session has the same alias on
+        another host: a bare ``osync`` would then be ambiguous and every
+        sender's mail to it refused. ``force`` (an operator) skips the
+        first two, never the third. Registering it again renews it.
+
+        Returns ``{"alias", "host", "session_id", "owner", "until",
+        "renewed"}``.
+        """
+        alias, host, owner = (alias or "").strip(), (host or "").strip(), \
+            (owner or "").strip()
+        if not _NAME_RE.match(alias):
+            raise MailboxError(f"{alias!r} is not an alias: letters, digits, "
+                               "'.', '_' and '-', starting with a letter or "
+                               "digit.")
+        if not _NAME_RE.match(host):
+            raise MailboxError(f"{host!r} is not a host name.")
+        if not owner:
+            raise MailboxError("a durable alias needs an owner (alias@host).")
+        self.ensure_schema()
+        sid = durable_session_id(alias, host)
+        now_dt = utcnow()
+        if until is not None and until <= now_dt:
+            raise MailboxError("the expiry is already past.")
+        now = self._now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _cursor(conn) as cur:
+                    cur.execute(self._q(
+                        "SELECT " + ", ".join(schema.SESSION_COLUMNS) +
+                        " FROM session_registry WHERE alias = ?"), (alias,))
+                    rows = self._rows(cur, schema.SESSION_COLUMNS)
+                    slot = next((r for r in rows if r["host"] == host), None)
+                    for r in rows:
+                        if r["host"] == host:
+                            continue
+                        if r.get("durable") or self._live_holder(r, now_dt):
+                            raise MailboxError(
+                                f"`{alias}` is registered at "
+                                f"{alias}@{r['host']}: a second "
+                                f"`{alias}` at {host} would make a bare "
+                                f"`{alias}` ambiguous, and mail to it "
+                                "refused. Pick another alias.")
+                    if slot is not None and not force:
+                        if slot.get("durable") and slot.get("owner") != owner:
+                            raise MailboxError(
+                                f"{alias}@{host} is a durable alias of "
+                                f"{slot.get('owner') or 'another owner'}; "
+                                "only its owner can renew or remove it.")
+                        if (not slot.get("durable")
+                                and slot["session_id"] != sid
+                                and self._live_holder(slot, now_dt)):
+                            raise MailboxError(
+                                f"{alias}@{host} is held by a live session "
+                                f"({slot['session_id']}); it keeps its "
+                                "name. Pick another alias.")
+                    renewed = bool(slot and slot.get("durable"))
+                    until_v = self._at(until) if until is not None else None
+                    if slot is not None:
+                        # The holder keeps its row (and, on a session's
+                        # row, its process); the slot becomes durable.
+                        cur.execute(self._q(
+                            "UPDATE session_registry SET durable = 1, "
+                            "owner = ?, durable_until = ?, last_seen = ? "
+                            "WHERE session_id = ?"),
+                            (owner, until_v, now, slot["session_id"]))
+                        sid = slot["session_id"]
+                    else:
+                        self._insert_row(cur, sid, alias, host, cwd, now,
+                                         None)
+                        self._apply_meta(cur, sid, {
+                            "owner": owner, "durable_until": until_v})
+                conn.commit()
+            except Exception:
+                self._rollback(conn)
+                raise
+        return {"alias": alias, "host": host, "session_id": sid,
+                "owner": owner, "until": until, "renewed": renewed}
+
+    def release_durable(self, alias: str, host: str, *, owner: str,
+                        force: bool = False) -> bool:
+        """End ``alias@host``'s durability. Its row goes unless a running
+        session holds it, which keeps it as an ordinary registration. Mail
+        already addressed to it stays. ``False`` when it was not durable;
+        ``MailboxError`` when it is another owner's (unless ``force``)."""
+        self.ensure_schema()
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _cursor(conn) as cur:
+                    slot = self._row(cur, "alias = ? AND host = ? "
+                                     "AND durable = 1", (alias, host))
+                    if slot is None:
+                        conn.commit()
+                        return False
+                    if slot.get("owner") != owner and not force:
+                        raise MailboxError(
+                            f"{alias}@{host} is a durable alias of "
+                            f"{slot.get('owner') or 'another owner'}; only "
+                            "its owner can remove it.")
+                    if slot.get("client_pid"):
+                        cur.execute(self._q(
+                            "UPDATE session_registry SET durable = NULL, "
+                            "owner = NULL, durable_until = NULL "
+                            "WHERE session_id = ?"), (slot["session_id"],))
+                    else:
+                        cur.execute(self._q(
+                            "DELETE FROM session_registry "
+                            "WHERE session_id = ?"), (slot["session_id"],))
+                conn.commit()
+            except Exception:
+                self._rollback(conn)
+                raise
+        return True
+
+    def durable_rows(self, *, owner: Optional[str] = None) -> list[dict]:
+        """Durable registrations, optionally only ``owner``'s."""
+        where, params = "durable = 1", []
+        if owner:
+            where += " AND owner = ?"
+            params.append(owner)
+        return self._read(lambda cur: (cur.execute(self._q(
+            "SELECT " + ", ".join(schema.SESSION_COLUMNS) +
+            " FROM session_registry WHERE " + where +
+            " ORDER BY host, alias"), tuple(params)),
+            self._rows(cur, schema.SESSION_COLUMNS))[1])
+
+    def owned(self, alias: str, host: str, owner: str) -> Optional[dict]:
+        """``alias@host``'s row when it is a durable alias of ``owner``
+        whose expiry has not passed, else None."""
+        if not (alias and host and owner):
+            return None
+        row = self._read(lambda cur: self._row(
+            cur, "alias = ? AND host = ? AND durable = 1 AND owner = ?",
+            (alias, host, owner)))
+        if row is None:
+            return None
+        until = row.get("durable_until")
+        if isinstance(until, str):
+            until = datetime.fromisoformat(until.replace("Z", "+00:00"))
+        if until is not None:
+            if until.tzinfo is None:
+                until = until.replace(tzinfo=timezone.utc)
+            if until <= utcnow():
+                return None
+        return row
 
     def dedupe_messages(self) -> dict:
         """Collapse the duplicate rows the old fan-out left behind.
@@ -1602,4 +1849,6 @@ def _as_session(row: dict) -> Session:
     return Session(session_id=row["session_id"], alias=row["alias"],
                    host=row["host"], os=row.get("os") or "",
                    cwd=row.get("cwd") or "",
-                   last_seen=str(row.get("last_seen") or ""))
+                   last_seen=str(row.get("last_seen") or ""),
+                   durable=bool(row.get("durable")),
+                   owner=row.get("owner") or "")

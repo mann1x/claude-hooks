@@ -77,6 +77,10 @@ class Session:
     os: str = ""
     cwd: str = ""
     last_seen: Optional[str] = None
+    #: A lasting registration (ch-18): kept while quiet, owned by
+    #: ``owner`` (``alias@host``).
+    durable: bool = False
+    owner: str = ""
 
     def label(self) -> str:
         return f"{self.alias}@{self.host}"

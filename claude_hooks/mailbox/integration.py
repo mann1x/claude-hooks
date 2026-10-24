@@ -90,7 +90,7 @@ def tools_for_provider(provider, *, cwd: Optional[str] = None,
                        session_id: Optional[str] = None,
                        transcript_path: Optional[str] = None,
                        client=None):
-    """The eight tools bound to this session's identity, or None.
+    """The nine tools bound to this session's identity, or None.
 
     The identity is resolved again on every tool call (see
     :func:`resolve_identity`), so a ``/rename`` mid-session takes effect

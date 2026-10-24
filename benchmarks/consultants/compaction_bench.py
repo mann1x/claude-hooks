@@ -1109,7 +1109,7 @@ def run_trial(*, base: str, model: str, arm: str, idx: int, project: Path,
         "error": error, "seconds": round(time.monotonic() - t0, 1),
         "compactions": len(folds),
         "fold_reports": [{k: f.get(k) for k in
-                          ("flow", "placement", "reason", "before", "after",
+                          ("flow", "placement", "reason", "continuation", "before", "after",
                            "target", "trigger", "rescue", "calls",
                            "invalid_citations", "digest", "cut")} for f in folds],
         "researcher_calls": len(calls), "tool_calls": len(rec.tools),

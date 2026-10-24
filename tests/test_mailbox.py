@@ -1135,9 +1135,9 @@ class ToolsTests(StoreHarness):
         self.them = MailboxTools(self.store, alias="osync",
                                  session_id="s-osync", host="solidpc")
 
-    def test_catalog_is_eight_tools(self):
+    def test_catalog_is_nine_tools(self):
         from claude_hooks.mailbox.tools import TOOL_NAMES, tool_catalog
-        self.assertEqual(len(tool_catalog()), 8)
+        self.assertEqual(len(tool_catalog()), 9)
         self.assertEqual({t["name"] for t in tool_catalog()}, set(TOOL_NAMES))
 
     def test_every_tool_declares_a_schema(self):
