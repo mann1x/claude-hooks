@@ -249,6 +249,21 @@ class TestFlagged(unittest.TestCase):
                + "Something else here does not exist.")
         self.assertFalse(flagged(far, "retry_state.py"))
 
+    def test_the_false_literal_is_not_doubt(self):
+        """medium-02's true report says the check "returns False"; a
+        critic confirming it was scored as doubting its neighbours."""
+        self.assertFalse(flagged(
+            "Confirmed: should_retry returns False once elapsed passes.",
+            "should_retry"))
+        self.assertFalse(flagged(
+            "Confirmed: `should_retry` gives `return false` there.",
+            "should_retry"))
+        self.assertTrue(flagged(
+            "The claim about should_retry is false.", "should_retry"))
+        self.assertTrue(flagged(
+            "`should_retry` is cited, but that claim is false.",
+            "should_retry"))
+
     def test_absent_token_is_not_flagged(self):
         self.assertFalse(flagged("Everything checks out.", "retry_state.py"))
 
@@ -970,3 +985,26 @@ class TestTypedArm(unittest.TestCase):
             off = write_arm_config(Path(d), all_roles=True,
                                    effort="high").read_text()
             self.assertNotIn("[protocol]", off)
+
+
+class TestRegrade(unittest.TestCase):
+    """A saved run is re-scored by the current oracle, with no model."""
+
+    def test_saved_score_is_replaced_and_errors_kept(self):
+        import tempfile
+        from benchmarks.consultants.role_tools_bench import regrade
+        q = next(x for x in load_detect_questions()
+                 if x.id.startswith("medium-02"))
+        tok = q.planted_true[0]
+        ok = DetectTrial(question_id=q.id, tier=q.tier, arm="tooled",
+                         trial_idx=0, false_positives=["stale"],
+                         verdict=f"Confirmed: {tok} returns False there.")
+        bad = DetectTrial(question_id=q.id, tier=q.tier, arm="tooled",
+                          trial_idx=1, error="boom", false_positives=["kept"])
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "trials.jsonl"
+            p.write_text("".join(json.dumps(t.to_dict()) + "\n"
+                                 for t in (ok, bad)))
+            out = regrade(p, load_detect_questions())
+        self.assertEqual(out[0].false_positives, [])
+        self.assertEqual(out[1].false_positives, ["kept"])

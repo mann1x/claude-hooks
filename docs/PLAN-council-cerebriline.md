@@ -697,6 +697,15 @@ calls, +59% prompt and +64% completion tokens, wall flat, one stale-doc
 fact wrong (11/12 against 12/12). The default stays `typed = false`
 pending the owner's decision. Two G4 false notes found (bug-1086).
 
+**G7 detect re-run (2026-10-24, `results/2026-10-24/g7-detect/`).** Roles
+now hand on the record as JSON; the critic's detection is unchanged:
+recall 100% both, and after an oracle fix both runs grade identically —
+precision 40.5% prose / 44.1% typed (`regraded/`). The fix: the doubt
+word "false" matched Python's `False` in medium-02's true report ("returns
+False once…"), so every critic confirming it scored its neighbours as
+false positives (28 of 109). `role_tools_bench.py --regrade` re-scores a
+saved run with no model calls.
+
 **Exit G:**
 - the bench is recorded;
 - the typed path passes the parity cohort when off;

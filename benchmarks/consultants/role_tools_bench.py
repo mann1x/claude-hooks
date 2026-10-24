@@ -69,7 +69,7 @@ import os
 import re
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Optional
 
@@ -207,6 +207,19 @@ def report_record(research: str) -> str:
         "summary": " ".join(summary), "claims": claims, "gaps": []})
 
 
+#: Python's ``False`` and a ``false`` inside a code span are values, not
+#: doubt: medium-02's true report says "returns False once elapsed…", so
+#: every critic confirming it scored its neighbours as false positives
+#: (28 of 109 on 2026-10-19 + 10-24 flagged on that word alone).
+_FALSE_LITERAL = re.compile(r"\bFalse\b|`[^`\n]*`")
+
+
+def _mask_false_literal(text: str) -> str:
+    def blank(m: re.Match) -> str:
+        return re.sub(r"(?i)false", "_____", m.group(0))
+    return _FALSE_LITERAL.sub(blank, text)
+
+
 def flagged(verdict: str, token: str) -> bool:
     """Whether ``verdict`` doubts ``token``.
 
@@ -216,7 +229,7 @@ def flagged(verdict: str, token: str) -> bool:
     """
     if not verdict or not token:
         return False
-    low = verdict.lower()
+    low = _mask_false_literal(verdict).lower()
     tok = token.lower()
     start = 0
     while True:
@@ -456,6 +469,17 @@ def run_detect_trial(q: DetectQuestion, *, arm: str, trial_idx: int,
         verdict = " ".join(getattr(x, "content", "") or "" for x in turns)
     t.verdict_chars = len(verdict)
     t.verdict = verdict
+    for turn in (out.get("turns") or []):
+        t.prompt_tokens += int(getattr(turn, "prompt_tokens", 0) or 0)
+        t.completion_tokens += int(getattr(turn, "completion_tokens", 0) or 0)
+    return grade(t, q)
+
+
+def grade(t: DetectTrial, q: DetectQuestion) -> DetectTrial:
+    """Score ``t.verdict`` against ``q``, replacing any earlier score, so
+    a saved run can be re-graded after an oracle fix (``--regrade``)."""
+    t.caught, t.missed, t.false_positives, t.silent_fixes = [], [], [], []
+    verdict = t.verdict
     # Plan G7: a typed critic hands on its record as JSON. Graded through
     # render(), the prose the oracle was written for, so the typed arm is
     # scored on what it said, not on its format.
@@ -463,9 +487,6 @@ def run_detect_trial(q: DetectQuestion, *, arm: str, trial_idx: int,
     rec = typed_results.loads(verdict, typed_results.VERDICT)
     if rec is not None:
         verdict = typed_results.render(typed_results.VERDICT, rec)
-    for turn in (out.get("turns") or []):
-        t.prompt_tokens += int(getattr(turn, "prompt_tokens", 0) or 0)
-        t.completion_tokens += int(getattr(turn, "completion_tokens", 0) or 0)
 
     # A falsehood named inside the CORRECTIONS block is caught, and
     # caught through the *preferred* channel: the critic resolved it
@@ -628,6 +649,10 @@ def _argparser() -> argparse.ArgumentParser:
                    default="all_roles",
                    help="Tier 2: what the two arms flip. `typed` (plan G6) "
                         "keeps all_roles on in both arms.")
+    p.add_argument("--regrade", type=Path, default=None,
+                   help="Tier 1: re-score a saved trials.jsonl with the "
+                        "current oracle (no model calls) and write the "
+                        "result to --out.")
     p.add_argument("--seed-dir", default="",
                    help="Tier 2: code copied into each arm's project. "
                         "Required for --trials > 1, since arms must not "
@@ -976,6 +1001,23 @@ def render_cost_report(arms: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def regrade(path: Path, questions: list[DetectQuestion]) -> list[DetectTrial]:
+    """The trials saved at ``path``, scored again by ``grade()``. A row
+    whose question is no longer in the suite, or that errored, keeps its
+    saved score."""
+    by_id = {q.id: q for q in questions}
+    names = {f.name for f in fields(DetectTrial)}
+    out: list[DetectTrial] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        t = DetectTrial(**{k: v for k, v in row.items() if k in names})
+        q = by_id.get(t.question_id)
+        out.append(grade(t, q) if q and not t.error else t)
+    return out
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     args = _argparser().parse_args(argv)
     if args.tier == "cost":
@@ -1059,6 +1101,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     shash = suite_hash()
 
     trials: list[DetectTrial] = []
+    if args.regrade:
+        trials = regrade(args.regrade, questions)
+        questions = []
     for q in questions:
         for arm in arms:
             for i in range(args.trials):
