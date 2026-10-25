@@ -1037,17 +1037,37 @@ def _forced_report(payload: dict, history: list, instruction: str,
         payload["reasoning_effort"] = "none"
     payload["messages"] = list(history) + [
         harness_note(instruction)]
-    _prepare(config, payload, "forced report")
-    t0 = time.monotonic()
-    final = chat_fn(payload)
-    _notify_response(config, payload, final)
-    if on_iter is not None:
-        try:
-            on_iter(iteration, payload, final,
-                    int((time.monotonic() - t0) * 1000))
-        except Exception:
-            log.exception("on_iter callback raised; ignored")
-    final = dict(final or {})
+    # A report written as a tool call is no report: it is re-asked as the
+    # loop's own turn would be. csl-2026-10-25-0510-99f5: the planner's
+    # cap report was a grep in markup, taken as the plan, and the council
+    # ran one researcher.
+    for attempt in range(silent_turns.TOOL_CALL_PARSE_RETRY_BUDGET + 1):
+        _prepare(config, payload, "forced report")
+        t0 = time.monotonic()
+        final = chat_fn(payload)
+        _notify_response(config, payload, final)
+        if on_iter is not None:
+            try:
+                on_iter(iteration, payload, final,
+                        int((time.monotonic() - t0) * 1000))
+            except Exception:
+                log.exception("on_iter callback raised; ignored")
+        final = dict(final or {})
+        content = (((final.get("choices") or [{}])[0].get("message") or {})
+                   .get("content") or "")
+        if not silent_turns.only_tool_call(content):
+            break
+        if attempt == silent_turns.TOOL_CALL_PARSE_RETRY_BUDGET:
+            final["_stop_reason"] = stop_reason
+            final["_failure_class"] = "tool_call_unparsable"
+            return payload, final
+        _emit_guard(config, {"guard": "silent_turn", "action": "reask",
+                             "kind": "tool_call_without_tools",
+                             "iteration": iteration, "stop": stop_reason})
+        payload = dict(payload)
+        payload["messages"] = list(payload["messages"]) + [
+            {"role": "assistant", "content": content},
+            harness_note(silent_turns.NO_TOOLS_REPORT_REMINDER)]
     final["_stop_reason"] = stop_reason
     final["_failure_class"] = stop_reason
     return payload, final

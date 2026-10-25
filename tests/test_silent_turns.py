@@ -203,3 +203,46 @@ def test_a_lane_that_never_reports_ends_as_no_report():
                                         _say(content=LANE2), _say(content=LANE2)])
     assert len(sent) == 4                       # two re-asks, then it stands
     assert loop_stop(out) == ("no_report", "tool_call_unparsable")
+
+
+# csl-2026-10-25-0510-99f5: the planner's cap report was a grep written as
+# text, the engine took it for the plan, and the council ran one researcher.
+BAD_GREP = ("<tool_call>\n<function=grep>\n<parameter=path>\n"
+            "consultants/engine/polykv.py\n</parameter>\n<parameter>pattern>\n"
+            "pool.*select\n</parameter>\n</function>\n</tool_call>")
+
+
+def _run_capped(script):
+    sent, events = [], []
+
+    def chat_fn(payload):
+        sent.append(dict(payload, messages=list(payload["messages"])))
+        return script.pop(0)
+
+    out = runner.run_loop(
+        {"model": "m", "messages": [{"role": "user", "content": "q"}]}, "/tmp",
+        config=runner.LoopConfig(force_first_tool_call=False, max_iterations=1,
+                                 on_guard=events.append),
+        tool_specs=SPEC, chat_fn=chat_fn,
+        tool_executor=lambda n, a, c: "body")
+    return out, sent, events
+
+
+def test_a_cap_report_written_as_a_call_is_reasked():
+    out, sent, events = _run_capped([_say(tool=True), _say(content=BAD_GREP),
+                                     _say(content="1. Trace place() at a.py:3")])
+    assert len(sent) == 3 and "tools" not in sent[2]
+    assert sent[2]["messages"][-2] == {"role": "assistant", "content": BAD_GREP}
+    assert sent[2]["messages"][-1]["content"] == st.NO_TOOLS_REPORT_REMINDER
+    assert [e["kind"] for e in events if e.get("guard") == "silent_turn"] == \
+        ["tool_call_without_tools"]
+    assert out["choices"][0]["message"]["content"] == "1. Trace place() at a.py:3"
+    assert (out["_stop_reason"], out["_failure_class"]) == \
+        ("iteration_cap", "iteration_cap")
+
+
+def test_a_cap_report_that_stays_a_call_is_marked_unparsable():
+    out, sent, _ = _run_capped([_say(tool=True)] + [_say(content=BAD_GREP)] * 3)
+    assert len(sent) == 4                       # the report, then two re-asks
+    assert (out["_stop_reason"], out["_failure_class"]) == \
+        ("iteration_cap", "tool_call_unparsable")
