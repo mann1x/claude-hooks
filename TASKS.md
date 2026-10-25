@@ -2,31 +2,31 @@
 
 # Tasks — claude-hooks
 
-7 active · 1 ready · prefix `ch`
+6 active · 1 ready · prefix `ch`
 
-## Active (7)
+## Active (6)
 
-- [ch-13](.claude-hooks/tasks/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 22h
+- [ch-13](.claude-hooks/tasks/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 23h
 - [ch-15](.claude-hooks/tasks/ch-15.md) **H** `consultants.providers` Ollama Cloud direct (https://ollama.com, no local Ollama) for consultants / get-advice / caliber — 5d
-- [ch-18](.claude-hooks/tasks/ch-18.md) **H** `mailbox.identity` Mailbox: lasting cloud aliases — a linked cloud thread registers and sends as <alias>@cloud without a per-session approval — 16h
-- [ch-19](.claude-hooks/tasks/ch-19.md) **H** `resources` Resources: extend a held claim's expiry, wake waiters on extension, and make booking behind a held claim always queue — 17h
-- [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 5d
-- [ch-10](.claude-hooks/tasks/ch-10.md) `consultants.polykv` Council F — PolyKV, complete (opencoti + xOllama), last — 50m
-- [ch-12](.claude-hooks/tasks/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 21h
+- [ch-18](.claude-hooks/tasks/ch-18.md) **H** `mailbox.identity` Mailbox: lasting cloud aliases — a linked cloud thread registers and sends as <alias>@cloud without a per-session approval — 17h
+- [ch-19](.claude-hooks/tasks/ch-19.md) **H** `resources` Resources: extend a held claim's expiry, wake waiters on extension, and make booking behind a held claim always queue — 18h
+- [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 6d
+- [ch-12](.claude-hooks/tasks/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 22h
 
 ## Ready (1)
 
-- [ch-11](.claude-hooks/tasks/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 21h
+- [ch-11](.claude-hooks/tasks/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 22h
 
 ## By plan
 
-- `docs/PLAN-council-cerebriline.md`: [ch-9](.claude-hooks/tasks/ch-9.md), [ch-10](.claude-hooks/tasks/ch-10.md), [ch-11](.claude-hooks/tasks/ch-11.md), [ch-12](.claude-hooks/tasks/ch-12.md)
+- `docs/PLAN-council-cerebriline.md`: [ch-9](.claude-hooks/tasks/ch-9.md), [ch-11](.claude-hooks/tasks/ch-11.md), [ch-12](.claude-hooks/tasks/ch-12.md)
 - `docs/PLAN-council-memory.md`: [ch-13](.claude-hooks/tasks/ch-13.md)
 
-## Recently closed (12 of 12)
+## Recently closed (13 of 13)
 
-- [ch-20](.claude-hooks/tasks/archive/ch-20.md) **H** `security.secrets` Commit secret gate — gitleaks + .gitleaks.toml config rules + host-secret search, on every host and in CI — 1m
-- [ch-16](.claude-hooks/tasks/archive/ch-16.md) **H** `resources` Resource manager: shared/exclusive/quiet locks on hosts, GPUs, pods, cloud — real-time waiters, no mail — 23h
+- [ch-10](.claude-hooks/tasks/archive/ch-10.md) `consultants.polykv` Council F — PolyKV, complete (opencoti + xOllama), last — 1m
+- [ch-20](.claude-hooks/tasks/archive/ch-20.md) **H** `security.secrets` Commit secret gate — gitleaks + .gitleaks.toml config rules + host-secret search, on every host and in CI — 55m
+- [ch-16](.claude-hooks/tasks/archive/ch-16.md) **H** `resources` Resource manager: shared/exclusive/quiet locks on hosts, GPUs, pods, cloud — real-time waiters, no mail — 1d
 - [ch-17](.claude-hooks/tasks/archive/ch-17.md) `benchmarks.models` Model eval 2026-10-22: minimax-m3.1-flash full bench + gemma4 council re-run with thinking fixed — 1d
 - [ch-14](.claude-hooks/tasks/archive/ch-14.md) **H** `consultants.compaction` Compaction: the writer is never shown the task (bug-1087) — port the fork's pinned-prompt rule, re-bench — 1d
 - [ch-8](.claude-hooks/tasks/archive/ch-8.md) `consultants.guards` Council D — lane robustness: always-on loop guards, strict nudge profile, named terminal actions — 9d
