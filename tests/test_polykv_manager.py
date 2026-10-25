@@ -1464,3 +1464,71 @@ def test_a_cold_budget_still_opens_an_owner():
     polykv.PlacedChat(chat, mgr, role="researcher").chat(p)
     assert len(chat.owners()) == 1
     assert chat.owners()[0]["placement"]["num_ctx_min"] <= 65536
+
+
+class TestPeakCells:
+    """Plan F acceptance: a live run reports its peak cells — the pool
+    size from /props less the fewest free cells any /kv read saw."""
+
+    class Counting(TestColdBudget.Ceiling):
+        def __init__(self, frees, pool_cells=200000):
+            super().__init__()
+            self.frees, self.pool_cells = list(frees), pool_cells
+
+        def handle(self, method, route, params, data):
+            if route == "props" and self.refuse is None:
+                kv = {"session_ctx_max": 32768}
+                if self.pool_cells:
+                    kv["kv_pool_cells"] = self.pool_cells
+                return Reply(200, {"features": self.features, "opencoti": {
+                    "polykv": {"pools_enabled": True}, "kv": kv}})
+            if route == "kv":
+                free = self.frees.pop(0) if len(self.frees) > 1 else self.frees[0]
+                return Reply(200, {"cells_free": free, "allocations": []})
+            return super().handle(method, route, params, data)
+
+    def test_the_settle_report_names_the_peak(self):
+        eng = self.Counting([150000, 120000, 180000])
+        mgr = _mgr(eng)
+        chat = FakeChat()
+        for _ in range(2):
+            p = _payload()
+            p["options"] = {"num_ctx": 8192}     # a window: make_room reads /kv
+            polykv.PlacedChat(chat, mgr, role="researcher").chat(p)
+        root = mgr.roots["direct|e"]
+        assert root.pool_cells == 200000 and root.min_free == 120000
+        rep = mgr.release_all()["roots"]["direct|e"]
+        assert rep["peak_cells"] == 80000
+        assert rep["pool_cells"] == 200000 and rep["min_cells_free"] == 120000
+
+    def test_no_pool_size_is_no_peak_not_a_guess(self):
+        eng = self.Counting([150000], pool_cells=0)
+        mgr = _mgr(eng)
+        polykv.PlacedChat(FakeChat(), mgr, role="researcher").chat(_payload())
+        assert mgr.release_all()["roots"]["direct|e"]["peak_cells"] is None
+
+
+class TestRootDetection:
+    """csl-2026-10-25-0703-a11c: solidpc's Ollama is an xOllama, and the
+    cloud models behind it were given xOllama roots (affinity) — every
+    session close and leak audit at settle answered 404."""
+
+    def _root(self, monkeypatch, *, cloud):
+        from claude_hooks import ollama_slots, provider_caps
+        from claude_hooks.get_advice.chat_client import ChatClient
+        monkeypatch.setattr(provider_caps, "probe_xollama",
+                            lambda base, headers=None: {"client_placement_v1"})
+        seen = []
+        monkeypatch.setattr(ollama_slots, "is_cloud",
+                            lambda base, model: seen.append((base, model)) or cloud)
+        root = polykv.default_root_for(ChatClient("http://x:11434"), "m:tag")
+        assert seen == [("http://x:11434", "m:tag")]
+        return root
+
+    def test_a_cloud_model_behind_xollama_has_no_root(self, monkeypatch):
+        assert self._root(monkeypatch, cloud=True) is None
+
+    def test_a_local_model_behind_xollama_keeps_its_root(self, monkeypatch):
+        root = self._root(monkeypatch, cloud=False)
+        assert root is not None and root.kind == "xollama"
+        assert root.key == "xollama|http://x:11434|m:tag"

@@ -1821,10 +1821,17 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
                 except ValueError as e:
                     log.warning("consultants config: endpoint %r: %s; "
                                 "using 'dynamic'", name, e)
+            url = url.strip().rstrip("/")
+            api_key = ep.get("api_key") or None
+            prev = base.endpoints.get(name)
+            if "api_key" not in ep and prev is not None and prev.url == url:
+                # a project file never carries an inherited key
+                # (_drop_inherited_secrets); the same endpoint keeps it
+                api_key = prev.api_key
             base.endpoints[name] = EndpointConfig(
-                url=url.strip().rstrip("/"), backend=backend,
+                url=url, backend=backend,
                 model=(ep.get("model") or None),
-                api_key=(ep.get("api_key") or None),
+                api_key=api_key,
                 key_file=(str(ep.get("key_file")).strip()
                           if ep.get("key_file") else None),
                 window=window)
@@ -2457,8 +2464,47 @@ def save_config(cfg: ConsultantsConfig, *, scope: str = "user",
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     text = _render(cfg, override_flag=emit_flag)
+    if scope != "user":
+        text = _drop_inherited_secrets(text, _read_toml(user_config_path()))
     path.write_text(text, encoding="utf-8", newline="\n")
     return path
+
+
+_CRED_URL = re.compile(r"://[^\s:/@]+:[^\s@]+@")
+_SECRET_KEYS = re.compile(r"(?i)(^|_)(api_key|password|passwd|token|secret)$")
+_STR_LINE = re.compile(r'^(\s*)([A-Za-z_][\w.-]*)\s*=\s*"(.*)"\s*$')
+
+
+def _string_values(raw: Any) -> set:
+    if isinstance(raw, dict):
+        return set().union(*(_string_values(v) for v in raw.values())) if raw else set()
+    if isinstance(raw, list):
+        return set().union(*(_string_values(v) for v in raw)) if raw else set()
+    return {raw} if isinstance(raw, str) else set()
+
+
+def _drop_inherited_secrets(text: str, user_raw: dict) -> str:
+    """A project file never carries a credential it only inherited: a
+    line whose value holds one (a URL with a password, a secret-named
+    key) and equals the user-global value becomes a comment; the merge
+    at load still supplies it. ``set-* --project`` used to copy the
+    pgvector DSN with its password into ``<project>/.claude-hooks/``,
+    inside a tree that may not ignore it (c2f2caa leaked that password)."""
+    inherited = _string_values(user_raw)
+    out = []
+    for line in text.splitlines(keepends=True):
+        m = _STR_LINE.match(line)
+        if m:
+            indent, key, value = m.groups()
+            value = value.replace('\\"', '"').replace("\\\\", "\\")
+            if (value in inherited and value
+                    and (_CRED_URL.search(value) or _SECRET_KEYS.search(key))):
+                out.append(f"{indent}# {key}: inherited from the user config "
+                           f"(credentials are never written to a project "
+                           f"file)\n")
+                continue
+        out.append(line)
+    return "".join(out)
 
 
 # ----------------------- mutators ----------------------------------- #

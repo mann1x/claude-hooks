@@ -132,6 +132,11 @@ class Root:
     #: the engine's per-session ceiling (``/props`` ``opencoti.kv``); a
     #: stated window above it is clamped, never sent
     ctx_max: int = 0
+    #: the engine's whole KV pool (``/props`` ``opencoti.kv.kv_pool_cells``)
+    #: and the fewest free cells any ``/kv`` read of this run saw: the
+    #: run's peak is their difference (plan F acceptance: peak cells)
+    pool_cells: int = 0
+    min_free: Optional[int] = None
     #: assured: the run's owner session on this root, its granted window,
     #: and the client + model that opened it (for the keepalive)
     owner: Optional[str] = None
@@ -202,9 +207,31 @@ def default_root_for(client: Any, model: str) -> Optional[Root]:
         if not feats or "client_placement_v1" not in feats:
             return None
         served = real._real(model) if hasattr(real, "_real") else model
+        from claude_hooks import ollama_slots
+        if ollama_slots.is_cloud(base, served):
+            # xOllama passes a cloud model through to ollama.com: there is
+            # no engine behind it (csl-2026-10-25-0703-a11c: two roots in
+            # affinity, every close and audit a 404)
+            return None
         return Root(key=f"xollama|{base}|{served}", kind="xollama",
                     client=PolykvClient.via_xollama(base, served, headers=auth))
     return None
+
+
+def _noted(root: "Root", kv: dict) -> dict:
+    """Record a ``/kv`` read's free cells on its root (the run's peak)."""
+    if isinstance(kv, dict) and kv.get("cells_free") is not None:
+        free = _int(kv.get("cells_free"))
+        root.min_free = free if root.min_free is None else min(root.min_free, free)
+    return kv
+
+
+def peak_cells(root: "Root") -> Optional[int]:
+    """Cells in use at the fullest moment this run saw, or ``None`` when
+    the pool size or a free count was never read."""
+    if not root.pool_cells or root.min_free is None:
+        return None
+    return max(root.pool_cells - root.min_free, 0)
 
 
 def _align(n: int) -> int:
@@ -316,6 +343,8 @@ class KvRunManager:
                         .get("pools_enabled"))
         root.ctx_max = _int(((props.get("opencoti") or {}).get("kv") or {})
                             .get("session_ctx_max")) or root.ctx_max
+        root.pool_cells = _int(((props.get("opencoti") or {}).get("kv") or {})
+                               .get("kv_pool_cells")) or root.pool_cells
         if root.kind == "xollama":
             show = self._show(root.client.transport.base,
                               root.client.transport.model) or {}
@@ -496,7 +525,7 @@ class KvRunManager:
         lane = int((len(full) - len(cut)) / OWNER_CHARS_PER_CELL
                    * PRIVATE_MARGIN) + PRIVATE_FLOOR + out
         try:
-            kv = root.client.kv(live=True) or {}
+            kv = _noted(root, root.client.kv(live=True) or {})
         except (OpencotiError, OSError) as e:
             log.info("polykv: %s owner sizing: %s", root.key, e)
             kv = {}
@@ -541,7 +570,7 @@ class KvRunManager:
             return False
         sid = (placement or {}).get("session_id") or ""
         try:
-            kv = root.client.kv(live=True) or {}
+            kv = _noted(root, root.client.kv(live=True) or {})
             room = _int(kv.get("largest_admissible"))
             ceiling = _int(kv.get("session_ctx_max")) or root.owner_window * 2
             step = max(int(root.owner_window * OWNER_GROW_SHARE), WINDOW_ALIGN)
@@ -914,7 +943,8 @@ class KvRunManager:
         waited = own_dropped = False
         while True:
             try:
-                free = _int((root.client.kv(live=True) or {}).get("cells_free"))
+                free = _int(_noted(root, root.client.kv(live=True) or {})
+                            .get("cells_free"))
             except (OpencotiError, OSError):
                 return None              # unreadable: let the engine decide
             if free >= window:
@@ -1181,7 +1211,7 @@ class KvRunManager:
             if root.client is None or root.mode == "off":
                 continue
             try:
-                kv = root.client.kv(live=True) or {}
+                kv = _noted(root, root.client.kv(live=True) or {})
                 report["leaked_allocations"] += [
                     a.get("session_id") for a in kv.get("allocations") or []
                     if str(a.get("session_id") or "").startswith(self.run_id + "~")]
@@ -1196,7 +1226,10 @@ class KvRunManager:
                         report["leaked_allocations"], report["leaked_pools"])
         report["roots"] = {k: {"mode": r.mode, "reason": r.reason,
                                "generation": r.generation,
-                               "layers": len(r.pools)}
+                               "layers": len(r.pools),
+                               "pool_cells": r.pool_cells or None,
+                               "min_cells_free": r.min_free,
+                               "peak_cells": peak_cells(r)}
                            for k, r in self.roots.items()}
         return report
 
