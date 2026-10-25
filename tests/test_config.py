@@ -200,7 +200,7 @@ class TestConfigWriteAuditLog(unittest.TestCase):
             cfg_path = tdp / "out.json"
             audit_path = tdp / "audit.log"
             sensitive_dsn = (
-                "postgresql://claude:Xct29ERYVvn6iTme6dt544pd3sP6o1Qm@"
+                "postgresql://claude:test-only-not-a-real-password@"
                 "192.168.178.2:5432/memory"
             )
             cfg = {
@@ -213,7 +213,7 @@ class TestConfigWriteAuditLog(unittest.TestCase):
             audit_text = audit_path.read_text(encoding="utf-8")
             # Neither the password nor the api_key substring may
             # appear in the audit log.
-            self.assertNotIn("Xct29ERYVvn6iTme6dt544pd3sP6o1Qm", audit_text)
+            self.assertNotIn("test-only-not-a-real-password", audit_text)
             self.assertNotIn("sk-secret", audit_text)
             self.assertNotIn(sensitive_dsn, audit_text)
 

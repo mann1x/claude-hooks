@@ -165,6 +165,22 @@ def step_repo(dry: bool) -> Step:
                "deployable paths — deploying the working tree, not HEAD")
         for ln in changed[:10]:
             s.note(f"  {ln}")
+
+    # The commit secret gate (scripts/secret_scan.py): .git/hooks is not
+    # tracked, so a clone has the gate only once deploy puts it there.
+    # c2f2caa pushed the pgvector DSN password with no gate in the hook.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import secret_scan
+    if secret_scan.hook_installed():
+        s.note("secret gate: in .git/hooks/pre-commit")
+    elif dry:
+        s.note("secret gate: would install into .git/hooks/pre-commit")
+    else:
+        s.note(f"secret gate: {secret_scan.install_hook()} in "
+               ".git/hooks/pre-commit")
+    if secret_scan.find_gitleaks() is None:
+        s.note("WARNING: gitleaks is not installed — every commit here is "
+               "refused until it is")
     return s
 
 

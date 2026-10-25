@@ -966,6 +966,11 @@ keeps the old copy no matter what is on disk.
 
 ## Before Committing
 
+**Secret gate:** every commit runs `scripts/secret_scan.py --staged` from
+`.git/hooks/pre-commit` (gitleaks with `.gitleaks.toml` plus a search for
+this host's own secrets) and is refused on any finding. Remove the secret
+from the commit; never allowlist it. See [`docs/secret-scan.md`](docs/secret-scan.md).
+
 **IMPORTANT:** Before every git commit, you MUST ensure Caliber syncs agent configs with the latest code changes.
 
 First, check if the pre-commit hook is already installed:

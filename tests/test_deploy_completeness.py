@@ -287,6 +287,29 @@ class TestCouncilSandboxLauncher(unittest.TestCase):
         self.assertIn("escape_smoke", body)
 
 
+class TestSecretGate(unittest.TestCase):
+    """The commit secret gate lives in .git/hooks, which git never
+    tracks: deploy installs it on every host and the verifier fails a
+    host where it is missing or cannot run (c2f2caa)."""
+
+    def test_deploy_installs_it_and_verify_checks_it(self):
+        body = _src(DEPLOY)
+        body = body[body.index("def step_repo"):]
+        body = body[:body.index("\ndef ", 1)]
+        self.assertIn("secret_scan.install_hook()", body)
+        src = _src(VERIFY)
+        self.assertIn("def check_secret_gate", src)
+        self.assertIn("check_secret_gate(r)", src[src.index("def main"):])
+
+    def test_the_config_and_ignore_file_are_tracked(self):
+        import subprocess
+        out = subprocess.run(["git", "-C", str(REPO), "ls-files", "--error-unmatch",
+                              ".gitleaks.toml", ".gitleaksignore",
+                              "scripts/secret_scan.py"],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+
 class TestEngineHardening(unittest.TestCase):
     """Plan E8: the engine units get a measured hardening drop-in.
     ``deploy.py`` never re-renders unit files, so the drop-in is its own

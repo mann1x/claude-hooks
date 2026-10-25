@@ -731,7 +731,7 @@ def _audit_log_config_write(cfg_path: Path, size: int) -> None:
         2026-05-22T16:12:03+0200\\tpid=...\\tsize=8096\\tpath=...\\tcaller=install.py:7600:_main\\targv0=python install.py
 
     **Never logs config content** — DSNs in this file carry the
-    pgvector password (``postgresql://claude:Xct29ER...``); the audit
+    pgvector password (``postgresql://claude:<password>@...``); the audit
     log lives under ``~/.claude/`` which is more loosely protected
     than ``config/``. Metadata only.
 

@@ -821,6 +821,25 @@ def check_tasks(r: Results) -> None:
           f"{len(projects)} project(s)")
 
 
+def check_secret_gate(r: Results) -> None:
+    """The commit secret gate is wired and can run: the pre-commit hook
+    calls scripts/secret_scan.py, and gitleaks is there for it (without
+    it every commit is refused)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import secret_scan
+    print("commit secret gate")
+    if not secret_scan.hook_installed():
+        r.add(FAIL, "secret gate", ".git/hooks/pre-commit does not run "
+              "scripts/secret_scan.py — run scripts/deploy.py")
+        return
+    exe = secret_scan.find_gitleaks()
+    if exe is None:
+        r.add(FAIL, "secret gate", "gitleaks not installed: commits are "
+              "refused (winget install Gitleaks.Gitleaks / apt gitleaks)")
+        return
+    r.add(PASS, "secret gate", f"pre-commit hook + {exe}")
+
+
 def check_resources(r: Results) -> None:
     """The resource store answers a real read, and says which one it is:
     the shared Postgres (every host) or a local file (this host only)."""
@@ -874,6 +893,7 @@ def main() -> int:
         check_skills(r)
         check_mailbox_relay(r)
         check_cli_and_hooks(r)
+        check_secret_gate(r)
         check_tasks(r)
         check_resources(r)
         check_store(r)
