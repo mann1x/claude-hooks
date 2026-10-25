@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from consultants import config as cc
 from consultants.engine import council as council_mod
+from consultants.engine import grounding as grounding_mod
 from consultants.engine import polykv as polykv_mod
 from consultants.engine import storage
 from consultants.engine.run_control import RunSuspended
@@ -35,7 +36,6 @@ def make_runner(*, ollama_base_url: str):
         render_for_log,
     )
     from claude_hooks.get_advice.chat_client import make_agent_chat_client
-    from claude_hooks.caliber_proxy.prompt import build_grounding_messages
     from consultants.server.shell_enable import answer_with_shell
     from consultants.server.tool_surface import build_tool_surface
     from consultants.engine.graph import (
@@ -193,8 +193,9 @@ def make_runner(*, ollama_base_url: str):
                         role="coder", tracer=tracer, stop=_run_stop(state),
                     )
 
-        grounding_msgs = build_grounding_messages(
-            cwd, tools_available=True,
+        # Sized by the smallest window of the run's roles (ch-24).
+        grounding_msgs = grounding_mod.council_grounding(
+            cwd, cfg, chat_clients, enabled,
         ) if "researcher" in enabled else []
 
         # Per-role think values: cfg.roles[role].think wins when set,
@@ -620,7 +621,6 @@ def make_follow_up_runner(*, ollama_base_url: str):
         render_for_log,
     )
     from claude_hooks.get_advice.chat_client import make_agent_chat_client
-    from claude_hooks.caliber_proxy.prompt import build_grounding_messages
     from consultants.server.shell_enable import answer_with_shell
     from consultants.server.tool_surface import build_tool_surface
     from consultants.engine.graph import (
@@ -763,8 +763,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
             for r in enabled_t
         }
 
-        grounding_msgs = build_grounding_messages(
-            cwd, tools_available=True,
+        grounding_msgs = grounding_mod.council_grounding(
+            cwd, cfg, chat_clients, enabled_t,
         )
 
         # Per-role think values from current cfg (parent_state
