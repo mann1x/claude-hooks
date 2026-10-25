@@ -710,7 +710,12 @@ class KvRunManager:
                     hashlib.sha256(content.encode()).hexdigest()[:16],
                     best)
             if memo in self._chains:
-                return self._chains[memo] or parent
+                cached = self._chains[memo]
+                # Only while that pool still exists: a dropped layer or a
+                # restarted engine would keep every call on a dead id.
+                if cached is None or cached in root.pools.values():
+                    return cached or parent
+                del self._chains[memo]
         cuts = PL.block_cuts(content)
         lcp = PL.snap(content, best)
         if lcp and lcp > max(cuts, default=0):
@@ -779,9 +784,13 @@ class KvRunManager:
                     made = root.client.create_pool(prompt=text, shared=True,
                                                    ephemeral=True, pin=True)
             except (OpencotiError, OSError, ValueError) as e:
+                parent_gone = parent is not None and _no_such_pool(e)
                 self._give_up(root, key, f"layer refused: {e}",
-                              retry=isinstance(e, OpencotiError) and
-                              getattr(e, "status", 0) in (429, 503))
+                              retry=parent_gone or (
+                                  isinstance(e, OpencotiError) and
+                                  getattr(e, "status", 0) in (429, 503)))
+                if parent_gone:
+                    self._pool_gone(root, parent, f"fork refused: {e}")
                 return None
             pid = pool_ref(made)
             if pid is None:
@@ -826,6 +835,9 @@ class KvRunManager:
             pid = self._deep_layers(root, client, model, messages,
                                     payload.get("tools") or None, payload,
                                     pid)
+            with self._lock:
+                if pid is not None and pid not in root.pools.values():
+                    pid = None     # lost while this call was building
             if pid is not None:
                 placement["pool_id"] = pid
                 placement["_layer_root"] = root.key
@@ -869,7 +881,7 @@ class KvRunManager:
         if rec.get("warnings"):
             st.warnings += len(rec["warnings"])
             if root is not None and placement.get("pool_id") is not None:
-                self._drop_pool(root, str(placement["pool_id"]), rec["warnings"][0])
+                self._pool_gone(root, str(placement["pool_id"]), rec["warnings"][0])
 
     def make_room(self, placement: Optional[dict], *,
                   payload: Optional[dict] = None,
@@ -1079,6 +1091,20 @@ class KvRunManager:
                 root.old_owners.append(root.owner)
                 root.owner, root.owner_window = None, 0
         return True
+
+    def _pool_gone(self, root: Root, pid: str, why: str) -> None:
+        """A pool the engine no longer has. xOllama's replies carry no
+        ``boot_id``, so ask ``/health`` whether the engine restarted (every
+        pool gone, ids reused from 0) before dropping just this one."""
+        try:
+            boot = root.client.boot_id()
+        except (OpencotiError, OSError):
+            boot = None
+        with self._lock:
+            if boot and root.boot_id and boot != root.boot_id:
+                self._new_generation(root, boot)
+                return
+        self._drop_pool(root, pid, why)
 
     def _drop_pool(self, root: Root, pid: str, why: str) -> None:
         with self._lock:
@@ -1545,6 +1571,12 @@ def _owner_full(e: BaseException) -> bool:
 _SHORT_WINDOW = re.compile(
     r"request \((\d+) tokens, (\d+) of them shareable[^)]*\) exceeds the "
     r"available context size \((\d+) private tokens\)")
+
+
+def _no_such_pool(e: BaseException) -> bool:
+    """The engine's 400 for a pool id it does not hold (a fork's parent)."""
+    return (isinstance(e, OpencotiError) and getattr(e, "status", 0) == 400
+            and "invalid pool id" in str(e).lower())
 
 
 def _layer_gone(e: BaseException, placement: dict) -> bool:

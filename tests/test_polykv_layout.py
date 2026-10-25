@@ -301,3 +301,73 @@ def test_a_fork_attach_leaves_room_for_the_whole_chain():
     placed = chat.payloads[-1]["placement"]
     assert placed["num_ctx"] + mgr.roots["direct|e"].chain_cells[
         str(placed["pool_id"])] <= 32768
+
+
+# ------------------------------------------------- a pool the engine lost
+
+def _restart(eng):
+    """The engine came back: no pools, ids from 0 again, a new boot id. A
+    fork of an id it does not hold is the real engine's 400."""
+    from claude_hooks.polykv.client import Reply
+    eng.pools.clear()
+    eng.next_id = 0
+    eng.boot = "boot-B"
+    orig = eng.handle
+
+    def handle(method, route, params, data):
+        parts = route.split("/")
+        if (route.endswith("/fork") and len(parts) > 2
+                and int(parts[2]) not in eng.pools):
+            eng.requests.append((method, route, params, data))
+            return Reply(400, {"error": {"message": "Invalid pool ID"}})
+        return orig(method, route, params, data)
+    eng.handle = handle
+
+
+def test_a_fork_refused_for_its_parent_notices_the_restart():
+    eng, chat = PoolEngine(), FakeChat()
+    mgr = _mgr(eng)
+    _send(mgr, chat, "critic", critic())
+    _restart(eng)
+    sent = _send(mgr, chat, "synthesizer", synth())
+    root = mgr.roots["direct|e"]
+    # xOllama's replies carry no boot id: the refused fork asks /health.
+    assert root.generation == 1 and root.boot_id == "boot-B"
+    assert "pool_id" not in sent["placement"]       # nothing dead attached
+    again = _send(mgr, chat, "synthesizer", synth())["placement"]["pool_id"]
+    assert int(again) in eng.pools                  # rebuilt on the new engine
+
+
+def test_a_chain_on_a_dropped_layer_is_rebuilt():
+    eng, chat = PoolEngine(), FakeChat()
+    mgr = _mgr(eng)
+    a = _send(mgr, chat, "critic", critic())["placement"]["pool_id"]
+    root = mgr.roots["direct|e"]
+    del eng.pools[int(a)]
+    mgr._drop_pool(root, a, "gone")
+    b = _send(mgr, chat, "critic", critic())["placement"]["pool_id"]
+    assert b != a and int(b) in eng.pools
+
+
+def test_a_lost_parent_on_the_same_engine_is_dropped_not_the_child():
+    eng, chat = PoolEngine(), FakeChat()
+    mgr = _mgr(eng)
+    a = _send(mgr, chat, "critic", critic())["placement"]["pool_id"]
+    from claude_hooks.polykv.client import Reply
+    orig = eng.handle
+
+    def handle(method, route, params, data):
+        if route == f"polykv/pools/{a}/fork":
+            return Reply(400, {"error": {"message": "Invalid pool ID"}})
+        return orig(method, route, params, data)
+    eng.handle = handle
+    _send(mgr, chat, "synthesizer", synth())
+    root = mgr.roots["direct|e"]
+    assert root.generation == 0
+    assert a not in root.pools.values()
+    assert any(e["kind"] == "pool_dropped" and e["pool_id"] == a
+               for e in mgr.events)
+    eng.handle = orig
+    b = _send(mgr, chat, "synthesizer", synth())["placement"]["pool_id"]
+    assert int(b) in eng.pools and eng.pools[int(b)]["body"]["prompt"] \
+        .endswith(REPORTS[2])
