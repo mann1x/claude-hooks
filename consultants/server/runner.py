@@ -439,8 +439,7 @@ def make_runner(*, ollama_base_url: str):
         _tried = _tried_docs(runner_input)
         if _tried:
             initial["additional_context"] = _tried
-        if enabled:
-            state.progress[enabled[0]] = "in_progress"
+        _start_progress(state, enabled, runner_input)
 
         # Run the graph in streaming mode so per-role progress flips
         # in real time. We use BOTH stream modes:
@@ -1026,8 +1025,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
                     )
             initial["research"] = prior_research
 
-        if enabled:
-            state.progress[enabled[0]] = "in_progress"
+        _start_progress(state, enabled, runner_input)
 
         # Same dual-mode streaming + always-on synthesizer interrupt as
         # run_council, via the shared driver (auto-resume / rewind / HITL).
@@ -2047,6 +2045,43 @@ def _write_failed_artifacts(state, cwd: str, question: str,
         storage.write_consultation(result, cwd=Path(cwd))
     except Exception as e:  # pragma: no cover
         log.warning("failed-artifact write failed: %s", e)
+
+
+def _start_progress(state, enabled, runner_input: dict) -> None:
+    """Mark where the run starts. A resumed run starts after the roles it
+    already finished: they are ``done`` from its own transcript.db, never
+    the first role re-marked ``in_progress`` (the graph does not re-enter
+    a finished planner, so nothing flipped it back —
+    csl-2026-10-25-0559-4d81 showed the planner running to the end)."""
+    if not enabled:
+        return
+    if not runner_input.get("resume"):
+        state.progress[enabled[0]] = "in_progress"
+        return
+    for role in _exited_roles(state.cwd, state.sid):
+        if role in state.progress:
+            state.progress[role] = "done"
+
+
+def _exited_roles(cwd: str, sid: str) -> set:
+    """Roles with a ``node_exit`` row in the run's transcript.db; empty
+    when it cannot be read."""
+    import sqlite3
+    from consultants.engine import storage as _storage
+    db = (Path(cwd) / ".claude-hooks" / "consultants" / sid
+          / _storage.TRANSCRIPT_DB_FILENAME)
+    if not db.exists():
+        return set()
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            rows = con.execute("SELECT DISTINCT role FROM runtime_events "
+                               "WHERE kind = 'node_exit'").fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return set()
+    return {r for (r,) in rows if r}
 
 
 def _polykv_manager(cfg, state, cwd: str, runner_input: dict, *,

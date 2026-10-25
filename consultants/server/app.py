@@ -1616,11 +1616,22 @@ def suspend_running_councils(app, grace_s: Optional[float] = None) -> int:
         except Exception:
             pass
     left = [sid for sid, fut in futures.items() if not fut.done()]
+    by_sid = {s.sid: s for s in running}
     for sid in left:
         # Never reached a boundary; the record says running, which the
         # next engine treats exactly like suspended.
         inflight.update(sid, state="interrupted",
                         suspended_at=time.time())
+        # Its runner's finally never runs, so its PolyKV snapshot is
+        # written here: the resume takes back the pools this process
+        # pinned instead of leaving them on the engine
+        # (csl-2026-10-25-0559-4d81 was still inside the researcher
+        # node at the end of the grace).
+        s = by_sid.get(sid)
+        if s is not None and getattr(s, "_polykv", None) is not None:
+            from consultants.engine import polykv
+            polykv.settle_run(sid, cwd=s.cwd, status="suspended")
+            s._polykv = None
     if left:
         log.warning("engine shutdown: %d council(s) still inside a node "
                     "after %.0fs (%s); they resume from their last "
