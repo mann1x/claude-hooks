@@ -33,6 +33,7 @@ researcher round counts live in the state dict.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import re
@@ -1493,7 +1494,8 @@ def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
     :func:`_budget_knobs`). Unless ``announce`` is off, the role's cap is
     stated in its system prompt once (``# Output Budget``).
     """
-    knobs = knobs or budget.DEFAULT_KNOBS
+    knobs = _polykv_capped(chat_client, model, messages,
+                           knobs or budget.DEFAULT_KNOBS)
     from consultants.engine import compaction, history
     settings = knobs.compaction or compaction.DEFAULT_SETTINGS
     plan = budget.plan(chat_client, model, messages, tools=tools,
@@ -1544,6 +1546,21 @@ def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
             _stated_think_share(chat_client, model, think, plan.role_cap,
                                 plan.context_length))
     return messages, plan
+
+
+def _polykv_capped(chat_client, model: str, messages: list[dict],
+                   knobs: "budget.Knobs") -> "budget.Knobs":
+    """``knobs`` with the output ceiling lowered to the run's per-lane
+    PolyKV cap (ch-21) when that is lower; otherwise ``knobs`` itself, so
+    a pool large enough changes nothing. The cap is the role's, so it is
+    what ``# Output Budget`` states."""
+    probe = getattr(chat_client, "polykv_output_cap", None)
+    if not callable(probe):
+        return knobs
+    cap = probe(model, messages)
+    if not isinstance(cap, int) or cap <= 0 or cap >= knobs.output_ceiling:
+        return knobs
+    return dataclasses.replace(knobs, output_ceiling=cap)
 
 
 def _budget_options(options: Optional[dict], plan: "budget.Budget",

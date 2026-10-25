@@ -1532,3 +1532,141 @@ class TestRootDetection:
         root = self._root(monkeypatch, cloud=False)
         assert root is not None and root.kind == "xollama"
         assert root.key == "xollama|http://x:11434|m:tag"
+
+
+class TestLaneOutputCap:
+    """ch-21: each placed call asks its prompt past the layer plus its
+    whole output allowance, so on a small engine two researcher lanes
+    beside the layer could not both be admitted. Under pooled / assured
+    a lane's allowance is its share of the pool beside the layer."""
+
+    HEAD = [{"role": "system", "content": "GROUNDING " + "g" * 16000},
+            {"role": "system", "content": "You are the researcher."}]
+
+    class Small(PoolEngine):
+        """A pool of ``pool_cells``; a layer is one cell per four chars."""
+
+        def __init__(self, pool_cells):
+            super().__init__()
+            self.pool_cells = pool_cells
+
+        def handle(self, method, route, params, data):
+            if route == "props" and self.refuse is None:
+                self.requests.append((method, route, params, data))
+                return Reply(200, {"features": self.features, "opencoti": {
+                    "polykv": {"pools_enabled": self.pools_enabled},
+                    "kv": {"session_ctx_max": 32768,
+                           "kv_pool_cells": self.pool_cells}}})
+            out = super().handle(method, route, params, data)
+            if route == "polykv/pools" and method == "POST" and out.status == 200:
+                pid = out.body["pool_id"]
+                self.pools[pid]["own_len"] = len(data.get("prompt") or "") // 4
+                out = Reply(200, dict(self.pools[pid]))
+            return out
+
+    class Admitting(FakeChat):
+        """Admits a call while the layer plus every live booking fits the
+        pool; bookings are kept (both lanes are mid-run)."""
+
+        def __init__(self, engine):
+            super().__init__()
+            self.engine, self.booked, self.refused = engine, {}, []
+
+        def context_length(self, model):
+            return 32768
+
+        def chat(self, payload):
+            from claude_hooks.get_advice.chat_client import ChatFault
+            p = payload.get("placement") or {}
+            layer = sum(int(v.get("own_len") or 0) for v in self.engine.pools.values())
+            ask = int(p.get("num_ctx") or 32768)
+            others = sum(v for k, v in self.booked.items() if k != p.get("session_id"))
+            if layer + others + ask > self.engine.pool_cells:
+                self.refused.append(p.get("session_id"))
+                raise ChatFault("ollama chat HTTP 429: admission rejected",
+                                fault_class="transport", status=429)
+            self.booked[p.get("session_id")] = ask
+            return super().chat(payload)
+
+        chat_streamed = chat
+
+    def _lane(self, n):
+        return self.HEAD + [{"role": "user", "content": f"QUESTION\nlane {n}: read x.py"}]
+
+    def _run_lane(self, placed, n):
+        from consultants.engine import council
+        msgs, plan = council._plan_and_compact(placed, "q", self._lane(n),
+                                               role="researcher")
+        placed.chat({"model": "q", "messages": msgs,
+                     "options": {"num_predict": plan.output_tokens}})
+        return msgs, plan
+
+    def _setup(self, pool_cells, monkeypatch, *, cap=True):
+        monkeypatch.setattr(polykv, "WAIT_FOR_ROOM_S", 0.0)
+        eng = self.Small(pool_cells)
+        chat = self.Admitting(eng)
+        mgr = _mgr(eng)
+        if not cap:
+            monkeypatch.setattr(mgr, "output_cap", lambda *a, **k: None)
+        return eng, chat, polykv.PlacedChat(chat, mgr, role="researcher"), mgr
+
+    def test_two_lanes_fit_with_the_cap(self, monkeypatch):
+        eng, chat, placed, mgr = self._setup(32768, monkeypatch)
+        _, plan = self._run_lane(placed, 1)
+        self._run_lane(placed, 2)
+        assert chat.refused == [] and len(chat.booked) == 2
+        lanes = polykv._lanes_of("researcher")
+        assert lanes == 2
+        assert plan.role_cap == mgr._out_caps[("direct|e", "q", "researcher")]
+        assert plan.role_cap < 32768 * 0.75 // lanes
+
+    def test_without_the_cap_the_second_lane_is_refused(self, monkeypatch):
+        from claude_hooks.get_advice.chat_client import ChatFault
+        eng, chat, placed, mgr = self._setup(32768, monkeypatch, cap=False)
+        self._run_lane(placed, 1)
+        with pytest.raises(ChatFault):
+            self._run_lane(placed, 2)
+        assert len(chat.refused) >= 1
+
+    def test_a_large_pool_changes_nothing(self, monkeypatch):
+        from consultants.engine import council
+        eng, chat, placed, mgr = self._setup(589824, monkeypatch)
+        a = council._plan_and_compact(placed, "q", self._lane(1), role="researcher")
+        b = council._plan_and_compact(self.Admitting(eng), "q", self._lane(1),
+                                      role="researcher")
+        assert a[0] == b[0]
+        assert a[1].output_tokens == b[1].output_tokens == 24576
+
+    def test_the_cap_is_stated_once_and_stays(self, monkeypatch):
+        from consultants.engine import budget, council
+        eng, chat, placed, mgr = self._setup(32768, monkeypatch)
+        msgs, plan = self._run_lane(placed, 1)
+        cap = plan.role_cap
+        stated = [m["content"] for m in msgs
+                  if budget.OUTPUT_BUDGET_HEADING in str(m.get("content"))]
+        assert len(stated) == 1
+        assert f"{cap:,}" in stated[0] or str(cap) in stated[0]
+        # The layer now exists and is sized: the figure must not move.
+        assert mgr.roots["direct|e"].sizes
+        fresh, plan2 = council._plan_and_compact(placed, "q", self._lane(3),
+                                                 role="researcher")
+        assert plan2.role_cap == cap
+        longer = msgs + [{"role": "assistant", "content": "a" * 3000},
+                         {"role": "user", "content": "b" * 3000}]
+        again, plan3 = council._plan_and_compact(placed, "q", longer,
+                                                 role="researcher")
+        assert plan3.role_cap == cap
+        assert [m for m in again if m.get("role") == "system"] == \
+            [m for m in msgs if m.get("role") == "system"]
+
+    def test_a_single_role_gets_the_whole_share(self):
+        assert polykv._lanes_of("planner") == 1
+        assert polykv._lanes_of("researcher:cross_exam") == polykv._lanes_of("researcher")
+
+    def test_off_and_affinity_have_no_cap(self):
+        eng = self.Small(32768)
+        assert _mgr(eng, mode="off").output_cap(FakeChat(), "q", self._lane(1),
+                                                role="researcher") is None
+        eng.pools_enabled = False
+        assert _mgr(eng).output_cap(FakeChat(), "q", self._lane(1),
+                                    role="researcher") is None

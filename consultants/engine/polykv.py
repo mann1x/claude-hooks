@@ -94,6 +94,9 @@ OWNER_CHARS_PER_CELL = 3.0
 OWNER_KEEPALIVE_S = 60.0
 OWNER_GROW_SHARE = 0.5
 DEFAULT_OUTPUT = 4096
+#: Per-lane output cap (ch-21): of a lane's share of the pool beside the
+#: layer, this much may be its answer; the rest is its own transcript.
+LANE_OUTPUT_SHARE = 0.5
 SENTINEL = "⁣POLYKV_SENTINEL⁣"
 #: xOllama seats a plain model needs before its client pools are used.
 MIN_CLIENT_POOLS = 2
@@ -295,6 +298,9 @@ class KvRunManager:
         self._pending: dict[str, dict] = {}
         #: (root key, pool id) of every layer this run created
         self.created: list[tuple[str, str]] = []
+        #: (root key, model, role) -> the output cap fixed at the role's
+        #: first sized call (:meth:`output_cap`), kept for the run
+        self._out_caps: dict[tuple, int] = {}
         self._keepalive: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._last_activity = clock()
@@ -665,6 +671,56 @@ class KvRunManager:
         # output of a 32k engine: the 429 for that never clears.
         cap = self._window_cap(root, pid)
         return min(window, cap) if cap else window
+
+    def output_cap(self, client: Any, model: str, messages: list,
+                   *, role: str) -> Optional[int]:
+        """The most a call of ``role`` may answer under pooled / assured
+        (ch-21), or ``None`` for no cap.
+
+        Each placed call asks its prompt past the layer plus its whole
+        output allowance, so on a small engine two researcher lanes beside
+        the layer could not both be admitted (32,768 cells, a ~17.5k
+        layer: one lane failed after the engine's 2-minute queue). A lane
+        gets ``(pool − layer) ÷ lanes`` and may answer
+        :data:`LANE_OUTPUT_SHARE` of it, never below the budget floor.
+
+        Fixed at the role's first sized call and kept, because the role
+        states it in its ``# Output Budget`` section: a figure that moved
+        with the live layers would break the prefix the cache holds. The
+        layer does not exist yet then, so it is estimated from the head
+        (system turns + first user turn) at the root's own characters per
+        cell, else :data:`OWNER_CHARS_PER_CELL` (an over-estimate)."""
+        if self.mode == "off" or self.released:
+            return None
+        root = self._root(client, model)
+        if root is None:
+            return None
+        key = (root.key, model, role)
+        with self._lock:
+            if key in self._out_caps:
+                return self._out_caps[key]
+        self._settle_mode(root, model)
+        if root.mode not in ("pooled", "assured") or not root.pool_cells:
+            return None          # nothing known yet: asked again next call
+        head = [m for m in messages if m.get("role") == "system"]
+        head += [next((m for m in messages if m.get("role") == "user"), {})]
+        chars = sum(len(str(m.get("content") or "")) for m in head)
+        sized = [(c, n) for c, n in root.sizes.values() if c and n]
+        per_cell = (sum(n for _, n in sized) / sum(c for c, _ in sized)
+                    if sized else OWNER_CHARS_PER_CELL)
+        layer = max(int(chars / max(per_cell, 0.1)),
+                    max(root.chain_cells.values(), default=0))
+        from consultants.engine import budget
+        cap = max(budget.MIN_OUTPUT_TOKENS,
+                  int(max(0, root.pool_cells - layer) / _lanes_of(role)
+                      * LANE_OUTPUT_SHARE))
+        with self._lock:
+            cap = self._out_caps.setdefault(key, cap)
+        self.events.append({"kind": "output_cap", "root": root.key,
+                            "model": model, "role": role, "cap": cap,
+                            "pool_cells": root.pool_cells, "layer_est": layer,
+                            "lanes": _lanes_of(role)})
+        return cap
 
     @staticmethod
     def _window_cap(root: Root, pid: Optional[str]) -> int:
@@ -1576,6 +1632,19 @@ def release_snapshot(snap: dict) -> dict:
     return out
 
 
+def _lanes_of(role: str) -> int:
+    """How many calls of ``role`` can run at once on one root: the
+    fan-out width for the lane roles, one for every other role."""
+    base = (role or "").split(":")[0]
+    if base in ("researcher", "tool_executor"):
+        from consultants.engine import council
+        return max(1, council.FANOUT_MAX_LANES)
+    if base == "coder":
+        from consultants.engine import coder
+        return max(1, coder.CODER_MAX_TASKS)
+    return 1
+
+
 def placed(client: Any, mgr: Optional[KvRunManager], role: str) -> Any:
     """``client`` placed by ``mgr``, or ``client`` itself when there is
     none (PolyKV off: nothing wraps anything)."""
@@ -1634,6 +1703,15 @@ class PlacedChat:
         self._placed_manager = manager
         self._placed_role = role
         self._placed_local = threading.local()
+
+    def polykv_output_cap(self, model: str, messages: list) -> Optional[int]:
+        """:meth:`KvRunManager.output_cap` for this role (``None``: no cap)."""
+        try:
+            return self._placed_manager.output_cap(
+                self._placed_inner, model, messages, role=self._placed_role)
+        except Exception:  # noqa: BLE001 — a cap never fails a call
+            log.exception("polykv: output cap failed; uncapped")
+            return None
 
     def last_placement(self) -> Optional[dict]:
         """The placement of this thread's last call (``None``: unplaced)."""
