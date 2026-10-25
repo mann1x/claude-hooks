@@ -156,7 +156,7 @@ def make_runner(*, ollama_base_url: str):
             r: TracedChat(
                 polykv_mod.placed(_role_client(cfg, r, ollama_base_url),
                                   pk, r),
-                role=r, tracer=tracer,
+                role=r, tracer=tracer, stop=_run_stop(state),
             )
             for r in enabled
         }
@@ -190,7 +190,7 @@ def make_runner(*, ollama_base_url: str):
                             make_agent_chat_client(m, ollama_base_url,
                                                    endpoints=cfg.endpoints),
                             pk, "coder"),
-                        role="coder", tracer=tracer,
+                        role="coder", tracer=tracer, stop=_run_stop(state),
                     )
 
         grounding_msgs = build_grounding_messages(
@@ -716,7 +716,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
                     state.sid, role, role_model,
                 )
             chat_clients[role] = TracedChat(polykv_mod.placed(raw, pk_fu, role),
-                                            role=role, tracer=tracer)
+                                            role=role, tracer=tracer,
+                                            stop=_run_stop(state))
 
         # Task #111: per-model coder clients (mirrors the primary
         # runner's logic). Re-use warm parent clients when present;
@@ -750,7 +751,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
                             m, ollama_base_url, endpoints=cfg.endpoints)
                     coder_clients_by_model_fu[m] = TracedChat(
                         polykv_mod.placed(raw, pk_fu, "coder"),
-                        role="coder", tracer=tracer,
+                        role="coder", tracer=tracer, stop=_run_stop(state),
                     )
 
         # Models: prefer parent's recorded models so the follow-up
@@ -2063,6 +2064,17 @@ def _polykv_manager(cfg, state, cwd: str, runner_input: dict, *,
         adopt_root=getattr(state, "root_sid", None) if adopt else None)
     state._polykv = mgr
     return mgr
+
+
+def _run_stop(state):
+    """The run's cancel as each call's ``cancel_check``: the node gate
+    only skips nodes not yet started, so a call already retrying a dead
+    server kept loading the model there for the whole retry budget
+    after the council was cancelled (arm B, 2026-10-24)."""
+    def stop() -> bool:
+        rc = getattr(state, "run_control", None)
+        return bool(rc is not None and rc.cancelled)
+    return stop
 
 
 def _role_client(cfg, role: str, ollama_base_url: str):

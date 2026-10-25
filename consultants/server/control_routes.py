@@ -942,6 +942,12 @@ def register_control_routes(app: "FastAPI") -> None:
             _safe_apply_state_delta(s, req.state_delta)
         running = getattr(s, "status", "") == "running"
         cancelled_now = s.run_control.request_cancel(reason)
+        if cancelled_now and running:
+            # Carried across an engine restart, like a wrap-up: the next
+            # engine settles the run cancelled instead of resuming it.
+            from consultants.server import inflight
+            inflight.update(s.sid, cancel={"reason": reason,
+                                           "requested_at": time.time()})
         # M2: release the adversary checkpoint so the runner thread isn't
         # blocked for up to the full timeout on a session being
         # cancelled. The wait loop breaks on this ack (and on ``closed``

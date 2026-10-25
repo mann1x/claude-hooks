@@ -248,6 +248,43 @@ class TestLifecycle:
         assert seen["partial"]["requested_by"] == "enough"
         assert seen["partial"]["requested_at"] == 1234.0
 
+    def test_a_cancel_is_written_into_the_record(self, project_dir):
+        """A cancel outlives the engine it was asked of, like a wrap-up."""
+        entered, release = threading.Event(), threading.Event()
+
+        def run(state, runner_input):
+            # A cancel wins over a suspend, so this one waits to be let go.
+            entered.set()
+            release.wait(5)
+            state.status = "cancelled"
+        app = create_app(run_council=run, start_reaper=False)
+        c = TestClient(app)
+        sid = c.post("/v1/consult", json={
+            "message": "q", "cwd": str(project_dir)}).json()["sid"]
+        assert entered.wait(5)
+        try:
+            c.post(f"/v1/consult/{sid}/cancel", json={"reason": "stop it"})
+            assert inflight.get(sid)["cancel"]["reason"] == "stop it"
+        finally:
+            release.set()
+
+    def test_a_cancelled_council_is_settled_not_resumed(self, project_dir):
+        """arm B, 2026-10-24: a council cancelled before a restart came
+        back as a normal run and kept calling a dead server."""
+        from consultants.engine import sessions_index
+        inflight.register({
+            "sid": "csl-stop", "kind": "consult", "cwd": str(project_dir),
+            "question": "q", "effort": "medium",
+            "started_at": time.time(), "state": "interrupted",
+            "cancel": {"reason": "stop it", "requested_at": 1234.0},
+        })
+        calls = []
+        app = create_app(run_council=lambda s, i: calls.append(s.sid),
+                         start_reaper=False)
+        assert resume_inflight_councils(app) == []
+        assert calls == [] and inflight.get("csl-stop") is None
+        assert sessions_index.get(project_dir, "csl-stop").status == "cancelled"
+
     def test_a_follow_up_resumes_with_its_parent(self, project_dir):
         app = create_app(run_council=_complete, run_follow_up=_complete,
                          start_reaper=False)

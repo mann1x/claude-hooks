@@ -405,16 +405,19 @@ class StallMonitor:
         stall/cap decisions, not "the upstream returned 500".
         """
         result_box: dict[str, Any] = {"result": None}
-        error_box: dict[str, Optional[BaseException]] = {"error": None}
+        error_box: dict[str, Optional[BaseException]] = {"error": None,
+                                                          "cancelled": None}
 
         def worker():
             try:
                 result_box["result"] = chat_streamed_fn(
                     payload, controller,
                 )
-            except CancelledByOrchestrator:
-                # Expected when the orchestrator cancelled mid-call.
-                pass
+            except CancelledByOrchestrator as e:
+                # Expected when the orchestrator cancelled mid-call; when
+                # it did not, the caller's own cancel stopped the call
+                # (a council cancel, threaded in as ``cancel_check``).
+                error_box["cancelled"] = e
             except BaseException as e:  # noqa: BLE001
                 error_box["error"] = e
 
@@ -455,6 +458,8 @@ class StallMonitor:
         # is the failure mode the caller cares about.
         if error_box["error"] is not None and outcome == "ok":
             raise error_box["error"]
+        if error_box["cancelled"] is not None and outcome == "ok":
+            raise error_box["cancelled"]
 
         if outcome == "ok":
             return ("ok", result_box["result"], None)

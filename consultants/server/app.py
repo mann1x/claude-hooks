@@ -1690,6 +1690,25 @@ def resume_inflight_councils(app) -> list[str]:
     return resumed
 
 
+def _settle_unresumed(rec: dict, cwd: Path, status: str) -> None:
+    """Drop an in-flight record the engine will not resume, its
+    checkpoint with it, and index the run as ``status``."""
+    sid = rec.get("sid") or ""
+    inflight.remove(sid)
+    from consultants.engine.checkpointer import discard_sqlite_checkpoint
+    discard_sqlite_checkpoint(cwd, sid)
+    try:
+        sessions_index.append(cwd, sessions_index.SessionEntry(
+            session_id=sid,
+            created=time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(
+                float(rec.get("started_at") or time.time()))),
+            question=rec.get("question") or "",
+            topology="council", effort=rec.get("effort") or "",
+            status=status, duration_seconds=0.0))
+    except Exception:  # pragma: no cover
+        pass
+
+
 def _resume_one(app, rec: dict) -> bool:
     sid = rec.get("sid")
     cwd = Path(rec.get("cwd") or "")
@@ -1703,22 +1722,17 @@ def _resume_one(app, rec: dict) -> bool:
         return False
     if sid in app.state.sessions:
         return False
+    if isinstance(rec.get("cancel"), dict):
+        # The previous engine was asked to cancel this run: a cancelled
+        # run has no answer, so it is settled, never resumed.
+        log.warning("council %s was cancelled before the restart (%s); "
+                    "not resuming it", sid, rec["cancel"].get("reason"))
+        _settle_unresumed(rec, cwd, "cancelled")
+        return False
     if int(rec.get("resumes") or 0) >= inflight.MAX_RESUMES:
         log.error("council %s was already resumed %d times; giving up on "
                   "it", sid, rec.get("resumes"))
-        inflight.remove(sid)
-        from consultants.engine.checkpointer import discard_sqlite_checkpoint
-        discard_sqlite_checkpoint(cwd, sid)
-        try:
-            sessions_index.append(cwd, sessions_index.SessionEntry(
-                session_id=sid,
-                created=time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(
-                    float(rec.get("started_at") or time.time()))),
-                question=rec.get("question") or "",
-                topology="council", effort=rec.get("effort") or "",
-                status="failed", duration_seconds=0.0))
-        except Exception:  # pragma: no cover
-            pass
+        _settle_unresumed(rec, cwd, "failed")
         return False
 
     cfg = cc.load_config(cwd)

@@ -36,6 +36,7 @@ This shim will be removed entirely in v1.2.
 from __future__ import annotations
 
 import contextlib
+import inspect
 import logging
 import os
 import threading
@@ -130,16 +131,58 @@ class TracedChat:
     (see ``state._chat_clients`` / ``getattr(c, "_client", c)``)."""
 
     def __init__(self, client: Any, *, role: str = "",
-                 tracer: Optional[Tracer] = None) -> None:
+                 tracer: Optional[Tracer] = None,
+                 stop: Optional[Callable[[], bool]] = None) -> None:
         self._client = client
         self._role = role
         self._tracer = tracer or Tracer()
+        #: The run's cancel, handed to every call as ``cancel_check`` so a
+        #: call retrying a dead server ends with the council.
+        self._stop = stop if stop is not None and _takes_cancel_check(
+            client) else None
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._client, name)
+        attr = getattr(self._client, name)
+        if name == "chat_streamed" and self._stop is not None:
+            stop = self._stop
+
+            def chat_streamed(payload: dict, *args: Any, **kwargs: Any) -> dict:
+                kwargs["cancel_check"] = _either(kwargs.get("cancel_check"), stop)
+                return attr(payload, *args, **kwargs)
+            return chat_streamed
+        return attr
 
     def chat(self, payload: dict, *args: Any, **kwargs: Any) -> dict:
+        if self._stop is not None:
+            kwargs["cancel_check"] = _either(kwargs.get("cancel_check"),
+                                             self._stop)
         return self._client.chat(payload, *args, **kwargs)
+
+
+def _either(first: Optional[Callable[[], bool]],
+            second: Callable[[], bool]) -> Callable[[], bool]:
+    if first is None:
+        return second
+    return lambda: bool(first() or second())
+
+
+def _takes_cancel_check(client: Any) -> bool:
+    """Whether the client under the wrappers accepts ``cancel_check`` on
+    ``chat`` (test stubs and older clients do not)."""
+    seen = 0
+    while seen < 8:
+        inner = (client.__dict__.get("_placed_inner")
+                 or client.__dict__.get("_client")) \
+            if hasattr(client, "__dict__") else None
+        if inner is None:
+            break
+        client, seen = inner, seen + 1
+    if type(client).__name__ == "ModelRoutingChatClient":
+        return True           # routes to clients that all take it
+    try:
+        return "cancel_check" in inspect.signature(client.chat).parameters
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
 def traced_tool(executor: Callable[..., str], *,

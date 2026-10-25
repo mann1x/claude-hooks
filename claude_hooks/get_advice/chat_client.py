@@ -311,6 +311,33 @@ def retry_after_s(headers) -> Optional[float]:
 EMPTY_RETRIES = 2
 EMPTY_RETRY_DELAY_S = 0.25
 
+#: How often a sleeping retry looks at its caller's cancel check.
+CANCEL_POLL_S = 0.5
+
+
+def _stop_if_cancelled(cancel_check: Optional[Callable[[], bool]],
+                       why: str) -> None:
+    """Raise :class:`CancelledByOrchestrator` once the caller asked to
+    stop: a call that keeps retrying after a council's cancel keeps
+    loading the model on the server (arm B, 2026-10-24)."""
+    if cancel_check is not None and cancel_check():
+        from consultants.engine.stall import CancelledByOrchestrator
+        raise CancelledByOrchestrator(why)
+
+
+def _nap(delay: float, cancel_check: Optional[Callable[[], bool]]) -> None:
+    """``time.sleep(delay)`` that ends early on a cancel."""
+    if cancel_check is None:
+        time.sleep(delay)
+        return
+    end = time.monotonic() + delay
+    while True:
+        _stop_if_cancelled(cancel_check, "cancelled during a retry backoff")
+        left = end - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(left, CANCEL_POLL_S))
+
 
 #: Plan D15 (Cerebriline ``EMPTY_TURN_REMINDER``): added once to the
 #: request an empty reply is re-asked with. The resend was identical, and
@@ -1029,7 +1056,8 @@ class ChatClient:
             self._probe_supports_think(model)
         return self._budget_message.get(model)
 
-    def chat(self, payload: dict) -> dict:
+    def chat(self, payload: dict, *,
+             cancel_check: Optional[Callable[[], bool]] = None) -> dict:
         """POST /api/chat with the supplied (OpenAI-shape) payload.
         Translates the Ollama response back into OpenAI shape so the
         agent-loop runner can consume it unchanged. Retries on
@@ -1041,8 +1069,11 @@ class ChatClient:
         front so we don't waste a round-trip. If the field is sent
         anyway and we get a fresh 400 of that shape, strip + retry
         immediately (no retry-budget cost) and remember the model.
+
+        ``cancel_check`` ends the call between attempts, as on
+        :meth:`chat_streamed`.
         """
-        return self._call(payload, stream=False)
+        return self._call(payload, stream=False, cancel_check=cancel_check)
 
     # ---- streaming variant ---------------------------------------- #
 
@@ -1145,12 +1176,9 @@ class ChatClient:
         :data:`RETRY_AFTER_MAX_S`. A call that fails for good raises
         :class:`ChatFault` with its fault class named.
         """
-        if stream:
-            # Lazy import to avoid coupling get_advice -> consultants.
-            from consultants.engine.stall import CancelledByOrchestrator
-            cancelled_exc: tuple = (CancelledByOrchestrator,)
-        else:
-            cancelled_exc = ()
+        # Lazy import to avoid coupling get_advice -> consultants.
+        from consultants.engine.stall import CancelledByOrchestrator
+        cancelled_exc: tuple = (CancelledByOrchestrator,)
         what = "ollama chat_streamed" if stream else "ollama chat"
 
         # Decide whether to forward ``think``. Three layers, cheapest
@@ -1182,6 +1210,8 @@ class ChatClient:
         empty_retries = 0
         sent = 0
         for attempt in attempts:
+            _stop_if_cancelled(cancel_check, f"{what}: cancelled before "
+                               f"attempt {attempt + 1}")
             sent += 1
             extra = {"Accept": "application/x-ndjson"} if stream else {}
             req = urllib.request.Request(
@@ -1194,11 +1224,9 @@ class ChatClient:
                 # backoff below: a sleeping retry holds no connection.
                 queued_at = time.monotonic()
                 try:
-                    admitted = (ollama_slots.slot(self.base_url, model_tag,
-                                                  cancel_check=cancel_check,
-                                                  on_wait=on_wait)
-                                if stream else
-                                ollama_slots.slot(self.base_url, model_tag))
+                    admitted = ollama_slots.slot(self.base_url, model_tag,
+                                                 cancel_check=cancel_check,
+                                                 on_wait=on_wait)
                     admitted.__enter__()
                 except ollama_slots.Cancelled as e:
                     raise cancelled_exc[0](
@@ -1230,7 +1258,7 @@ class ChatClient:
                         what, model_tag, empty_retries, EMPTY_RETRIES)
                     if _with_empty_turn_reminder(body):
                         encoded = json.dumps(body).encode()
-                    time.sleep(EMPTY_RETRY_DELAY_S)
+                    _nap(EMPTY_RETRY_DELAY_S, cancel_check)
                     attempts.hold()
                     continue
                 early = _early_length_cut(data, body)
@@ -1405,7 +1433,7 @@ class ChatClient:
                         " as Retry-After asked" if asked_wait is not None else "",
                         err_body,
                     )
-                    time.sleep(delay)
+                    _nap(delay, cancel_check)
                     continue
                 log.error("%s: HTTP %d (giving up, %s) body=%s",
                           what, e.code, fault, err_body)
@@ -1430,7 +1458,7 @@ class ChatClient:
                         "%s: %s on attempt %d/%d, retrying in %.1fs",
                         what, e, attempt + 1, self.max_retries + 1, delay,
                     )
-                    time.sleep(delay)
+                    _nap(delay, cancel_check)
                     continue
                 log.error("%s: %s (giving up)", what, e)
                 raise
@@ -2070,7 +2098,8 @@ class LlamafileAgentChatClient:
 
     # --- chat ---
 
-    def chat(self, payload: dict) -> dict:
+    def chat(self, payload: dict, *,
+             cancel_check: Optional[Callable[[], bool]] = None) -> dict:
         """POST OpenAI-shape payload to /v1/chat/completions on the
         resolved port. Retries on 5xx with exponential backoff; the
         retry budget matches :class:`ChatClient` so cross-backend
@@ -2084,6 +2113,8 @@ class LlamafileAgentChatClient:
 
         last_exc: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
+            _stop_if_cancelled(cancel_check, "llamafile chat: cancelled "
+                               f"before attempt {attempt + 1}")
             req = urllib.request.Request(
                 url, data=encoded, method="POST",
                 headers={"Content-Type": "application/json",
@@ -2115,7 +2146,7 @@ class LlamafileAgentChatClient:
                         e.code, attempt + 1, self.max_retries + 1, delay,
                         err_body,
                     )
-                    time.sleep(delay)
+                    _nap(delay, cancel_check)
                     continue
                 log.error("llamafile chat: HTTP %d (giving up) body=%s",
                           e.code, err_body)
@@ -2147,7 +2178,7 @@ class LlamafileAgentChatClient:
                         "llamafile chat: %s on attempt %d/%d, retrying in %.1fs",
                         e, attempt + 1, self.max_retries + 1, delay,
                     )
-                    time.sleep(delay)
+                    _nap(delay, cancel_check)
                     continue
                 log.error("llamafile chat: %s (giving up)", e)
                 raise
