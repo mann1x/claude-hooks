@@ -2,20 +2,19 @@
 
 # Tasks — claude-hooks
 
-6 active · 1 ready · 1 waiting · prefix `ch`
+4 active · 2 ready · 1 waiting · prefix `ch`
 
-## Active (6)
+## Active (4)
 
 - [ch-13](.claude-hooks/tasks/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 1d
-- [ch-15](.claude-hooks/tasks/ch-15.md) **H** `consultants.providers` Ollama Cloud direct (https://ollama.com, no local Ollama) for consultants / get-advice / caliber — 5d
 - [ch-18](.claude-hooks/tasks/ch-18.md) **H** `mailbox.identity` Mailbox: lasting cloud aliases — a linked cloud thread registers and sends as <alias>@cloud without a per-session approval — 18h
-- [ch-19](.claude-hooks/tasks/ch-19.md) **H** `resources` Resources: extend a held claim's expiry, wake waiters on extension, and make booking behind a held claim always queue — 19h
 - [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 6d
 - [ch-12](.claude-hooks/tasks/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 1d
 
-## Ready (1)
+## Ready (2)
 
-- [ch-11](.claude-hooks/tasks/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 23h
+- [ch-11](.claude-hooks/tasks/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 1d
+- [ch-24](.claude-hooks/tasks/ch-24.md) `consultants.budget` Council grounding sized by the role's window — 50 KB anchors fill 56% of a 32k head that compaction never folds — 1m
 
 ## Waiting (1)
 
@@ -26,10 +25,12 @@
 - `docs/PLAN-council-cerebriline.md`: [ch-9](.claude-hooks/tasks/ch-9.md), [ch-11](.claude-hooks/tasks/ch-11.md), [ch-12](.claude-hooks/tasks/ch-12.md)
 - `docs/PLAN-council-memory.md`: [ch-13](.claude-hooks/tasks/ch-13.md)
 
-## Recently closed (15 of 15)
+## Recently closed (15 of 17)
 
-- [ch-22](.claude-hooks/tasks/archive/ch-22.md) `consultants.polykv` PolyKV F4: quality A/B of the shared layout (role text last) vs as-built — 1m
-- [ch-21](.claude-hooks/tasks/archive/ch-21.md) `consultants.polykv` PolyKV: per-lane output cap so concurrent lanes fit beside the shared layer on a small engine — 44m
+- [ch-15](.claude-hooks/tasks/archive/ch-15.md) **H** `consultants.providers` Ollama Cloud direct (https://ollama.com, no local Ollama) for consultants / get-advice / caliber — 1m
+- [ch-19](.claude-hooks/tasks/archive/ch-19.md) **H** `resources` Resources: extend a held claim's expiry, wake waiters on extension, and make booking behind a held claim always queue — 14m
+- [ch-22](.claude-hooks/tasks/archive/ch-22.md) `consultants.polykv` PolyKV F4: quality A/B of the shared layout (role text last) vs as-built — 22m
+- [ch-21](.claude-hooks/tasks/archive/ch-21.md) `consultants.polykv` PolyKV: per-lane output cap so concurrent lanes fit beside the shared layer on a small engine — 1h
 - [ch-10](.claude-hooks/tasks/archive/ch-10.md) `consultants.polykv` Council F — PolyKV, complete (opencoti + xOllama), last — 1h
 - [ch-20](.claude-hooks/tasks/archive/ch-20.md) **H** `security.secrets` Commit secret gate — gitleaks + .gitleaks.toml config rules + host-secret search, on every host and in CI — 2h
 - [ch-16](.claude-hooks/tasks/archive/ch-16.md) **H** `resources` Resource manager: shared/exclusive/quiet locks on hosts, GPUs, pods, cloud — real-time waiters, no mail — 1d
@@ -41,5 +42,3 @@
 - [ch-6](.claude-hooks/tasks/archive/ch-6.md) **H** `consultants.budgets` Council B — output cap, context-window knob, thinking per backend, sampling diversity — 10d
 - [ch-4](.claude-hooks/tasks/archive/ch-4.md) **H** `mailbox.identity` Mailbox alias follows the session name (/rename); a second live session in a folder gets <alias>-N — 21d
 - [ch-2](.claude-hooks/tasks/archive/ch-2.md) `release` Cut the release that ships task tracking and the cloud mailbox relay — 22d
-- [ch-3](.claude-hooks/tasks/archive/ch-3.md) `mailbox.statusline` Status-line mail badge: count waiting ack notes — 22d
-- [ch-1](.claude-hooks/tasks/archive/ch-1.md) **H** `tasks` Verify task tracking live in a restarted session — 22d
