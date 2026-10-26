@@ -1862,9 +1862,21 @@ fault) is waited out: without bound for the writer, three times on a
 
 | flow | calls | what it is for |
 |---|---|---|
-| `full` (default) | writer (with a `<<<HALFWAY>>>` mark) → retrospective → critic, first half → critic, second half → synthesizer | every role, every model (default since 2026-10-24, compaction-v7-g2) |
-| `reduced` | writer → retrospective → reviewer | opt-in; about half the folding time, but it lost the fix on compaction-v7-g2 |
+| `auto` (default) | `full` from a 64k window up, `reduced` below (`resolve_flow()`, `SMALL_WINDOW_TOKENS`) | every role, every model (2026-10-26, ch-25) |
+| `full` | writer (with a `<<<HALFWAY>>>` mark) → retrospective → critic, first half → critic, second half → synthesizer | the default from 64k up since 2026-10-24 (compaction-v7-g2) |
+| `reduced` | writer → retrospective → reviewer | the default below 64k: about half the folding time; it lost the fix on compaction-v7-g2 at 128k / 256k, where folds are rare |
 | `basic` | none | the deterministic elision note only |
+
+**Below a 64k window** (ch-25) a fold is also sized for the window: the
+tail it keeps verbatim gets what the digest leaves of the compaction target
+(`tail_keep_tokens()`: target − the generation's summary + retrospective
+budget, never below the recency floor), the fork's overflow-recovery bar on
+every fold. At 32k the fork's sizing landed a fold ~4k under the trigger,
+so a researcher folded every 2–3 calls and compaction took 772 of 981 s of
+LLM time (csl-2026-10-25-1312-4ea5). Replayed on its 27 folds
+(`benchmarks/consultants/fold_cadence_replay.py`): 24 folds, tail 5.2k →
+4.2k. A forced fold that then finds nothing left to fold with a tail folds
+the tail too, the typed prompt pinned. From 64k up nothing changes.
 
 The **writer** is the fork's present-tense replay prompt, verbatim: a
 replay written in the past tense reads as history, which the model feels

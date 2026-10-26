@@ -8,6 +8,7 @@ import pytest
 from claude_hooks.agent_loop import runner
 from claude_hooks.get_advice.chat_client import ChatFault
 from consultants.engine import budget, compaction, council, history
+from consultants.engine import compaction_prompts as P
 
 
 def _read(i, path, start=None, end=None, size=2_000):
@@ -32,6 +33,13 @@ def _history(n=24, size=900):
     return msgs
 
 
+#: Every compaction step's system prompt: the no-tail writer's opens
+#: "You write", so a prefix test sent it the role's scripted refusal.
+COMPACTION_SYSTEMS = (P.WRITER_SYSTEM_PROMPT, P.FULL_SYSTEM_PROMPT,
+                      P.RETROSPECTIVE_SYSTEM_PROMPT, P.REVIEWER_SYSTEM_PROMPT,
+                      P.CRITIC_SYSTEM_PROMPT, P.SYNTHESIZER_SYSTEM_PROMPT)
+
+
 class Backend:
     def __init__(self, ctx=32_768, script=None):
         self.ctx = ctx
@@ -44,7 +52,7 @@ class Backend:
     def chat(self, payload):
         self.calls.append(payload)
         system = (payload["messages"][0].get("content") or "")
-        if payload.get("think") is False and system.startswith("You are"):
+        if payload.get("think") is False and system in COMPACTION_SYSTEMS:
             return {"choices": [{"message": {"content": "I am reading the "
                                              "file. It is fine."},
                                  "finish_reason": "stop"}],
@@ -167,6 +175,33 @@ def test_require_smaller_keeps_basic_when_the_digest_does_not_beat_it():
     assert out.changed and out.report["overflow"]["taken"] == "basic"
     marker = next(m for m in out.messages if m.get("_compaction_marker"))
     assert "elided to fit" in marker["content"]
+
+
+def test_a_refusal_right_after_a_small_window_fold_still_has_a_floor():
+    # ch-25: below 64k a fold keeps less tail, so the next refused request
+    # may hold nothing a tail fold can take. The digest is rejected here
+    # (bloated), so the deterministic floor must fold the tail itself.
+    class Bloated(Backend):
+        def chat(self, payload):
+            if payload.get("think") is False:
+                return {"choices": [{"message": {"content": "x " * 60_000}}]}
+            return super().chat(payload)
+    backend = Bloated()
+    settings = compaction.Settings(flow="basic")
+    first = compaction.compact(
+        compaction.Scope(chat_client=backend, model="m", role="critic",
+                         settings=settings),
+        _history(), plan=budget.plan(backend, "m", _history()))
+    assert first.changed and first.report.get("tail_keep")
+    msgs = first.messages
+    scope = compaction.Scope(chat_client=backend, model="m", role="critic",
+                             settings=compaction.Settings(review=False,
+                                                          writer_attempts=1))
+    out = compaction.compact(scope, msgs, plan=budget.plan(backend, "m", msgs),
+                             reason="overflow", require_smaller=True)
+    assert out.changed and out.report["overflow_no_tail"] is True
+    assert out.report["overflow"]["taken"] == "basic"
+    assert len(out.messages) < len(msgs)
 
 
 # --- silent truncation ---------------------------------------------------- #

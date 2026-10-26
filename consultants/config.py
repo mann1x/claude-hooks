@@ -969,13 +969,14 @@ def _choice(*allowed: str):
 
 
 #: Compaction (plan C). Defaults live in
-#: ``consultants.engine.compaction.Settings``: flow "full" (halfway
-#: writer → retrospective → two half-critics → synthesizer), placement "system", review true,
+#: ``consultants.engine.compaction.Settings``: flow "auto" ("full" —
+#: halfway writer → retrospective → two half-critics → synthesizer — from a
+#: 64k window up, "reduced" below), placement "system", review true,
 #: target_share 0.25, writer_attempts 3, ledger true, tool results
 #: middle-truncated past 32000 chars (file contents 50000), stale reads
 #: rewritten at 0.4 of the window, reasoning_replay "none".
 COMPACTION_KEYS: dict[str, Any] = {
-    "flow": _choice("reduced", "full", "basic"),
+    "flow": _choice("auto", "reduced", "full", "basic"),
     "placement": _choice("system", "user"),
     "review": _budget_bool,
     "target_share": lambda v: _budget_share(v, 0.05, 0.6, lo_open=False),
@@ -2213,9 +2214,10 @@ def _render(cfg: ConsultantsConfig, *,
     L.append("")
     L.append("[compaction]")
     L.append("# Compaction (plan C). Unset keys use the defaults: flow = "
-             "\"full\" (halfway marker, retrospective, two half-critics, "
-             "synthesizer; \"reduced\" is a replay writer, retrospective "
-             "and one reviewer; \"basic\" makes no model call), placement = "
+             "\"auto\" (\"full\" from a 64k window up: halfway marker, "
+             "retrospective, two half-critics, synthesizer; \"reduced\" "
+             "below: a replay writer, retrospective and one reviewer; "
+             "\"basic\" makes no model call), placement = "
              "\"system\", review = true, target_share = 0.25, "
              "writer_attempts = 3, ledger = true, tool_result_max_chars = "
              "32000, file_result_max_chars = 50000, stale_read_share = 0.4, "

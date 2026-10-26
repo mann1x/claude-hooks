@@ -12,11 +12,11 @@
 
 ## Ready (1)
 
-- [ch-26](.claude-hooks/tasks/ch-26.md) **L** `mailbox.identity` ch-18 follow-up: run the durable-alias check from a linked cloud thread (osync@cloud) when the owner is back on pandorum — 9m
+- [ch-26](.claude-hooks/tasks/ch-26.md) **L** `mailbox.identity` ch-18 follow-up: run the durable-alias check from a linked cloud thread (osync@cloud) when the owner is back on pandorum — 8h
 
 ## Waiting (1)
 
-- [ch-23](.claude-hooks/tasks/ch-23.md) **L** `consultants.polykv` PolyKV: re-run arms A/B at ~655k cells once opencoti c14 (op-296 KV spill to host RAM) ships — 14h
+- [ch-23](.claude-hooks/tasks/ch-23.md) **L** `consultants.polykv` PolyKV: re-run arms A/B at ~655k cells once opencoti c14 (op-296 KV spill to host RAM) ships — 22h
 
 ## By plan
 
@@ -25,18 +25,18 @@
 
 ## Recently closed (15 of 21)
 
-- [ch-18](.claude-hooks/tasks/archive/ch-18.md) **H** `mailbox.identity` Mailbox: lasting cloud aliases — a linked cloud thread registers and sends as <alias>@cloud without a per-session approval — 9m
-- [ch-11](.claude-hooks/tasks/archive/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 2h
-- [ch-24](.claude-hooks/tasks/archive/ch-24.md) `consultants.budget` Council grounding sized by the role's window — 50 KB anchors fill 56% of a 32k head that compaction never folds — 9h
-- [ch-12](.claude-hooks/tasks/archive/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 12h
-- [ch-15](.claude-hooks/tasks/archive/ch-15.md) **H** `consultants.providers` Ollama Cloud direct (https://ollama.com, no local Ollama) for consultants / get-advice / caliber — 13h
-- [ch-19](.claude-hooks/tasks/archive/ch-19.md) **H** `resources` Resources: extend a held claim's expiry, wake waiters on extension, and make booking behind a held claim always queue — 13h
-- [ch-22](.claude-hooks/tasks/archive/ch-22.md) `consultants.polykv` PolyKV F4: quality A/B of the shared layout (role text last) vs as-built — 13h
-- [ch-21](.claude-hooks/tasks/archive/ch-21.md) `consultants.polykv` PolyKV: per-lane output cap so concurrent lanes fit beside the shared layer on a small engine — 14h
-- [ch-10](.claude-hooks/tasks/archive/ch-10.md) `consultants.polykv` Council F — PolyKV, complete (opencoti + xOllama), last — 15h
-- [ch-20](.claude-hooks/tasks/archive/ch-20.md) **H** `security.secrets` Commit secret gate — gitleaks + .gitleaks.toml config rules + host-secret search, on every host and in CI — 16h
+- [ch-18](.claude-hooks/tasks/archive/ch-18.md) **H** `mailbox.identity` Mailbox: lasting cloud aliases — a linked cloud thread registers and sends as <alias>@cloud without a per-session approval — 8h
+- [ch-11](.claude-hooks/tasks/archive/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 9h
+- [ch-24](.claude-hooks/tasks/archive/ch-24.md) `consultants.budget` Council grounding sized by the role's window — 50 KB anchors fill 56% of a 32k head that compaction never folds — 17h
+- [ch-12](.claude-hooks/tasks/archive/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 20h
+- [ch-15](.claude-hooks/tasks/archive/ch-15.md) **H** `consultants.providers` Ollama Cloud direct (https://ollama.com, no local Ollama) for consultants / get-advice / caliber — 21h
+- [ch-19](.claude-hooks/tasks/archive/ch-19.md) **H** `resources` Resources: extend a held claim's expiry, wake waiters on extension, and make booking behind a held claim always queue — 21h
+- [ch-22](.claude-hooks/tasks/archive/ch-22.md) `consultants.polykv` PolyKV F4: quality A/B of the shared layout (role text last) vs as-built — 21h
+- [ch-21](.claude-hooks/tasks/archive/ch-21.md) `consultants.polykv` PolyKV: per-lane output cap so concurrent lanes fit beside the shared layer on a small engine — 22h
+- [ch-10](.claude-hooks/tasks/archive/ch-10.md) `consultants.polykv` Council F — PolyKV, complete (opencoti + xOllama), last — 23h
+- [ch-20](.claude-hooks/tasks/archive/ch-20.md) **H** `security.secrets` Commit secret gate — gitleaks + .gitleaks.toml config rules + host-secret search, on every host and in CI — 23h
 - [ch-16](.claude-hooks/tasks/archive/ch-16.md) **H** `resources` Resource manager: shared/exclusive/quiet locks on hosts, GPUs, pods, cloud — real-time waiters, no mail — 1d
-- [ch-17](.claude-hooks/tasks/archive/ch-17.md) `benchmarks.models` Model eval 2026-10-22: minimax-m3.1-flash full bench + gemma4 council re-run with thinking fixed — 1d
-- [ch-14](.claude-hooks/tasks/archive/ch-14.md) **H** `consultants.compaction` Compaction: the writer is never shown the task (bug-1087) — port the fork's pinned-prompt rule, re-bench — 1d
-- [ch-8](.claude-hooks/tasks/archive/ch-8.md) `consultants.guards` Council D — lane robustness: always-on loop guards, strict nudge profile, named terminal actions — 9d
-- [ch-5](.claude-hooks/tasks/archive/ch-5.md) **H** `consultants.providers` Council A — providers, capability probe, Ollama account, calibration, timings — 9d
+- [ch-17](.claude-hooks/tasks/archive/ch-17.md) `benchmarks.models` Model eval 2026-10-22: minimax-m3.1-flash full bench + gemma4 council re-run with thinking fixed — 2d
+- [ch-14](.claude-hooks/tasks/archive/ch-14.md) **H** `consultants.compaction` Compaction: the writer is never shown the task (bug-1087) — port the fork's pinned-prompt rule, re-bench — 2d
+- [ch-8](.claude-hooks/tasks/archive/ch-8.md) `consultants.guards` Council D — lane robustness: always-on loop guards, strict nudge profile, named terminal actions — 10d
+- [ch-5](.claude-hooks/tasks/archive/ch-5.md) **H** `consultants.providers` Council A — providers, capability probe, Ollama account, calibration, timings — 10d

@@ -3413,8 +3413,9 @@ def build_parser() -> argparse.ArgumentParser:
              "a setting.")
     cco.add_argument("--role", choices=list(cc.ROLES))
     cco.add_argument("--model", help="Model exactly as the role names it.")
-    cco.add_argument("--flow", choices=["reduced", "full", "basic"],
-                     help="full (default): halfway marker, two "
+    cco.add_argument("--flow", choices=["auto", "reduced", "full", "basic"],
+                     help="auto (default): full from a 64k window up, "
+                          "reduced below. full: halfway marker, two "
                           "half-critics, synthesizer. reduced: replay "
                           "writer, retrospective, one reviewer. basic: no "
                           "model call.")

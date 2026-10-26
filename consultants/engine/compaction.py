@@ -1,14 +1,15 @@
 """Compaction for council roles (plan Milestone C).
 
-One pipeline, two flows (C2):
+One pipeline, two flows (C2), picked by :func:`resolve_flow`:
 
 ========  ==================================================================
 reduced   present-tense replay writer → retrospective → one reviewer of the
-          whole replay. The shipped default for every role and model.
+          whole replay. The default below :data:`SMALL_WINDOW_TOKENS`
+          (``flow = "auto"``, ch-25).
 full      writer with a ``<<<HALFWAY>>>`` marker → retrospective → critic of
           the first half → critic of the second half → synthesizer (joins
-          the halves; the only call that revises the retrospective).
-          Opt-in per role (``[role.X.compaction] flow = "full"``).
+          the halves; the only call that revises the retrospective). The
+          default from :data:`SMALL_WINDOW_TOKENS` up.
 basic     no model call: the bare elision marker (the fork's "basic"
           floor). What a failed digest falls back to anyway.
 ========  ==================================================================
@@ -58,7 +59,7 @@ log = logging.getLogger("consultants.engine.compaction")
 # Settings
 # --------------------------------------------------------------------- #
 
-FLOWS = ("reduced", "full", "basic")
+FLOWS = ("auto", "reduced", "full", "basic")
 PLACEMENTS = ("system", "user")
 REASONING_REPLAY = ("none", "all", "inline")
 
@@ -69,10 +70,12 @@ class Settings:
     ``[compaction]``, ``[role.X.compaction]`` and
     ``[role.X.models."<m>"]`` merged over them, plus the run's stall
     overrides. Built by :func:`settings_from`."""
-    #: ``full`` by the owner's ruling, 2026-10-24: on compaction-v7-g2 it
-    #: carried 62 of 62 rows only the digest held and fixed the bug, where
-    #: ``reduced`` got the fix wrong.
-    flow: str = "full"
+    #: ``auto`` (:func:`resolve_flow`): ``full`` from
+    #: :data:`SMALL_WINDOW_TOKENS` up, by the owner's ruling, 2026-10-24 (on
+    #: compaction-v7-g2 it carried 62 of 62 rows only the digest held and
+    #: fixed the bug, where ``reduced`` got the fix wrong); ``reduced``
+    #: below it (owner, 2026-10-26, ch-25). An explicit flow is kept.
+    flow: str = "auto"
     #: Role of the message that replaces the folded span. ``system`` is
     #: ours; ``user`` is the fork's. An A/B on the C bench decides the
     #: default (plan §11.2).
@@ -103,6 +106,48 @@ class Settings:
 
 
 DEFAULT_SETTINGS = Settings()
+
+#: Below this window a fold is sized and run for the window it is in
+#: (ch-25). At 32,768 the fork's sizing lands a fold ~4k under the trigger:
+#: the kept tail is held at the compaction target (5.2k) while the digest's
+#: 4,096-token summary floor alone already exceeds what the target leaves,
+#: so a researcher folded every 2–3 calls and compaction took 772 of the
+#: council's 981 s of LLM time, the half-critics and joiner 518 of them
+#: (csl-2026-10-25-1312-4ea5; benchmarks/consultants/fold_cadence_replay.py).
+SMALL_WINDOW_TOKENS = 65_536
+
+
+def resolve_flow(flow: str, context_length: Optional[int]) -> str:
+    """The flow a fold runs: ``auto`` is ``reduced`` below
+    :data:`SMALL_WINDOW_TOKENS` and ``full`` otherwise (an unknown window
+    included); any other flow is the operator's and is kept."""
+    if flow != "auto":
+        return flow
+    small = (isinstance(context_length, int) and 0 < context_length
+             < SMALL_WINDOW_TOKENS)
+    return "reduced" if small else "full"
+
+
+def tail_keep_tokens(context_length: Optional[int], target_tokens: int,
+                     generation: int = 1) -> int:
+    """The ceiling on the tail a fold keeps verbatim.
+
+    The compaction target, as in the fork. Below
+    :data:`SMALL_WINDOW_TOKENS`, what the digest leaves of the target (the
+    generation's combined summary + retrospective budget), never below the
+    recency floor (:func:`budget.preserve_recent_tokens`): the fork's
+    overflow-recovery bar, digest + tail ≤ target (compaction.ts:2006), on
+    every fold, with the latest results still kept. Replayed on the 27
+    folds of csl-2026-10-25-1312-4ea5: 27 → 24 folds, the tail 5.2k → 4.2k.
+    """
+    if not (isinstance(context_length, int) and 0 < context_length
+            < SMALL_WINDOW_TOKENS):
+        return target_tokens
+    combined = retrospective.resolve_output_budgets(
+        target_tokens=target_tokens, generation=generation).combined_tokens
+    floor = budget.preserve_recent_tokens(context_length=context_length,
+                                          target_tokens=target_tokens)
+    return max(floor, target_tokens - combined)
 
 #: Config keys and their validators live in ``consultants.config``
 #: (``COMPACTION_KEYS``); these are the names :func:`settings_from` reads.
@@ -1296,10 +1341,13 @@ def compact(scope: Scope, messages: list[dict], *, plan: "budget.Budget",
     only if it is smaller than the refused request and under the trigger
     — the model may not survive a digest the basic fold already beats."""
     model = scope.model
+    ctx = plan.context_length
+    flow = resolve_flow(scope.settings.flow, ctx)
+    if flow != scope.settings.flow:
+        scope.settings = replace(scope.settings, flow=flow)
     s = scope.settings
     with _lock_for(session):
         before = budget.estimate_messages_tokens(messages, model)
-        ctx = plan.context_length
         overhead = overhead_tokens(messages, tools, model)
         trigger = plan.trigger_tokens or max(
             1, (ctx or 0) - budget.MAX_OUTPUT_TOKENS - budget.WINDOW_MARGIN_TOKENS)
@@ -1343,9 +1391,24 @@ def compact(scope: Scope, messages: list[dict], *, plan: "budget.Budget",
                                                    placement=s.placement)
             return make
 
+        keep = tail_keep_tokens(
+            ctx, target, (previous.generation + 1) if previous else 1)
+        if keep != target:
+            report["tail_keep"] = keep
         result = budget.compact_messages(
-            messages, keep_tokens=target, context_length=ctx, model=model,
+            messages, keep_tokens=keep, context_length=ctx, model=model,
             make_marker=marker_for(True), overhead_tokens=overhead)
+        if not result.changed and keep != target and reason != "trigger":
+            # Below the small window the last fold kept less tail, so a
+            # forced fold right after it (a refusal, a silent truncation)
+            # can find nothing left to fold with one: fold the tail too,
+            # the typed prompt pinned (the no-tail rescue), rather than
+            # leave the call to fail on the same request.
+            result = budget.compact_messages(
+                messages, keep_tokens=target, context_length=ctx,
+                model=model, make_marker=marker_for(False), tail=False,
+                overhead_tokens=overhead)
+            report["forced_no_tail"] = result.changed
         report["cut"] = result.cut_reason
         out = result.messages if result.changed else messages
         after = budget.estimate_messages_tokens(out, model)
@@ -1368,6 +1431,15 @@ def compact(scope: Scope, messages: list[dict], *, plan: "budget.Budget",
             basic = budget.compact_messages(
                 messages, keep_tokens=target, context_length=ctx, model=model,
                 overhead_tokens=overhead)
+            if not basic.changed and keep != target:
+                # Below the small window the last fold kept less tail, so a
+                # refusal right after it can find nothing left to fold with
+                # one: fold the tail too, the typed prompt pinned (the
+                # no-tail rescue), rather than fail the call.
+                basic = budget.compact_messages(
+                    messages, keep_tokens=target, context_length=ctx,
+                    model=model, tail=False, overhead_tokens=overhead)
+                report["overflow_no_tail"] = basic.changed
             b_after = (budget.estimate_messages_tokens(basic.messages, model)
                        if basic.changed else before)
             agentic_ok = changed and after < before and after <= trigger
@@ -1406,6 +1478,7 @@ def _emit(scope: Scope, report: dict) -> None:
 
 __all__ = ["Settings", "DEFAULT_SETTINGS", "Scope", "Outcome", "CallResult",
            "FLOWS", "PLACEMENTS", "REASONING_REPLAY", "CONFIG_KEYS",
+           "SMALL_WINDOW_TOKENS", "resolve_flow", "tail_keep_tokens",
            "settings_from", "call", "compact", "write_digest", "write_replay",
            "review", "council", "serialize", "cut_echo", "trim_fences",
            "split_at_marker", "parse_sections", "collect_user_requests",

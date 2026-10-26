@@ -821,12 +821,99 @@ def test_the_last_turn_ceiling_is_a_share_of_the_usable_input():
     assert cut.reason == "last-turn-ceiling" and cut.pinned_index == 3
 
 
-def test_the_shipped_flow_is_full():
-    # Owner's ruling, 2026-10-24 (compaction-v7-g2): full carried every
-    # digest-only row and fixed the bug; reduced got the fix wrong.
-    from consultants.engine import compaction
-    assert compaction.Settings().flow == "full"
-    assert compaction.settings_from({}, "researcher", "m").flow == "full"
+def test_the_shipped_flow_is_full_from_64k_and_reduced_below():
+    # Owner's rulings: full from 64k up (2026-10-24, compaction-v7-g2: full
+    # carried every digest-only row and fixed the bug), reduced below
+    # (2026-10-26, ch-25: at 32k the half-critics and joiner were 518 of
+    # 772 s of compaction, a fold every 2-3 research calls).
+    assert compaction.Settings().flow == "auto"
+    assert compaction.settings_from({}, "researcher", "m").flow == "auto"
+    small = compaction.SMALL_WINDOW_TOKENS - 1
+    assert compaction.resolve_flow("auto", 32_768) == "reduced"
+    assert compaction.resolve_flow("auto", small) == "reduced"
+    assert compaction.resolve_flow("auto", compaction.SMALL_WINDOW_TOKENS) == "full"
+    assert compaction.resolve_flow("auto", 262_144) == "full"
+    # An unknown window is no evidence of a small one.
+    assert compaction.resolve_flow("auto", None) == "full"
+    assert compaction.resolve_flow("auto", 0) == "full"
+    for explicit in ("full", "reduced", "basic"):
+        assert compaction.resolve_flow(explicit, 32_768) == explicit
+        assert compaction.resolve_flow(explicit, 262_144) == explicit
+
+
+@pytest.mark.parametrize("ctx, steps", [
+    (32_768, ["writer#1", "retrospective", "reviewer"]),
+    (131_072, ["writer#1", "retrospective", "critic:first", "critic:second",
+               "synthesizer"]),
+])
+def test_the_default_flow_follows_the_window(ctx, steps):
+    backend = Backend(ctx=ctx)
+    msgs = _loop_history(n=40, size=1_500)
+    scope = compaction.Scope(chat_client=backend, model="lane-model",
+                             role="researcher")
+    out = compaction.compact(scope, msgs, plan=_plan(backend, msgs))
+    assert out.changed and _steps(scope)[:len(steps)] == steps
+    assert out.report["flow"] == ("reduced" if ctx < compaction.SMALL_WINDOW_TOKENS
+                                  else "full")
+
+
+def test_an_explicit_full_flow_runs_at_a_small_window():
+    backend = Backend(ctx=32_768)
+    msgs = _loop_history()
+    scope = _scope(backend, flow="full")
+    compaction.compact(scope, msgs, plan=_plan(backend, msgs))
+    assert "critic:first" in _steps(scope)
+
+
+def test_the_tail_keeps_the_target_from_64k_up():
+    for window in (compaction.SMALL_WINDOW_TOKENS, 131_072, 1_048_576, None):
+        for gen in (1, 3, 9):
+            assert compaction.tail_keep_tokens(window, 12_345, gen) == 12_345
+
+
+def test_below_64k_the_tail_gets_what_the_digest_leaves_never_below_the_floor():
+    # 32k, csl-2026-10-25-1312-4ea5: target 5,208, recency floor
+    # min(8,063, 0.6 x 5,208) = 3,124. The digest's budget climbs the
+    # generation ladder, so the tail shrinks with it down to the floor:
+    # 5,208 - 0.33 x 5,208 = 3,490 at the first fold, the floor from the
+    # third (5,208 - 0.45 x 5,208 = 2,864 < 3,124).
+    floor = budget.preserve_recent_tokens(context_length=32_768,
+                                          target_tokens=5_208)
+    assert floor == 3_124
+    assert compaction.tail_keep_tokens(32_768, 5_208, 1) == 3_490
+    for gen in (3, 5, 9):
+        assert compaction.tail_keep_tokens(32_768, 5_208, gen) == floor
+    for gen in range(1, 10):
+        assert floor <= compaction.tail_keep_tokens(32_768, 5_208, gen) < 5_208
+    # A target large enough that the digest leaves more than the floor.
+    target, gen = 14_000, 1
+    combined = retrospective.resolve_output_budgets(
+        target_tokens=target, generation=gen).combined_tokens
+    assert compaction.tail_keep_tokens(60_000, target, gen) == max(
+        budget.preserve_recent_tokens(context_length=60_000,
+                                      target_tokens=target),
+        target - combined)
+    # Never above the target, never zero.
+    for target in (1, 10, 400):
+        assert 1 <= compaction.tail_keep_tokens(32_768, target, 1) <= target
+
+
+def test_a_small_window_fold_keeps_less_tail_and_says_so():
+    msgs = _loop_history(n=40, size=1_500)
+
+    def tail_after(ctx):
+        backend = Backend(ctx=ctx)
+        scope = _scope(backend, flow="basic")
+        out = compaction.compact(scope, msgs, plan=_plan(backend, msgs))
+        marker = next(i for i, m in enumerate(out.messages)
+                      if m.get("_compaction_marker"))
+        return out, budget.estimate_messages_tokens(out.messages[marker + 1:])
+
+    small, small_tail = tail_after(32_768)
+    assert small.report["tail_keep"] < small.report["target"]
+    assert small_tail <= small.report["target"]
+    large, _ = tail_after(131_072)
+    assert "tail_keep" not in large.report
 
 
 # --- the writer reads each call's number, never counts it ------------- #

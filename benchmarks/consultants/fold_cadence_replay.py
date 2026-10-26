@@ -134,7 +134,9 @@ def tail_of(f: dict, variant: str, window: int) -> tuple[int, int]:
     target = budget.compaction_target_tokens(
         window, overhead_tokens=f["overhead"], trigger_tokens=f["trigger"])
     keep = target
-    if variant in ("total", "total-floor"):
+    if variant == "shipped":
+        keep = compaction.tail_keep_tokens(window, target, f["gen"])
+    elif variant in ("total", "total-floor"):
         # The fork's recovery bar on every fold: digest + tail <= target.
         keep = max(1, target - f["digest_tokens"])
         if variant == "total-floor":
@@ -160,6 +162,7 @@ VARIANTS = (
     ("fork message shape (one results message per turn)", "fork-shape"),
     ("A: digest + tail <= target (fork recovery bar)", "total"),
     ("A2: as A, tail >= recency floor", "total-floor"),
+    ("shipped: compaction.tail_keep_tokens (ladder budget, floor)", "shipped"),
 )
 
 
