@@ -29,7 +29,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from claude_hooks.sandbox.clone_views import CloneViews, _scan  # noqa: E402
+from claude_hooks.sandbox.clone_views import (  # noqa: E402
+    CloneViews, _scan, prewarm)
 from claude_hooks.sandbox.linux_bwrap import NOBODY, is_root  # noqa: E402
 
 
@@ -44,6 +45,10 @@ def main(argv=None) -> int:
     ap.add_argument("--scope", action="append", required=True)
     ap.add_argument("--lanes", type=int, default=3)
     ap.add_argument("--json", help="write the report here")
+    ap.add_argument("--prewarm-lead", type=float, default=None,
+                    help="start the read-ahead a run starts at submission, "
+                         "this many seconds before the first lane (the "
+                         "planner's time); the bar then covers every lane")
     a = ap.parse_args(argv)
     root = os.path.realpath(a.root)
     sid = f"csl-bench-{int(time.time())}"
@@ -51,6 +56,9 @@ def main(argv=None) -> int:
     uid = NOBODY if is_root() else None
     v = CloneViews(sid=sid, root=root, session_dir=sdir, scopes=a.scope,
                    uid=uid)
+    t_sub = time.monotonic()
+    if a.prewarm_lead is not None:
+        prewarm(root, v.scopes)
     entries = size = 0
     for s in v.scopes:
         n, b = _scan(s, (os.path.join(root, ".claude-hooks", "consultants"),),
@@ -58,6 +66,8 @@ def main(argv=None) -> int:
         entries, size = entries + n, size + b
     print(f"root {root}\nscopes {v.scopes}: {entries} entries, "
           f"{size / 2**30:.1f} GiB")
+    if a.prewarm_lead is not None:
+        time.sleep(max(0.0, a.prewarm_lead - (time.monotonic() - t_sub)))
     rows = []
     try:
         for i in range(a.lanes):
@@ -88,16 +98,20 @@ def main(argv=None) -> int:
         shutil.rmtree(sdir, ignore_errors=True)
     report = {"root": root, "scopes": v.scopes, "entries": entries,
               "bytes": size, "uid": uid, "lanes": rows,
+              "prewarm_lead_s": a.prewarm_lead,
               "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     if a.json:
         Path(a.json).parent.mkdir(parents=True, exist_ok=True)
         Path(a.json).write_text(json.dumps(report, indent=2) + "\n")
-    # The first lane pays the filesystem's cold metadata (once per
-    # council); the bar is on the lanes after it.
-    warm = [r["create_s"] for r in rows[1:]] or [r["create_s"] for r in rows]
+    # Without the read-ahead the first lane pays the filesystem's cold
+    # metadata (once per council) and the bar is on the lanes after it;
+    # with it, on every lane.
+    every = a.prewarm_lead is not None
+    warm = [r["create_s"] for r in (rows if every else rows[1:])] or \
+        [r["create_s"] for r in rows]
     ok = bool(warm) and max(warm) < 2.0
-    print(f"{'PASS' if ok else 'FAIL'}: warm view under 2 s (warm worst "
-          f"{max(warm, default=0):.3f}s; first lane "
+    print(f"{'PASS' if ok else 'FAIL'}: {'every' if every else 'warm'} view "
+          f"under 2 s (worst {max(warm, default=0):.3f}s; first lane "
           f"{rows[0]['create_s'] if rows else 0:.3f}s)")
     return 0 if ok else 1
 

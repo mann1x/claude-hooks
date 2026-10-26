@@ -20,8 +20,11 @@ a run without the shell is byte-identical to one before E.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Optional
+
+log = logging.getLogger("consultants.server.shell_enable")
 
 MODES = ("read", "write")
 NETS = ("none",)
@@ -197,6 +200,18 @@ def answer_with_shell(answer: str, shell: Optional[dict], *, cwd: str,
     return with_provenance(answer, shell)
 
 
+def prewarm(shell: Optional[dict], *, cwd: str) -> None:
+    """Start reading the write scopes' extent maps, so the first lane's
+    clone does not wait on a cold disk. Never fails the run."""
+    if not shell or shell.get("mode") != "write" or not shell.get("scopes"):
+        return
+    try:
+        from claude_hooks.sandbox.clone_views import prewarm as start
+        start(cwd, shell["scopes"])
+    except Exception:
+        log.exception("write-scope read-ahead not started")
+
+
 def settings_for(cfg: Any, shell: dict):
     """The provider's :class:`ShellSettings` from config + this run's
     request (mode and net come from the request)."""
@@ -216,5 +231,6 @@ def settings_for(cfg: Any, shell: dict):
 
 
 __all__ = ["parse", "resolve_ask", "resolve_follow_up", "preflight_error",
+           "prewarm",
            "provenance", "with_provenance", "settings_for", "from_config",
            "ShellRequestError"]

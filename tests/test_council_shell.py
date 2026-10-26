@@ -530,6 +530,23 @@ class TestApp:
         assert r.status_code == 400 and "plan E6" in r.json()["detail"]
         assert _done.runs == []
 
+    def test_ask_and_follow_up_start_the_scope_read_ahead(
+            self, tmp_path, ready_sandbox, monkeypatch):
+        from consultants.server import shell_enable
+        (tmp_path / "scripts").mkdir()
+        started = []
+        monkeypatch.setattr(shell_enable, "prewarm", lambda shell, cwd: (
+            started.append((shell and shell.get("scopes"), cwd))))
+        app, c = self._client()
+        shell = {"mode": "write", "net": "none", "scopes": ["scripts"]}
+        sid = c.post("/v1/consult", json={"message": "q", "cwd": str(tmp_path),
+                                          "shell": shell}).json()["sid"]
+        assert _wait(lambda: app.state.sessions[sid].status == "completed")
+        c.post(f"/v1/consult/{sid}/follow-up", json={
+            "message": "again", "cwd": str(tmp_path), "shell": shell})
+        assert _wait(lambda: len(_done.runs) == 2)
+        assert started == [(["scripts"], str(tmp_path))] * 2
+
     def test_a_follow_up_adds_the_shell_and_later_ones_keep_it(
             self, tmp_path, ready_sandbox):
         from consultants.server import inflight

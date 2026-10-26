@@ -760,6 +760,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         shell_err = shell_enable.preflight_error(cfg, shell, cwd=str(cwd_path))
         if shell_err:
             raise HTTPException(status_code=409, detail=shell_err)
+        shell_enable.prewarm(shell, cwd=str(cwd_path))
 
         sid = _new_sid()
         state = SessionState(
@@ -1030,6 +1031,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         shell_err = shell_enable.preflight_error(cfg, shell, cwd=str(cwd_path))
         if shell_err:
             raise HTTPException(status_code=409, detail=shell_err)
+        shell_enable.prewarm(shell, cwd=str(cwd_path))
 
         child_sid = _new_sid()
         # Child session inherits cwd + topology from parent. Progress

@@ -227,6 +227,84 @@ class TestStoreAndCopy:
             _views(root, sid="csl-big").ensure("researcher-0")
 
 
+class TestPrewarm:
+    """ch-9: the first lane over a cold 136 GiB scope took 13-18 s; with
+    the extent maps read ahead from submission, 1.4 s."""
+
+    def test_every_file_of_the_scope_is_read_and_the_store_is_not(
+            self, root, monkeypatch):
+        store = root / ".claude-hooks" / "consultants" / "csl-x"
+        store.mkdir(parents=True)
+        (store / "transcript.db").write_bytes(b"x")
+        seen = []
+        monkeypatch.setattr(C, "_read_extents", lambda p, ex, lim: seen.extend(
+            C._files(p, ex, lim)) or 0)
+        for t in C.prewarm(str(root), ["."]):
+            t.join(10)
+        assert sorted(os.path.relpath(p, root) for p in seen) == [
+            "scripts/lib/util.py", "scripts/old/a.txt", "scripts/run.py",
+            "weights.bin"]
+        assert C._PREWARM == {}
+
+    def test_it_stops_past_the_entry_limit(self, root):
+        assert len(list(C._files(str(root / "scripts"), (), 2))) <= 2
+        assert C._read_extents(str(root / "scripts"), (), 2) <= 2
+
+    def test_the_first_clone_waits_for_the_read(self, root, monkeypatch):
+        gate, order = C.threading.Event(), []
+
+        def slow(path, exclude, limit):
+            gate.wait(10)
+            order.append("read")
+            return 0
+        monkeypatch.setattr(C, "_read_extents", slow)
+        real_scan = C._scan
+        monkeypatch.setattr(C, "_scan", lambda *a: (
+            order.append("clone"), real_scan(*a))[1])
+        C.prewarm(str(root), ["scripts"])
+        v = _views(root)
+        t = C.threading.Thread(target=v.ensure, args=("researcher-0",))
+        t.start()
+        time.sleep(0.2)
+        assert order == []
+        gate.set()
+        t.join(10)
+        assert order == ["read", "clone"]
+
+    def test_a_scope_already_being_read_is_not_read_twice(
+            self, root, monkeypatch):
+        gate = C.threading.Event()
+        monkeypatch.setattr(C, "_read_extents",
+                            lambda *a: (gate.wait(10), 0)[1])
+        first = C.prewarm(str(root), ["scripts"])
+        assert C.prewarm(str(root), ["scripts"]) == []
+        gate.set()
+        for t in first:
+            t.join(10)
+
+    def test_the_run_starts_it_only_for_write_scopes(self, root, monkeypatch,
+                                                     caplog):
+        from consultants.server import shell_enable as se
+        calls = []
+        monkeypatch.setattr(C, "prewarm", lambda r, s: calls.append((r, s)))
+        se.prewarm(None, cwd=str(root))
+        se.prewarm({"mode": "read", "net": "none"}, cwd=str(root))
+        se.prewarm({"mode": "write", "net": "none"}, cwd=str(root))
+        se.prewarm({"mode": "write", "net": "none", "scopes": ["scripts"]},
+                   cwd=str(root))
+        assert calls == [(str(root), ["scripts"])]
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+    def test_a_failed_start_never_fails_the_run(self, root, monkeypatch):
+        from consultants.server import shell_enable as se
+
+        def boom(*a):
+            raise C.ViewError("gone")
+        monkeypatch.setattr(C, "prewarm", boom)
+        se.prewarm({"mode": "write", "net": "none", "scopes": ["x"]},
+                   cwd=str(root))
+
+
 class TestFileToolsReadTheClone:
 
     def test_relative_and_absolute_paths_move_into_the_view(self, root):

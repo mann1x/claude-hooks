@@ -7,7 +7,7 @@ area: consultants.sandbox
 tags: [council, cerebriline]
 plan: docs/PLAN-council-cerebriline.md
 created: 2026-10-14T13:22:15Z
-updated: 2026-10-19T06:21:54Z
+updated: 2026-10-26T14:12:30Z
 sessions: [0a7a5bf4]
 ---
 
@@ -15,13 +15,14 @@ sessions: [0a7a5bf4]
 Milestone E: E1 prerequisite fixes (runtime_permissions, control.py enum, per-lane cache invalidation, lane-bound executor, GC); static council-sandbox launcher as a deploy artifact (Landlock optional, try without the boot parameter); git worktrees / reflink / overlay views with a lifecycle and no stale views; shell off by default, enabled on request, by knob, or in a follow-up; Windows/macOS backends.
 
 ## Acceptance
-- [ ] escape suite green on Linux
-- [ ] kill -9 at every lifecycle state leaves nothing
-- [ ] backup_models view in <2 s with no data-proportional disk use
-- [ ] follow-up adds shell to a running consultancy
+- [x] escape suite green on Linux
+- [x] kill -9 at every lifecycle state leaves nothing
+- [x] backup_models view in <2 s with no data-proportional disk use
+- [x] follow-up adds shell to a running consultancy
 - [ ] Windows smoke passes
 
 ## Log
+- 2026-10-26 14:12Z [0a7a5bf4] updated acceptance ✓1 ✓2 ✓3 ✓4: 2026-10-26 Linux acceptance: 240 sandbox tests green, no skips (escape suite live on both backends; kill -9 lifecycle class; follow-up adds shell via app route). backup_models view bar failed cold (first lane 13-18 s; one-time 266 MiB on the very first share, ~1 MiB after). Fix (uncommitted, suite running): clone_views.prewarm() reads each file's extent map (FIEMAP count) from submission (shell_enable.prewarm in both submit routes), ensure() waits on it (wait_prewarm, ≤120 s). Cold cache, 13 s lead (fastest recorded submit→first run_command; median 29 s): every lane 0.47-0.57 s, ≤1.3 MiB. 8/8 mutants killed. Results benchmarks/consultants/results/2026-10-26/clone-views/. Left: Windows smoke (pandorum, ch-26 window).
 - 2026-10-19 06:21Z [0a7a5bf4] E8 built 5b60e8a (2026-10-19): measured hardening drop-in <unit>.d/hardening.conf via scripts/engine_hardening.py, written by deploy step_sandbox, checked by verify check_engine_hardening. ProtectSystem=full (strict stops unit), no ProtectHostname (sandbox preflight refuses). Not deployed yet; this host's verify will FAIL until the next deploy writes it. Landlock + VM backend remain optional/later.
 - 2026-10-18 13:41Z [0a7a5bf4] Run-5 grade (#1641) fixes deployed at f43a445; the caps are in 596cf2b and the glm-5.3-flash defaults in 2fb31d4. Researcher caps high/xhigh 40/32, max 80/72 (shell: 60/52, 120/112); coder workspace 60. Edge-case matrix rows with no run that reached the code are marked "not tested", and cited rows are claim-audited. The critic checks case labels against the runs. CitationLinter resolves a short path by unique suffix. Open, user's call: gap 2 (known findings carried across councils), gap 5 (the critic re-ranks the deliberate read ledger every run). Run 6 requested (#1642).
 - 2026-10-18 12:57Z [0a7a5bf4] 2026-10-18 [0a7a5bf4] Run-4 grade (#1636) fixed and deployed at c2c985e (DEPLOY OK). Researcher caps: high/xhigh 30/24, max 60/54; shell bonus max(10, i//2), so xhigh + shell = 45/39. Coder: 12, or 40 with its workspace. Critic ready is held when no run reached the code. Researcher report_check (once). Synthesizer claim audit (synthesizer:audit): not shown / contradicted items move to Unverified. test_reruns follows cp/mv and catches failures hidden by a pipe. glm-5.3-flash inherits glm-5.2's stall thresholds. Dashboard (dfa8454, 2081cb8) is live as well. Ollama mailed; waiting on run 5.

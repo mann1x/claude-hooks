@@ -64,6 +64,19 @@ MAX_SCOPE_ENTRIES = 250_000
 DIFF_MAX_BYTES = 1 << 20
 #: ``FICLONE`` (linux/fs.h): share src's extents with dst.
 FICLONE = 0x40049409
+#: ``FS_IOC_FIEMAP`` (linux/fs.h). Asked for a count only, it makes the
+#: filesystem read a file's whole extent map.
+FIEMAP = 0xC020660B
+#: How long a lane's first clone waits for its scope's read-ahead.
+PREWARM_WAIT_S = 120.0
+
+#: Scopes whose extent maps are being read ahead, by real path. A clone
+#: against a cold cache reads every file's extent map from disk: the
+#: first lane over backup_models/scripts (4,754 entries, 136 GiB, XFS)
+#: took 13-18 s, 1.4 s after this read (ch-9). The run starts it at
+#: submission, so it overlaps the planner.
+_PREWARM: dict[str, threading.Thread] = {}
+_PREWARM_LOCK = threading.Lock()
 
 
 # ------------------------------------------------------------------ helpers
@@ -124,6 +137,94 @@ def _scan(path: str, exclude: tuple[str, ...], limit: int) -> tuple[int, int]:
                 except OSError:
                     pass
     return n, size
+
+
+def _files(path: str, exclude: tuple[str, ...], limit: int):
+    """The regular files under ``path``, outside ``exclude``; stops past
+    ``limit`` entries."""
+    n = 0
+    stack = [path]
+    while stack:
+        d = stack.pop()
+        try:
+            it = os.scandir(d)
+        except OSError:
+            continue
+        with it:
+            for e in it:
+                if e.path in exclude:
+                    continue
+                n += 1
+                if n > limit:
+                    return
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        stack.append(e.path)
+                    elif e.is_file(follow_symlinks=False):
+                        yield e.path
+                except OSError:
+                    pass
+
+
+def _read_extents(path: str, exclude: tuple[str, ...], limit: int) -> int:
+    """Have the filesystem read the extent map of every regular file
+    under ``path`` (stops past ``limit`` entries); returns the files
+    read. A file or filesystem that refuses FIEMAP is skipped."""
+    import fcntl
+    import struct
+    count_only = struct.pack("=QQLLLL", 0, 0xFFFFFFFFFFFFFFFF, 0, 0, 0, 0)
+    files = 0
+    for p in _files(path, exclude, limit):
+        try:
+            fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            continue
+        try:
+            fcntl.ioctl(fd, FIEMAP, bytearray(count_only))
+            files += 1
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+    return files
+
+
+def prewarm(root: str, scopes: Iterable[str]) -> list[threading.Thread]:
+    """Read the extent maps of ``scopes`` under ``root`` in the
+    background, one daemon thread per scope not already being read."""
+    exclude = (os.path.join(os.path.realpath(root), *STORE_PARTS),)
+    started = []
+    for scope in resolve_scopes(root, scopes):
+        with _PREWARM_LOCK:
+            if scope in _PREWARM:
+                continue
+
+            def run(scope=scope):
+                t0 = time.monotonic()
+                try:
+                    files = _read_extents(scope, exclude, MAX_SCOPE_ENTRIES)
+                    log.info("read ahead %d files of %s in %.1fs", files,
+                             scope, time.monotonic() - t0)
+                except Exception:
+                    log.exception("read-ahead of %s failed", scope)
+                finally:
+                    with _PREWARM_LOCK:
+                        _PREWARM.pop(scope, None)
+            t = threading.Thread(target=run, daemon=True,
+                                 name=f"clone-prewarm:{scope}")
+            _PREWARM[scope] = t
+            t.start()
+            started.append(t)
+    return started
+
+
+def wait_prewarm(scope: str, timeout: float = PREWARM_WAIT_S) -> None:
+    """Wait for ``scope``'s read-ahead, if one runs: the clone would do
+    the same reads behind it."""
+    with _PREWARM_LOCK:
+        t = _PREWARM.get(scope)
+    if t is not None:
+        t.join(timeout)
 
 
 def _first_file(path: str) -> Optional[str]:
@@ -420,6 +521,7 @@ class CloneViews:
             t0 = time.monotonic()
             try:
                 for i, scope in enumerate(self.scopes):
+                    wait_prewarm(scope)
                     n, size = _scan(scope, exclude, MAX_SCOPE_ENTRIES)
                     if n > MAX_SCOPE_ENTRIES:
                         raise ViewError(
@@ -736,4 +838,5 @@ class CloneViews:
 
 
 __all__ = ["CloneViews", "resolve_scopes", "changes", "clone_file",
-           "reflink_supported", "review_patch", "KIND", "MAX_SCOPE_ENTRIES"]
+           "reflink_supported", "review_patch", "prewarm", "wait_prewarm",
+           "KIND", "MAX_SCOPE_ENTRIES"]

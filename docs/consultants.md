@@ -2309,9 +2309,16 @@ claude-consultants ask "fix the quantize script and run its self-test" \
   other roots stay read-only. On XFS / btrfs a clone shares the
   original's data extents, so it costs metadata only. Measured on
   backup_models (`scripts/`, 4,745 entries / 136 GiB,
-  `scripts/bench_clone_views.py`): 0.6–1.3 s and 3–4 MiB per lane once
-  the filesystem's metadata is warm, 10–15 s for the first lane of a
-  cold one. A filesystem that cannot reflink falls back to a plain copy
+  `scripts/bench_clone_views.py`): 0.5–1.4 s and up to 4 MiB per lane,
+  the first lane of a cold cache included. A clone against a cold cache
+  reads every file's extent map from disk (13–18 s for that first lane),
+  so the run starts reading them when it is submitted
+  (`clone_views.prewarm()`, a FIEMAP count per file, 10–14 s here) and
+  the first lane waits for that read rather than repeating it; councils
+  recorded 13–29 s before their first command, and at 13 s the first
+  lane took 0.57 s (`--prewarm-lead`). The very first clone of a scope
+  ever also costs the filesystem a one-time ~270 MiB of shared-extent
+  metadata, which later clones do not pay again. A filesystem that cannot reflink falls back to a plain copy
   only while the scope is under `[tools.shell] lane_disk_gib`; a bigger
   scope is refused, as is one over 250,000 entries. The session store is
   never cloned. With a scope, write mode uses clones even on a git root,
