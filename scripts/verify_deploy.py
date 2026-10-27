@@ -515,17 +515,41 @@ def check_ollama_upstream(r: Results) -> None:
     check_ollama_cloud_key(r, cfg, url)
 
 
+def _council_cloud() -> tuple[bool, Optional[str]]:
+    """``(direct, key_file)`` from the consultants ``[cloud]`` section:
+    whether the council sends Ollama Cloud models to ollama.com itself.
+    ``(False, None)`` when the consultants package is not here."""
+    try:
+        from consultants.config import load_config
+        cloud = load_config().cloud
+    except Exception:
+        return False, None
+    return cloud.route == "direct", cloud.key_file
+
+
 def check_ollama_cloud_key(r: Results, cfg: dict, url: str) -> None:
     """The Ollama Cloud key (ch-15): where it comes from, and that
-    ollama.com accepts it. Never prints the key. FAIL only when the
-    engines' server is ollama.com itself and no key resolves."""
+    ollama.com accepts it. Never prints the key. FAIL when no key
+    resolves and something sends to ollama.com itself: the engines'
+    server, or the council's ``[cloud] route = "direct"`` (the default)."""
     from claude_hooks import ollama_upstream
-    key, source = ollama_upstream.api_key_source(cfg)
+    direct, key_file = _council_cloud()
+    if direct and key_file:
+        key = ollama_upstream.read_key_file(key_file)
+        source = ("consultants [cloud] key_file" if key else
+                  f"consultants [cloud] key_file unreadable ({key_file})")
+    else:
+        key, source = ollama_upstream.api_key_source(cfg)
+    needed = ollama_upstream.is_cloud(url) or direct
     if not key:
-        if ollama_upstream.is_cloud(url):
+        if needed:
+            who = (f"ollama.url is {url}" if ollama_upstream.is_cloud(url)
+                   else "the council sends cloud models to ollama.com "
+                        "([cloud] route = direct)")
             r.add(FAIL, "ollama cloud key",
-                  f"ollama.url is {url} but no key ({source}) — set "
-                  "ollama.api_key_file in config/claude-hooks.json")
+                  f"{who} but no key ({source}) — set ollama.api_key_file "
+                  "in config/claude-hooks.json, or `claude-consultants "
+                  "config set-cloud local`")
         elif source != "none":
             r.add(WARN, "ollama cloud key", source)
         return
@@ -539,7 +563,7 @@ def check_ollama_cloud_key(r: Results, cfg: dict, url: str) -> None:
         plan = body.get("Plan") or body.get("plan") or "?"
         r.add(PASS, "ollama cloud key", f"{source}, accepted (plan {plan})")
     except urllib.error.HTTPError as e:
-        r.add(FAIL if ollama_upstream.is_cloud(url) else WARN,
+        r.add(FAIL if needed else WARN,
               "ollama cloud key", f"{source}, refused by ollama.com ({e.code})")
     except Exception as e:
         r.add(WARN, "ollama cloud key",

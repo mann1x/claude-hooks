@@ -1195,6 +1195,53 @@ class EndpointConfig:
     #: council budgets against that. ``assured`` (a booked window per
     #: agent session) needs Milestone F's session manager.
     window: str = "dynamic"
+    #: Serves Ollama Cloud models under their bare names (a ``<m>:cloud``
+    #: / ``<m>:<tag>-cloud`` role model goes here as ``<m>`` /
+    #: ``<m>:<tag>``). Set only on the endpoint :func:`client_endpoints`
+    #: adds for ``[cloud] route = "direct"``; never read from a file.
+    cloud_models: bool = False
+
+
+#: ``[cloud] route``: ``direct`` sends every Ollama Cloud model
+#: (``:cloud`` / ``-cloud``) to ollama.com itself, with the account key;
+#: ``local`` sends it to the host's Ollama, which relays it.
+CLOUD_ROUTES = ("direct", "local")
+OLLAMA_CLOUD_URL = "https://ollama.com"
+#: The endpoint name the direct route goes by in the role clients.
+CLOUD_ENDPOINT = "ollama-cloud"
+
+
+@dataclass
+class CloudConfig:
+    """Where Ollama Cloud models run. ``direct`` (default) keeps cloud
+    councils off every host's Ollama: a council relayed through the
+    local xOllama held that server for its whole run (2026-10-27). The
+    config keeps the models' cloud names, so sampling templates, stall
+    thresholds and coder routes still match them; only the wire carries
+    the bare name. ``key_file`` overrides the host's Ollama Cloud key
+    (``ollama.api_key_file`` in claude-hooks.json, else
+    ``OLLAMA_API_KEY``)."""
+    route: str = "direct"
+    url: str = OLLAMA_CLOUD_URL
+    key_file: Optional[str] = None
+
+    def is_default(self) -> bool:
+        return self == CloudConfig()
+
+
+def client_endpoints(cfg) -> dict:
+    """The endpoints the role clients route by: the configured ones,
+    plus the direct cloud route when ``[cloud] route = "direct"``."""
+    eps = dict(getattr(cfg, "endpoints", None) or {})
+    cloud = getattr(cfg, "cloud", None)
+    if cloud is not None and cloud.route == "direct":
+        name = CLOUD_ENDPOINT
+        while name in eps:
+            name += "-direct"
+        eps[name] = EndpointConfig(url=cloud.url, backend="ollama",
+                                   key_file=cloud.key_file,
+                                   cloud_models=True)
+    return eps
 
 
 #: Endpoint window modes accepted today (plan B2 / F).
@@ -1256,6 +1303,7 @@ class ConsultantsConfig:
     guards: GuardsConfig = field(default_factory=GuardsConfig)
     escalation: EscalationConfig = field(default_factory=EscalationConfig)
     critic: CriticConfig = field(default_factory=CriticConfig)
+    cloud: CloudConfig = field(default_factory=CloudConfig)
     polykv: PolykvConfig = field(default_factory=PolykvConfig)
     decision: DecisionConfig = field(default_factory=DecisionConfig)
     # Plan B: ``[budget]`` / ``[sampling]`` — only the keys a layer set.
@@ -1756,6 +1804,24 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
         else:
             log.warning("consultants config: critic.cross_examination "
                         "ignored: must be true, false or \"shell\"")
+
+    # where Ollama Cloud models run
+    cl = raw.get("cloud") or {}
+    if isinstance(cl, dict):
+        route = str(cl.get("route") or base.cloud.route).strip().lower()
+        if route in CLOUD_ROUTES:
+            base.cloud.route = route
+        else:
+            log.warning("consultants config: cloud.route %r ignored: must "
+                        "be one of %s", cl.get("route"), CLOUD_ROUTES)
+        url = cl.get("url")
+        if isinstance(url, str) and url.strip().startswith(
+                ("http://", "https://")):
+            base.cloud.url = url.strip().rstrip("/")
+        elif url is not None:
+            log.warning("consultants config: cloud.url %r ignored", url)
+        if cl.get("key_file"):
+            base.cloud.key_file = str(cl["key_file"]).strip()
 
     # PolyKV placement (plan F)
     pk = raw.get("polykv") or {}
@@ -2267,6 +2333,17 @@ def _render(cfg: ConsultantsConfig, *,
                  "role's instructions last, a layer per block) | as-built.")
         L.append(f"layout = {_toml_value(cfg.polykv.layout)}")
         L.append("")
+    if not cfg.cloud.is_default():
+        L.append("[cloud]")
+        L.append("# route: direct (Ollama Cloud models go to ollama.com "
+                 "with the account key) | local (the host's Ollama relays "
+                 "them).")
+        L.append(f"route = {_toml_str(cfg.cloud.route)}")
+        if cfg.cloud.url != OLLAMA_CLOUD_URL:
+            L.append(f"url = {_toml_str(cfg.cloud.url)}")
+        if cfg.cloud.key_file:
+            L.append(f"key_file = {_toml_str(cfg.cloud.key_file)}")
+        L.append("")
     if cfg.critic.cross_examination != CROSS_EXAM_SHELL:
         L.append("[critic]")
         L.append("# cross_examination: a critic names the claims it doubts "
@@ -2714,6 +2791,26 @@ def set_escalation(*, model: Optional[str] = None,
         cfg.escalation.expert_model = model.strip()
     if max_per_council is not None:
         cfg.escalation.max_per_council = int(max_per_council)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_cloud(*, route: Optional[str] = None, url: Optional[str] = None,
+              key_file: Optional[str] = None, scope: str = "user",
+              cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set ``[cloud]``: ``route`` direct | local, ``url`` (default
+    https://ollama.com), ``key_file`` (empty string clears it)."""
+    if route is not None and route.strip().lower() not in CLOUD_ROUTES:
+        raise ValueError(f"route must be one of {', '.join(CLOUD_ROUTES)}")
+    if url is not None and url.strip() and not url.strip().startswith(
+            ("http://", "https://")):
+        raise ValueError("url must start with http:// or https://")
+    cfg = _load_for_edit(scope, cwd)
+    if route is not None:
+        cfg.cloud.route = route.strip().lower()
+    if url is not None:
+        cfg.cloud.url = url.strip().rstrip("/") or OLLAMA_CLOUD_URL
+    if key_file is not None:
+        cfg.cloud.key_file = key_file.strip() or None
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 

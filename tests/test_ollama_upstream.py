@@ -82,6 +82,25 @@ def test_install_prompt_defaults_to_the_current_value(monkeypatch):
     assert not fresh["ollama"].get("url")
 
 
+def test_install_asks_for_the_cloud_key_file(monkeypatch, tmp_path):
+    sys.path.insert(0, str(REPO))
+    import install
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    kf = tmp_path / "k"
+    cfg: dict = {}
+    monkeypatch.setattr("builtins.input", lambda _p: str(kf))
+    install._setup_ollama_cloud_key(cfg, non_interactive=False)
+    assert "api_key_file" not in cfg.get("ollama", {})
+    kf.write_text("test-only-not-a-real-key\n")
+    install._setup_ollama_cloud_key(cfg, non_interactive=False)
+    assert cfg["ollama"]["api_key_file"] == str(kf)
+    monkeypatch.setattr("builtins.input", lambda _p: pytest.fail("asked"))
+    install._setup_ollama_cloud_key(cfg, non_interactive=False)
+    fresh: dict = {}
+    install._setup_ollama_cloud_key(fresh, non_interactive=True)
+    assert fresh == {}
+
+
 def test_verify_warns_when_hooks_name_a_server_the_engines_miss(monkeypatch):
     sys.path.insert(0, str(REPO / "scripts"))
     import verify_deploy as vd

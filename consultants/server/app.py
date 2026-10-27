@@ -2326,9 +2326,17 @@ def _maybe_start_store_reaper(app, cfg, ollama_base_url: str) -> None:
     distiller = None
     if dist_enabled:
         try:
+            import functools
+            from claude_hooks.get_advice.chat_client import (
+                make_agent_chat_client,
+            )
             from consultants.engine.distillation import Distiller
+            # Cloud models go where the council's go ([cloud] route).
             distiller = Distiller(
                 store_cfg.distillation, ollama_base_url,
+                chat_client_factory=functools.partial(
+                    make_agent_chat_client,
+                    endpoints=cc.client_endpoints(cfg)),
             )
         except Exception:
             log.exception(

@@ -708,6 +708,9 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
                 "window": e.window}
             for n, e in sorted(cfg.endpoints.items())
         },
+        # Where Ollama Cloud models run: direct = ollama.com itself.
+        "cloud": {"route": cfg.cloud.route, "url": cfg.cloud.url,
+                  "key_file": cfg.cloud.key_file},
         "smart_start": {
             "enabled": bool(smart_block.get("enabled", False)),
             "idle_timeout_seconds": int(
@@ -1540,6 +1543,16 @@ def cmd_config_set_cross_examination(args, base: str) -> int:
     state = {"on": True, "off": False}.get(args.state, args.state)
     cfg = cc.set_cross_examination(enabled=state,
                                    **_resolve_active_scope(args))
+    return _emit_config(cfg, args)
+
+
+def cmd_config_set_cloud(args, base: str) -> int:
+    try:
+        cfg = cc.set_cloud(route=args.route, url=args.url,
+                           key_file=args.key_file,
+                           **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
     return _emit_config(cfg, args)
 
 
@@ -3305,6 +3318,22 @@ def build_parser() -> argparse.ArgumentParser:
     ccx.add_argument("state", choices=["on", "off", "shell"])
     _add_scope_args(ccx)
     ccx.set_defaults(fn=cmd_config_set_cross_examination)
+
+    ccl = cfg_sub.add_parser(
+        "set-cloud",
+        help="Where Ollama Cloud models (<m>:cloud / <m>:<tag>-cloud) "
+             "run. direct (default): ollama.com itself, with the account "
+             "key, under their bare names, so a cloud council holds no "
+             "host's Ollama. local: the host's Ollama relays them.")
+    ccl.add_argument("route", nargs="?", choices=list(cc.CLOUD_ROUTES))
+    ccl.add_argument("--url", default=None,
+                     help="Ollama Cloud's URL (default https://ollama.com)")
+    ccl.add_argument("--key-file", default=None,
+                     help="File holding the key (first line); empty "
+                          "clears it. Default: the host's Ollama Cloud "
+                          "key (ollama.api_key_file, else OLLAMA_API_KEY)")
+    _add_scope_args(ccl)
+    ccl.set_defaults(fn=cmd_config_set_cloud)
 
     cpk = cfg_sub.add_parser(
         "set-polykv",

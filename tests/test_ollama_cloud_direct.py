@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import urllib.error
 
-import pytest
 
 from claude_hooks import ollama_account, ollama_slots, ollama_upstream
 from claude_hooks.get_advice import chat_client, ctx_probe
@@ -146,14 +145,43 @@ def test_endpoint_key_file_round_trips_and_the_inline_key_warns(
 
 # --- verify_deploy -------------------------------------------------------- #
 
-def test_verify_fails_when_the_engines_use_ollama_com_without_a_key():
+def _verify():
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
     import verify_deploy as v
+    return v
+
+
+def test_verify_fails_when_the_engines_use_ollama_com_without_a_key(
+        monkeypatch):
+    v = _verify()
+    monkeypatch.setattr(v, "_council_cloud", lambda: (False, None))
     r = v.Results()
     v.check_ollama_cloud_key(r, {}, "https://ollama.com")
     assert [row[0] for row in r.rows] == [v.FAIL]
     r = v.Results()
     v.check_ollama_cloud_key(r, {}, "http://h:11434")
     assert r.rows == []
+
+
+def test_verify_fails_when_the_council_goes_direct_without_a_key(
+        monkeypatch):
+    """``[cloud] route = "direct"`` (the default) sends to ollama.com
+    whatever ollama.url says."""
+    v = _verify()
+    monkeypatch.setattr(v, "_council_cloud", lambda: (True, None))
+    r = v.Results()
+    v.check_ollama_cloud_key(r, {}, "http://h:11434")
+    assert [row[0] for row in r.rows] == [v.FAIL]
+    assert "set-cloud local" in r.rows[0][2]
+
+
+def test_verify_reads_the_council_key_file(monkeypatch, tmp_path):
+    v = _verify()
+    monkeypatch.setattr(v, "_council_cloud",
+                        lambda: (True, str(tmp_path / "missing")))
+    r = v.Results()
+    v.check_ollama_cloud_key(r, {}, "http://h:11434")
+    assert [row[0] for row in r.rows] == [v.FAIL]
+    assert "key_file unreadable" in r.rows[0][2]

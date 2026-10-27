@@ -187,8 +187,9 @@ def make_runner(*, ollama_base_url: str):
                         continue
                     coder_clients_by_model[m] = TracedChat(
                         polykv_mod.placed(
-                            make_agent_chat_client(m, ollama_base_url,
-                                                   endpoints=cfg.endpoints),
+                            make_agent_chat_client(
+                                m, ollama_base_url,
+                                endpoints=cc.client_endpoints(cfg)),
                             pk, "coder"),
                         role="coder", tracer=tracer, stop=_run_stop(state),
                     )
@@ -748,7 +749,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
                     raw = warm_coder_clients.get(m)
                     if raw is None:
                         raw = make_agent_chat_client(
-                            m, ollama_base_url, endpoints=cfg.endpoints)
+                            m, ollama_base_url,
+                            endpoints=cc.client_endpoints(cfg))
                     coder_clients_by_model_fu[m] = TracedChat(
                         polykv_mod.placed(raw, pk_fu, "coder"),
                         role="coder", tracer=tracer, stop=_run_stop(state),
@@ -2147,7 +2149,7 @@ def _role_client(cfg, role: str, ollama_base_url: str):
         models.append(expert)
     return make_role_chat_client(
         models, ollama_base_url,
-        endpoints=getattr(cfg, "endpoints", None) or {})
+        endpoints=cc.client_endpoints(cfg))
 
 
 def default_ollama_url() -> str:

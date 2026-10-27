@@ -747,6 +747,9 @@ class ChatClient:
         # Set when this client serves a configured endpoint
         # (``@name/model``): the model the server actually knows.
         self.served_model: Optional[str] = None
+        # Set when this client is Ollama Cloud used directly for models
+        # configured under their cloud names (``[cloud] route = direct``).
+        self.cloud_direct = False
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.retry_base_delay_s = retry_base_delay_s
@@ -1133,9 +1136,12 @@ class ChatClient:
 
     def _real(self, model: str) -> str:
         """The served model behind a configured endpoint reference
-        (``@name`` / ``@name/model``); any other name unchanged."""
+        (``@name`` / ``@name/model``), or a cloud name's bare name on
+        Ollama Cloud used directly; any other name unchanged."""
         if self.served_model and model and model.startswith("@"):
             return self.served_model
+        if self.cloud_direct:
+            return bare_cloud_name(model) or model
         return model
 
     def _with_served_model(self, payload: dict) -> dict:
@@ -1989,6 +1995,31 @@ class OpenAICompatChatClient(ChatClient):
         return out
 
 
+def bare_cloud_name(model: str) -> Optional[str]:
+    """The name ollama.com serves an Ollama Cloud model under:
+    ``kimi-k2.6:cloud`` -> ``kimi-k2.6``, ``gemma4:31b-cloud`` ->
+    ``gemma4:31b``; ``None`` for a name that is not a cloud name."""
+    if not model or model.startswith(("@", "llamafile://")):
+        return None
+    name, _, tag = model.partition(":")
+    if not name or not tag:
+        return None
+    if tag == "cloud":
+        return name
+    if tag.endswith("-cloud") and len(tag) > len("-cloud"):
+        return f"{name}:{tag[:-len('-cloud')]}"
+    return None
+
+
+def cloud_endpoint(endpoints: Optional[dict]) -> Optional[tuple[str, Any]]:
+    """``(name, endpoint)`` of the endpoint serving cloud models under
+    their bare names (``cloud_models``), or ``None``."""
+    for name, ep in (endpoints or {}).items():
+        if _ep_field(ep, "cloud_models"):
+            return name, ep
+    return None
+
+
 def parse_endpoint_ref(model_ref: str) -> Optional[tuple[str, Optional[str]]]:
     """``@name`` -> ``(name, None)``; ``@name/model`` -> ``(name, model)``;
     anything else -> ``None``. ``@`` never occurs in an Ollama tag."""
@@ -2254,6 +2285,9 @@ def make_agent_chat_client(
 
     - ``llamafile://<label>`` -> :class:`LlamafileAgentChatClient`
       (daemon-ensured, OpenAI ``/v1/chat/completions``).
+    - A cloud name (``<m>:cloud``) when ``endpoints`` holds a
+      ``cloud_models`` endpoint -> a :class:`ChatClient` on that
+      endpoint, sending the bare name.
     - Anything else -> existing :class:`ChatClient` (Ollama native
       ``/api/chat``).
 
@@ -2265,6 +2299,13 @@ def make_agent_chat_client(
         # A local llamafile has no WAN line to wait out.
         kwargs.pop("outage_wait_s", None)
         return LlamafileAgentChatClient(label, **kwargs)
+    cloud = cloud_endpoint(endpoints) if bare_cloud_name(model_ref) else None
+    if cloud is not None:
+        ep = cloud[1]
+        client = ChatClient(_ep_field(ep, "url"),
+                            api_key=endpoint_api_key(ep), **kwargs)
+        client.cloud_direct = True
+        return client
     ref = parse_endpoint_ref(model_ref)
     if ref is not None:
         name, model = ref
@@ -2289,11 +2330,16 @@ def make_agent_chat_client(
     return ChatClient(ollama_base_url, **kwargs)
 
 
-def route_key(model_ref: str) -> str:
+def route_key(model_ref: str, endpoints: Optional[dict] = None) -> str:
     """Which client serves ``model_ref``: one per ``llamafile://`` label,
-    one per endpoint reference, one shared Ollama client for the rest."""
+    one per endpoint reference, one for cloud names sent directly, one
+    shared Ollama client for the rest."""
     if model_ref and model_ref.startswith("llamafile://"):
         return model_ref
+    if bare_cloud_name(model_ref):
+        cloud = cloud_endpoint(endpoints)
+        if cloud is not None:
+            return "@" + cloud[0]
     if parse_endpoint_ref(model_ref) is not None:
         return model_ref
     return "ollama"
@@ -2313,14 +2359,16 @@ class ModelRoutingChatClient:
     call; ``total_inference_s`` is the sum over all of them.
     """
 
-    def __init__(self, primary: str, factory: Callable[[str], Any]):
+    def __init__(self, primary: str, factory: Callable[[str], Any],
+                 key: Callable[[str], str] = route_key):
         self._factory = factory
+        self._key = key
         self._clients: dict[str, Any] = {}
         self._primary = primary
         self._last = self._for(primary)
 
     def _for(self, model: Optional[str]):
-        key = route_key(model or self._primary)
+        key = self._key(model or self._primary)
         client = self._clients.get(key)
         if client is None:
             client = self._factory(model or self._primary)
@@ -2370,9 +2418,11 @@ def make_role_chat_client(models: list[str], ollama_base_url: str, *,
     def factory(m: str):
         return make_agent_chat_client(m, ollama_base_url,
                                       endpoints=endpoints, **kwargs)
-    if len({route_key(m) for m in models}) <= 1:
+    def key(m: str) -> str:
+        return route_key(m, endpoints)
+    if len({key(m) for m in models}) <= 1:
         return factory(models[0])
-    return ModelRoutingChatClient(models[0], factory)
+    return ModelRoutingChatClient(models[0], factory, key)
 
 
 def endpoint_api_key(ep) -> Optional[str]:

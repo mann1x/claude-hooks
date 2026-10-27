@@ -4697,6 +4697,41 @@ def _setup_ollama_upstream(cfg: dict, *, non_interactive: bool) -> None:
     print(f"  ollama.url = {chosen}")
 
 
+#: Where the installer proposes the Ollama Cloud key file.
+OLLAMA_KEY_FILE_DEFAULT = "~/.claude/ollama-api-key"
+
+
+def _setup_ollama_cloud_key(cfg: dict, *, non_interactive: bool) -> None:
+    """Ask for ``ollama.api_key_file``: the council sends Ollama Cloud
+    models to ollama.com itself by default (``[cloud] route = "direct"``
+    in the consultants config), which needs the account key. Only the
+    file's path is written, never the key; a key that already resolves
+    is kept. Non-interactive runs write nothing."""
+    from claude_hooks import ollama_upstream
+
+    print("\n--- Ollama Cloud key (council cloud models go to ollama.com) ---")
+    key, source = ollama_upstream.api_key_source(cfg)
+    if key:
+        print(f"  Key set ({source}).")
+        return
+    if non_interactive:
+        print(f"  --non-interactive: no key ({source}). Councils on cloud "
+              "models need ollama.api_key_file, or `claude-consultants "
+              "config set-cloud local`.")
+        return
+    ans = input("  File holding the key, first line "
+                f"[{OLLAMA_KEY_FILE_DEFAULT}]: ").strip()
+    path = ans or OLLAMA_KEY_FILE_DEFAULT
+    if ollama_upstream.read_key_file(path):
+        cfg.setdefault("ollama", {})["api_key_file"] = path
+        print(f"  ollama.api_key_file = {path}")
+        return
+    print(f"  {path} holds no key; nothing written. Put the key from "
+          "https://ollama.com/settings/keys in it (user-only permissions) "
+          "and re-run, or `claude-consultants config set-cloud local` to "
+          "have this host's Ollama relay cloud models.")
+
+
 def _setup_chat_backends(
     cfg: dict, *, non_interactive: bool, dry_run: bool,
 ) -> None:
@@ -4707,6 +4742,7 @@ def _setup_chat_backends(
     in the same flows.
     """
     _setup_ollama_upstream(cfg, non_interactive=non_interactive)
+    _setup_ollama_cloud_key(cfg, non_interactive=non_interactive)
     _setup_ollama_chat(cfg, non_interactive=non_interactive, dry_run=dry_run)
     _setup_llamafile_chat_models(
         cfg, non_interactive=non_interactive, dry_run=dry_run,

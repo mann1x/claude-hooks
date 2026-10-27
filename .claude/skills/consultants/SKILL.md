@@ -1020,6 +1020,13 @@ and **More…** opens the next batch (ending with **Done**):
     build. Cloud and
     plain Ollama are never touched. The run's `show` reports the shared
     tokens and any leak.
+20. **Cloud route** — `claude-consultants config set-cloud direct|local
+    [--key-file <path>]` (default `direct`). `direct` sends every Ollama
+    Cloud model (`<m>:cloud`, `<m>:<tag>-cloud`) to ollama.com itself
+    with the account key, under its bare name, so a cloud council holds
+    no host's Ollama; `local` has this host's Ollama relay them. The
+    config keeps the cloud names either way. Without a key, `direct`
+    fails every cloud call: `scripts/verify_deploy.py` says so.
 
 Loop back to step 1 after each successful change; exit on **Done**.
 

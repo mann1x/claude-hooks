@@ -410,7 +410,26 @@ python -m claude_hooks.ollama_upstream --explain   # URL + where the key comes f
 python scripts/verify_deploy.py                     # "ollama cloud key — …, accepted (plan pro)"
 ```
 
-**Using it.** Either the whole engine (`ollama.url = "https://ollama.com"`)
+**The council's default (`[cloud] route = "direct"`).** Every Ollama Cloud
+model a role, lane, fallback, coder route or the distiller names
+(`kimi-k2.6:cloud`, `gemma4:31b-cloud`) goes to ollama.com itself, sent
+under its bare name (`kimi-k2.6`, `gemma4:31b`; `bare_cloud_name()`), with
+the host's key — so a cloud council holds no host's Ollama. The config
+keeps the cloud names: sampling templates (`config/model-sampling.json`),
+stall thresholds and coder routes go on matching them; only the wire
+carries the bare name (`ChatClient._real()` with `cloud_direct`). Neither
+Ollama nor ollama.com declares sampling parameters for these models, so
+the templates are the only source either way. `cc.client_endpoints(cfg)`
+adds the route as a `cloud_models` endpoint (`ollama-cloud`) to what the
+role clients route by; a local model in the same role stays on
+`ollama.url` (`ModelRoutingChatClient`).
+
+```bash
+claude-consultants config set-cloud local              # the host's Ollama relays them
+claude-consultants config set-cloud direct --key-file ~/.claude/other-key
+```
+
+**Other ways.** The whole engine (`ollama.url = "https://ollama.com"`)
 or per role through an endpoint:
 
 ```bash
