@@ -677,6 +677,40 @@ def _context_length_from_show(data: dict) -> Optional[int]:
 #: holds a delta, so these are concatenated rather than overwritten.
 _STREAMED_REASONING_KEYS = ("thinking", "reasoning", "reasoning_content")
 
+_THINK_OPEN = "<think>"
+_THINK_CLOSE = "</think>"
+
+
+def split_leaked_reasoning(content: str) -> Optional[tuple[str, str]]:
+    """``(reasoning, answer)`` when ``content`` opens with reasoning the
+    server did not separate, else ``None``.
+
+    glm-5.3-flash asked with ``think: false`` keeps reasoning and writes
+    it into the content, ending it with ``</think>`` (8 of 9 forced
+    planner / critic / synthesizer calls on 2026-10-27, through the
+    local relay and ollama.com alike); the engine kept the reasoning as
+    the role's plan, verdict or answer. Split only a leading block: the
+    first ``</think>`` with no ``<think>`` before it, or one that opens
+    the content. An answer that quotes the tag (in backticks, or after
+    an opening tag later in the text) is left as it is.
+    """
+    if not content or _THINK_CLOSE not in content:
+        return None
+    end = content.index(_THINK_CLOSE)
+    head = content[:end]
+    stripped = head.lstrip()
+    if stripped.startswith(_THINK_OPEN):
+        head = stripped[len(_THINK_OPEN):]
+    elif _THINK_OPEN in head:
+        return None
+    after = end + len(_THINK_CLOSE)
+    if content[end - 1:end] == "`" or content[after:after + 1] == "`":
+        return None
+    reasoning = head.strip()
+    if not reasoning:
+        return None
+    return reasoning, content[after:].lstrip()
+
 #: surfaces a Modelfile's parameters under several shapes depending on
 #: build, so all of them are checked rather than guessed between.
 _BUDGET_MESSAGE_KEYS = (
@@ -1639,6 +1673,16 @@ class ChatClient:
 
     def _from_ollama(self, data: dict) -> dict:
         msg = dict(data.get("message") or {})
+        split = split_leaked_reasoning(msg.get("content") or "")
+        if split is not None:
+            # Reasoning the model wrote into its answer goes where the
+            # server would have put it, so no role keeps it as its
+            # deliverable and the loop's reasoning readers still see it.
+            reasoning, msg["content"] = split
+            prior = (msg.get("thinking") or "").strip()
+            msg["thinking"] = f"{prior}\n\n{reasoning}" if prior else reasoning
+            log.info("chat: %d chars of reasoning split out of %s's answer",
+                     len(reasoning), data.get("model") or "the model")
         # Ollama may return tool_calls with arguments as dict; runner
         # is fine with both, but normalize to JSON strings to match
         # the OpenAI wire shape. Also strip non-standard fields some
