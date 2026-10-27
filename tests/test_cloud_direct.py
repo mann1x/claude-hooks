@@ -143,3 +143,31 @@ class TestTheClient:
         c = C.make_agent_chat_client("gemma4:31b-cloud", LOCAL,
                                      endpoints=_eps(key_file=str(kf)))
         assert c.api_key == "test-only-not-a-real-key"
+
+
+def test_the_bench_snapshot_probes_where_the_council_calls(monkeypatch):
+    """scripts/consultants_model_snapshot.py asks ollama.com for the bare
+    name on the direct route, and the given endpoint otherwise."""
+    import importlib.util
+    import io
+    import json
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "scripts" / \
+        "consultants_model_snapshot.py"
+    spec = importlib.util.spec_from_file_location("_snap", path)
+    snap = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(snap)
+    asked = []
+
+    def fake_urlopen(req, timeout=None):
+        asked.append((req.full_url, json.loads(req.data)["model"]))
+        return io.BytesIO(b"{}")
+    monkeypatch.setattr(snap.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(snap, "_cloud_direct_url", lambda: "https://ollama.com")
+    snap._api_show(LOCAL, "gemma4:31b-cloud")
+    snap._api_show(LOCAL, "qwen3:8b")
+    monkeypatch.setattr(snap, "_cloud_direct_url", lambda: None)
+    snap._api_show(LOCAL, "kimi-k2.6:cloud")
+    assert asked == [("https://ollama.com/api/show", "gemma4:31b"),
+                     (LOCAL + "/api/show", "qwen3:8b"),
+                     (LOCAL + "/api/show", "kimi-k2.6:cloud")]

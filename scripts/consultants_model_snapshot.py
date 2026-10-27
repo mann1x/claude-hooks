@@ -75,7 +75,27 @@ def _default_endpoint() -> str:
     return ollama_upstream.url()
 
 
+def _cloud_direct_url() -> str | None:
+    """Ollama Cloud's URL when the council sends cloud models there
+    directly (``[cloud] route = "direct"``), else ``None``."""
+    try:
+        from consultants import config as cc
+        cloud = cc.load_config(Path.cwd()).cloud
+    except Exception:
+        return None
+    return cloud.url if cloud.route == "direct" else None
+
+
 def _api_show(endpoint: str, model: str, timeout_s: float = 10.0) -> dict:
+    # Probe the model where the council calls it: a cloud name on the
+    # direct route is ollama.com's bare name, not the local relay's.
+    repo = Path(__file__).resolve().parent.parent
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    from claude_hooks.get_advice.chat_client import bare_cloud_name
+    direct = _cloud_direct_url() if bare_cloud_name(model) else None
+    if direct:
+        endpoint, model = direct, bare_cloud_name(model)
     body = json.dumps({"model": model}).encode()
     req = urllib.request.Request(
         f"{endpoint.rstrip('/')}/api/show",
@@ -136,6 +156,8 @@ def cmd_capture(args: argparse.Namespace) -> int:
     snapshot: dict[str, Any] = {
         "captured_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "endpoint": endpoint,
+        # Cloud models are probed here instead when it is set.
+        "cloud_direct": _cloud_direct_url(),
         "models": {},
     }
     failed: list[str] = []
