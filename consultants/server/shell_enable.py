@@ -135,6 +135,22 @@ def preflight_error(cfg: Any, shell: Optional[dict],
                     f"the directories the council may change with "
                     f"--write-scope PATH (each lane gets a reflink clone of "
                     f"them), use --shell read, or run from a git root.")
+    if cwd is not None:
+        from claude_hooks.tool_registry.shell_provider import below_floor
+        s = settings_for(cfg, {"mode": shell.get("mode") or "read",
+                               "net": shell.get("net") or "none"})
+        short = below_floor(
+            str(Path(cwd) / ".claude-hooks" / "consultants"), s)
+        if short:
+            free, floor = short
+            return (f"the sandboxed shell was requested but the disk holding "
+                    f"{cwd} has {free:.1f} GiB free, under the shell's "
+                    f"{floor:.1f} GiB floor (max of free_floor_gib = "
+                    f"{s.free_floor_gib:g} and free_floor_pct = "
+                    f"{s.free_floor_pct:g}% of the disk), so every command "
+                    f"would be refused. Free space, lower [tools.shell] "
+                    f"free_floor_pct / free_floor_gib, or run without "
+                    f"--shell.")
     from claude_hooks.sandbox import backend_for
     sc = _shell_cfg(cfg)
     pre = backend_for(getattr(sc, "backend", "auto") or "auto").preflight()

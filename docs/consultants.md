@@ -1331,11 +1331,18 @@ Boot-time it's seeded from `adversary_strictness`; `adversarial` is
 reachable only via `POST /control`. Default `normal` + empty focus
 appends nothing (byte-identical to the pre-M4 critic).
 
-### Cross-examination (`[critic] cross_examination`, off by default)
+### Cross-examination (`[critic] cross_examination`, on for shell runs)
 
 ```
-claude-consultants config set-cross-examination on   # or off
+claude-consultants config set-cross-examination shell   # default; or on / off
 ```
+
+`shell` turns it on for a run that has the sandboxed shell, where a
+challenged lane can answer with a run. Council run 10b (2026-10-26, the
+ac1ee35c56 baseline) graded it: after the adversary brief a lane
+answered with 12 runs, one claim narrowed and one fell, for 4% of the
+run's prompt tokens. `on` forces it for every run, `off` for none.
+Follow-ups never cross-examine (their graph has no such node).
 
 A critic not convinced by a claim challenges it instead of sending the
 whole round back:

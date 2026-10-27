@@ -366,9 +366,9 @@ def test_a_lane_with_no_conversation_leaves_it_open(tmp_path):
 
 class TestConfig:
 
-    def test_default_off_and_round_trip(self, tmp_path):
+    def test_default_shell_and_round_trip(self, tmp_path):
         from consultants import config as cc
-        assert cc.ConsultantsConfig().critic.cross_examination is False
+        assert cc.ConsultantsConfig().critic.cross_examination == "shell"
         cfg = cc.set_cross_examination(enabled=True, scope="project", cwd=tmp_path)
         assert cfg.critic.cross_examination is True
         text = (tmp_path / ".claude-hooks" / "consultants.toml").read_text()
@@ -391,8 +391,12 @@ class TestConfig:
     def test_the_runner_wires_it(self):
         import inspect
         from consultants.server import runner
-        assert "cross_examination=bool(getattr(getattr(cfg, \"critic\"" in \
-            inspect.getsource(runner)
+        src = inspect.getsource(runner)
+        # The graph and the seed both take the value resolved for this
+        # run's shell; a follow-up graph has no node and seeds it off.
+        assert src.count('cc.cross_examination_on(\n                cfg, runner_input.get("shell"))') == 1
+        assert src.count('cross_exam=cc.cross_examination_on(cfg, runner_input.get("shell"))') == 1
+        assert "cfg, enabled_t, cross_exam=False)" in src
 
 
 def test_the_note_is_absent_when_off():

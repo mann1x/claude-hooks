@@ -29,7 +29,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 try:
     import tomllib  # Python 3.11+
@@ -1069,15 +1069,29 @@ class EscalationConfig:
 ESCALATION_MAX = 10
 
 
+#: ``[critic] cross_examination`` value meaning "on for shell runs".
+CROSS_EXAM_SHELL = "shell"
+
+
 @dataclass
 class CriticConfig:
     """Cross-examination (plan council-memory M5): a critic not convinced
     names the claim it doubts, ``CHALLENGE report=N: ... Settle with:
     ...``; the lane that wrote report N resumes its own conversation and
     answers with a run or a concession, and the critic rules on each
-    (upheld / withdrawn / open). An open challenge falls back to the
-    reroute. Off by default until a graded run shows it pays."""
-    cross_examination: bool = False
+    (stands / narrowed / falls / open). An open challenge falls back to
+    the reroute. ``"shell"`` (default) turns it on for runs with the
+    sandboxed shell only: council run 10b (2026-10-26) showed it pays
+    there (a lane answered with 12 runs; one claim narrowed, one fell)
+    for 4% of the run's prompt tokens. ``True`` / ``False`` force it."""
+    cross_examination: Union[bool, str] = CROSS_EXAM_SHELL
+
+
+def cross_examination_on(cfg: Any, shell: Any) -> bool:
+    """Whether this run cross-examines: ``True``, or ``"shell"`` on a
+    run that has the sandboxed shell."""
+    v = getattr(getattr(cfg, "critic", None), "cross_examination", False)
+    return v is True or (v == CROSS_EXAM_SHELL and bool(shell))
 
 
 POLYKV_MODES = ("off", "affinity", "pooled", "assured", "auto")
@@ -1736,11 +1750,12 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
     # cross-examination (plan council-memory M5)
     cr = raw.get("critic") or {}
     if isinstance(cr, dict) and "cross_examination" in cr:
-        if isinstance(cr["cross_examination"], bool):
+        if (isinstance(cr["cross_examination"], bool)
+                or cr["cross_examination"] == CROSS_EXAM_SHELL):
             base.critic.cross_examination = cr["cross_examination"]
         else:
             log.warning("consultants config: critic.cross_examination "
-                        "ignored: must be true or false")
+                        "ignored: must be true, false or \"shell\"")
 
     # PolyKV placement (plan F)
     pk = raw.get("polykv") or {}
@@ -2252,12 +2267,14 @@ def _render(cfg: ConsultantsConfig, *,
                  "role's instructions last, a layer per block) | as-built.")
         L.append(f"layout = {_toml_value(cfg.polykv.layout)}")
         L.append("")
-    if cfg.critic.cross_examination:
+    if cfg.critic.cross_examination != CROSS_EXAM_SHELL:
         L.append("[critic]")
         L.append("# cross_examination: a critic names the claims it doubts "
                  "(CHALLENGE report=N); each lane answers with a run or a "
-                 "concession before the critic rules. Off by default.")
-        L.append("cross_examination = true")
+                 "concession before the critic rules. true | false | "
+                 "\"shell\" (default: on for runs with the shell).")
+        L.append("cross_examination = "
+                 + _toml_value(cfg.critic.cross_examination))
         L.append("")
     g = cfg.guards
     if not g.is_default():
@@ -2700,11 +2717,14 @@ def set_escalation(*, model: Optional[str] = None,
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 
-def set_cross_examination(*, enabled: bool, scope: str = "user",
+def set_cross_examination(*, enabled: Union[bool, str], scope: str = "user",
                           cwd: Optional[Path] = None) -> ConsultantsConfig:
-    """Set ``[critic] cross_examination`` (plan council-memory M5)."""
+    """Set ``[critic] cross_examination`` (plan council-memory M5):
+    ``True``, ``False`` or ``"shell"``."""
+    if not (isinstance(enabled, bool) or enabled == CROSS_EXAM_SHELL):
+        raise ValueError('cross_examination must be true, false or "shell"')
     cfg = _load_for_edit(scope, cwd)
-    cfg.critic.cross_examination = bool(enabled)
+    cfg.critic.cross_examination = enabled
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 

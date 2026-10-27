@@ -33,7 +33,7 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from claude_hooks import test_reruns as _tr
 
@@ -770,12 +770,24 @@ def audit_answer(text: str, rows: Optional[list[dict]]) -> Audit:
     return a
 
 
+def _quotable(printed: str) -> str:
+    """The first line of what a run printed that can sit inside one line
+    of the answer: a bare fence line (```` ```diff ````) is skipped and a
+    fence inside a line is defused. Run 10b (csl-2026-10-26-1931-f8b3)
+    quoted ```` ```diff ```` here, the answer then held an odd number of
+    fences, and the truncation backstop failed a complete answer."""
+    for ln in printed.split("\n"):
+        s = ln.strip()
+        if s and not s.startswith("```"):
+            return ln.replace("```", "'''")
+    return ""
+
+
 def _run_line(g: list[dict]) -> str:
     r = g[-1]
     cmd = _norm(r["command"])
     cmd = cmd if len(cmd) <= 160 else cmd[:160] + "…"
-    first = next((ln for ln in (r.get("printed") or "").split("\n")
-                  if ln.strip()), "")
+    first = _quotable(r.get("printed") or "")
     verdict = next((m.group(0).strip() for m in [re.search(
         r"^\s*Tests:?\s+[^\n]*$|^=+ [^\n]*(?:passed|failed)[^\n]*$",
         _body_of(r), re.M)] if m), "")
@@ -1202,19 +1214,25 @@ BRIEF_OWED_NOTE = ("{id}: the checkpoint brief named it, and no run after "
                    "re-verified (harness)")
 
 
-def brief_owed(text: str, docs: list, rows: Optional[list[dict]]) -> str:
+def brief_owed(text: str, docs: list, rows: Optional[list[dict]],
+               ruled_out: Iterable[str] = ()) -> str:
     """The answer with every finding an injected brief names, that no run
     after the brief (one that reached the code) mentions, listed under
     ``Unverified``. Council run 8: the brief asked for csf-8 on the
-    patched tree; nothing ran it, and the answer did not say so."""
+    patched tree; nothing ran it, and the answer did not say so.
+    ``ruled_out`` (refuted / by_design ids) are never owed: a brief names
+    them to say "do not re-raise"."""
     if rows is None or not docs:
         return text
+    skip = {x.lower() for x in ruled_out}
     owed = []
     for d in docs:
         ids = list(dict.fromkeys(FINDING_TAG.findall(getattr(d, "text", "") or "")))
         after = [r for r in rows if r.get("ran") and (r.get("ts") or 0)
                  >= (getattr(d, "ts", 0) or 0)]
         for fid in ids:
+            if fid.lower() in skip:
+                continue
             rx = re.compile(rf"(?<![\w-]){re.escape(fid)}(?![\w-])")
             if fid in owed or any(rx.search(f"{r.get('command') or ''}\n"
                                             f"{r.get('output') or ''}")

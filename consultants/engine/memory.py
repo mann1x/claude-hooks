@@ -372,6 +372,29 @@ KNOWN_NOTE = ("harness: the ledger already has this as {id} ({status}): "
               "{title}")
 
 
+def ruled_out_ids(cwd: str) -> set[str]:
+    """Ids the ledger settled as no defect (``refuted`` / ``by_design``).
+    A brief names them to forbid them, so nothing owes a run on them
+    (run 10b listed csf-11..14 as "not re-verified"). Empty with no
+    ledger; never raises."""
+    if not cwd:
+        return set()
+    try:
+        from claude_hooks.findings import (
+            BY_DESIGN, REFUTED, Ledger, findings_enabled)
+        from claude_hooks.findings.ledger import findings_root
+        if not findings_enabled():
+            return set()
+        lg = Ledger(findings_root(cwd))
+        if not lg.exists:
+            return set()
+        return {f.id.lower() for f in lg.iter_findings()
+                if f.status in (REFUTED, BY_DESIGN)}
+    except Exception:  # noqa: BLE001 — memory never fails a council
+        log.exception("ruled-out lookup failed")
+        return set()
+
+
 def note_known_new(cwd: str, answer: str) -> tuple[str, int]:
     """The answer with a note on each ranked item labelled "(new)" that
     the ledger already holds (``Ledger.match``, no write): council run 9

@@ -345,8 +345,8 @@ def make_runner(*, ollama_base_url: str):
                 cfg.runtime, "xauto_retry_infra_lanes", True))),
             # Plan council-memory M5: challenged lanes answer before the
             # critic's verdict routes. Off: the graph is unchanged.
-            cross_examination=bool(getattr(getattr(cfg, "critic", None),
-                                           "cross_examination", False)),
+            cross_examination=cc.cross_examination_on(
+                cfg, runner_input.get("shell")),
             # Per-lane model escalation (plan D): off unless an expert
             # model is configured.
             escalation_model=getattr(getattr(cfg, "escalation", None),
@@ -436,7 +436,8 @@ def make_runner(*, ollama_base_url: str):
             initial["extra_roots"] = list(extra_roots)
         initial["runtime_control"] = _seed_runtime_control(
             cfg, enabled,
-            n_fanout_extras=len(extra_models_by_role.get("researcher", [])))
+            n_fanout_extras=len(extra_models_by_role.get("researcher", [])),
+            cross_exam=cc.cross_examination_on(cfg, runner_input.get("shell")))
         _tried = _tried_docs(runner_input)
         if _tried:
             initial["additional_context"] = _tried
@@ -994,7 +995,10 @@ def make_follow_up_runner(*, ollama_base_url: str):
         # merged parent+followup allowed-roots set.
         if extra_roots:
             initial["extra_roots"] = list(extra_roots)
-        initial["runtime_control"] = _seed_runtime_control(cfg, enabled_t)
+        # No cross-examination node in a follow-up graph: a critic asked
+        # for CHALLENGE lines here would raise ones nothing routes.
+        initial["runtime_control"] = _seed_runtime_control(
+            cfg, enabled_t, cross_exam=False)
         initial["plan"] = (
             parent_state.plan
             if parent_state is not None and parent_state.plan
@@ -1642,7 +1646,8 @@ def _tried_docs(runner_input: dict) -> list:
     return [Doc("any", council_mod.render_tried(tried), source="already_tried")]
 
 
-def _seed_runtime_control(cfg, enabled, *, n_fanout_extras: int = 0) -> dict:
+def _seed_runtime_control(cfg, enabled, *, n_fanout_extras: int = 0,
+                          cross_exam: bool = False) -> dict:
     """The run's boot-time ``runtime_control``.
 
     Until 2026-09-30 nothing seeded it, and every consumer treats an
@@ -1657,6 +1662,11 @@ def _seed_runtime_control(cfg, enabled, *, n_fanout_extras: int = 0) -> dict:
     rc = runtime_control_defaults(cfg, effort=cfg.effort,
                                   n_fanout_extras=n_fanout_extras)
     rc["enabled_roles"] = list(enabled)
+    # Plan council-memory M5: present only when on (readers: absent = off).
+    if cross_exam:
+        rc["cross_examination"] = True
+    else:
+        rc.pop("cross_examination", None)
     return dict(rc)
 
 

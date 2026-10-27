@@ -458,16 +458,9 @@ class ShellToolProvider(ToolProvider):
 
     def _space_refusal(self, ldir: str) -> Optional[str]:
         s = self.settings
-        probe = ldir
-        while not os.path.exists(probe):
-            probe = os.path.dirname(probe)
-        try:
-            du = shutil.disk_usage(probe)
-        except OSError:
-            return None
-        free_gib = du.free / 2**30
-        floor = max(s.free_floor_gib, du.total / 2**30 * s.free_floor_pct / 100)
-        if free_gib < floor:
+        short = below_floor(ldir, s)
+        if short:
+            free_gib, floor = short
             return (f"error: the disk holding this lane's scratch has "
                     f"{free_gib:.1f} GiB free, under the {floor:.1f} GiB "
                     f"floor, so no command runs. Answer from reading instead.")
@@ -552,6 +545,27 @@ class ShellToolProvider(ToolProvider):
             if more > 0:
                 parts.append(f"... and {more} more")
         return "\n".join(parts)
+
+
+def below_floor(path: str, s: ShellSettings) -> Optional[tuple[float, float]]:
+    """``(free GiB, floor GiB)`` when the disk holding ``path`` (or its
+    nearest existing parent) is under the free-space floor, else
+    ``None``. The one rule both the per-command check and the run's
+    preflight apply: run 10 (csl-2026-10-26-1729-bb6e) passed preflight
+    and then had all 26 commands refused for an hour."""
+    probe = path
+    while probe and not os.path.exists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            return None
+        probe = parent
+    try:
+        du = shutil.disk_usage(probe)
+    except OSError:
+        return None
+    free_gib = du.free / 2**30
+    floor = max(s.free_floor_gib, du.total / 2**30 * s.free_floor_pct / 100)
+    return (free_gib, floor) if free_gib < floor else None
 
 
 def _tree_bytes(path: str) -> int:

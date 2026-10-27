@@ -982,12 +982,15 @@ and **More…** opens the next batch (ending with **Done**):
     critic, the first-round lanes that failed on infrastructure. Other
     tiers never do; after any run, `retry-lanes <sid>` does it by hand.
 16. **Cross-examination** — `claude-consultants config
-    set-cross-examination on|off` (default off). A critic not convinced
+    set-cross-examination on|off|shell` (default `shell`: on for runs
+    with the sandboxed shell, off otherwise). A critic not convinced
     challenges the claims it doubts (`CHALLENGE report=N: … Settle with:
     …`); each challenged lane resumes its own conversation and answers
     with a run, a narrowed claim or a concession, then the critic rules
     on each claim (stands / narrowed / falls / open). An open challenge falls back to the usual
-    reroute. Experimental until a graded run shows it pays.
+    reroute. Council run 10b (2026-10-26) graded it on a shell run: a
+    lane answered with 12 runs, one claim narrowed and one fell, for 4%
+    of the run's prompt tokens. Follow-ups never cross-examine.
 17. **Lane escalation** — `claude-consultants config set-escalation
     --model <expert> [--max N]` (`--model ''` = off, the default). A
     first-round lane a guard ended (struggle, loop guard, mistake limit,

@@ -1537,7 +1537,8 @@ def cmd_config_set_escalation(args, base: str) -> int:
 
 
 def cmd_config_set_cross_examination(args, base: str) -> int:
-    cfg = cc.set_cross_examination(enabled=args.state == "on",
+    state = {"on": True, "off": False}.get(args.state, args.state)
+    cfg = cc.set_cross_examination(enabled=state,
                                    **_resolve_active_scope(args))
     return _emit_config(cfg, args)
 
@@ -3298,9 +3299,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Plan council-memory M5: a critic not convinced challenges "
              "the claims it doubts (CHALLENGE report=N); each challenged "
              "lane resumes its own conversation and answers with a run or "
-             "a concession, then the critic rules (upheld / withdrawn / "
-             "open; open falls back to the reroute). Default off.")
-    ccx.add_argument("state", choices=["on", "off"])
+             "a concession, then the critic rules (stands / narrowed / "
+             "falls / open; open falls back to the reroute). Default "
+             "shell: on for runs with the sandboxed shell only.")
+    ccx.add_argument("state", choices=["on", "off", "shell"])
     _add_scope_args(ccx)
     ccx.set_defaults(fn=cmd_config_set_cross_examination)
 

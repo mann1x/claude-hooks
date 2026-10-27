@@ -608,7 +608,10 @@ SYNTHESIZER_SYSTEM = _role_prompt(
     "deliberate refutes the defect). Everything else goes under an "
     "`Unverified` heading or is marked `not tested` — never ranked, "
     "never ✓. The critic's `UNVERIFIED:` lines and coder output whose "
-    "RUN line says nothing ran are unverified.\n\n"
+    "RUN line says nothing ran are unverified. The defect and its fix "
+    "are checked separately: a defect a run reproduced is ranked even "
+    "when no fix for it was written or run; only the fix then goes "
+    "under `Unverified`.\n\n"
     "FINAL LINE (load-bearing). After the answer, output a line "
     "`CONFIDENCE: <0.0-1.0>` — your own confidence that the answer is "
     "correct and complete (1.0 = certain; lower it for thin evidence, "
@@ -4615,8 +4618,10 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
     from consultants.engine.memory import note_known_new
     text, _ = note_known_new(cwd or state.get("cwd") or "", text)
     if _rows is not None:
+        from consultants.engine.memory import ruled_out_ids
         text = evidence.brief_owed(text, _additional_context_for(
-            state, "synthesizer"), _rows)
+            state, "synthesizer"), _rows,
+            ruled_out_ids(cwd or state.get("cwd") or ""))
     # Plan council-memory M2: what the answer ranked, citing a run that
     # reached the code, goes to the ledger as candidates (never settled).
     if _rows is not None:
