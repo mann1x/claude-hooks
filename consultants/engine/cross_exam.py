@@ -131,6 +131,16 @@ def challenges(text: str, n_reports: int) -> dict[int, list[str]]:
     return out
 
 
+#: ``research_lanes`` key on a report a follow-up inherited from its parent.
+INHERITED = "inherited"
+
+
+def inherited_tags(n: int) -> list[dict]:
+    """``research_lanes`` entries for ``n`` reports a follow-up starts with,
+    so its own lanes' tags line up after them."""
+    return [{INHERITED: True} for _ in range(n)]
+
+
 def plan(state: dict) -> list[dict]:
     """One exam per challenged lane: ``{lane, reports: {N: [challenge]}}``,
     at most :data:`MAX_LANES`. [] when the critic challenged nothing, the
@@ -149,6 +159,10 @@ def plan(state: dict) -> list[dict]:
     exams: dict[Any, dict] = {}
     for n, items in named.items():
         tag = lanes[n - 1] if isinstance(lanes[n - 1], dict) else {}
+        if tag.get(INHERITED):
+            # A follow-up's report from the parent run: no lane here can
+            # answer it, so the challenge stays open and reroutes.
+            continue
         lane = tag.get("lane")
         key = "solo" if lane is None else lane
         if key not in exams:

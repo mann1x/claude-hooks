@@ -129,6 +129,9 @@ class CouncilState(TypedDict, total=False):
     # researcher wrapper); ``cross_exam`` one entry per examined lane;
     # ``cross_exam_round`` the last round examined (ruling node only).
     research_lanes: Annotated[list, operator.add]
+    # Set only on a multi-critic fan-out Send: this critic is one of C
+    # parallel instances and writes no decision (critic_node).
+    critic_fanout: bool
     cross_exam: Annotated[list, operator.add]
     cross_exam_round: int
     # One per challenged report: the critic's ruling (stands / narrowed /
@@ -872,6 +875,24 @@ CROSS_EXAM_NODE = "cross_examine"
 CROSS_EXAM_RULING_NODE = "cross_exam_ruling"
 
 
+def _with_cross_exam(sg, deps: GraphDeps, wrap: Callable,
+                     critic_route: Callable, routes: dict
+                     ) -> tuple[Callable, dict]:
+    """Plan council-memory M5, for both builders: challenged lanes answer
+    in parallel, the critic rules, then the critic's route. Returns the
+    critic's route and route map; off returns them unchanged and adds no
+    node."""
+    if not deps.cross_examination:
+        return critic_route, routes
+    sg.add_node(CROSS_EXAM_NODE, wrap(CROSS_EXAM_NODE, _wrap_cross_examine(deps)))
+    sg.add_node(CROSS_EXAM_RULING_NODE,
+                wrap(CROSS_EXAM_RULING_NODE, _wrap_cross_exam_ruling(deps)))
+    sg.add_edge(CROSS_EXAM_NODE, CROSS_EXAM_RULING_NODE)
+    sg.add_conditional_edges(CROSS_EXAM_RULING_NODE, critic_route, dict(routes))
+    return (_route_to_cross_exam(deps, critic_route),
+            {**routes, CROSS_EXAM_NODE: CROSS_EXAM_NODE})
+
+
 def _wrap_critic(deps: GraphDeps):
     def _node(state: dict) -> dict:
         return council.critic_node(
@@ -1534,9 +1555,11 @@ def build_council_graph(deps: GraphDeps,
                         "research_rounds_used": int(
                             state.get("research_rounds_used") or 0
                         ),
-                        # lane_idx flags this critic as part of a
+                        # critic_fanout flags this critic as part of a
                         # fanout (critic_node suppresses its
-                        # decision/reroute deltas in that mode).
+                        # decision/reroute deltas in that mode);
+                        # lane_idx names the instance in the record.
+                        "critic_fanout": True,
                         "lane_idx": idx,
                         "model_override": model_tag,
                         # Empty deltas so additive reducers don't
@@ -2031,22 +2054,11 @@ def build_council_graph(deps: GraphDeps,
         else:
             conditional_source = decider
         if "researcher" in enabled:
-            critic_route = _route_unless_wrapping(deps, council.route_after_critic)
-            routes = {council.ROUTE_RESEARCHER: "researcher",
-                      council.ROUTE_SYNTHESIZER: synthesizer_target}
-            if deps.cross_examination:
-                # Plan council-memory M5: challenged lanes answer in
-                # parallel, the critic rules, then the critic's route.
-                sg.add_node(CROSS_EXAM_NODE,
-                            _wrap(CROSS_EXAM_NODE, _wrap_cross_examine(deps)))
-                sg.add_node(CROSS_EXAM_RULING_NODE,
-                            _wrap(CROSS_EXAM_RULING_NODE,
-                                  _wrap_cross_exam_ruling(deps)))
-                sg.add_edge(CROSS_EXAM_NODE, CROSS_EXAM_RULING_NODE)
-                sg.add_conditional_edges(CROSS_EXAM_RULING_NODE, critic_route,
-                                         dict(routes))
-                critic_route = _route_to_cross_exam(deps, critic_route)
-                routes[CROSS_EXAM_NODE] = CROSS_EXAM_NODE
+            critic_route, routes = _with_cross_exam(
+                sg, deps, _wrap,
+                _route_unless_wrapping(deps, council.route_after_critic),
+                {council.ROUTE_RESEARCHER: "researcher",
+                 council.ROUTE_SYNTHESIZER: synthesizer_target})
             sg.add_conditional_edges(conditional_source, critic_route, routes)
         else:
             # No researcher to loop back to; the critic-side is
@@ -2283,14 +2295,16 @@ def build_follow_up_graph(deps: GraphDeps,
         sg.add_edge(START, "researcher")
     if "critic" in enabled:
         sg.add_edge("researcher", "critic")
-        sg.add_conditional_edges(
-            "critic",
+        # The follow-up's own lanes answer a challenge; a report it
+        # inherited from the parent cannot (its conversation is in the
+        # parent's transcript and its view was frozen at the parent's
+        # end), so cross_exam.plan() skips those and they reroute.
+        critic_route, routes = _with_cross_exam(
+            sg, deps, _wrap,
             _route_unless_wrapping(deps, council.route_after_critic),
-            {
-                council.ROUTE_RESEARCHER: "researcher",
-                council.ROUTE_SYNTHESIZER: "synthesizer",
-            },
-        )
+            {council.ROUTE_RESEARCHER: "researcher",
+             council.ROUTE_SYNTHESIZER: "synthesizer"})
+        sg.add_conditional_edges("critic", critic_route, routes)
     else:
         sg.add_edge("researcher", "synthesizer")
     if adversary_on:

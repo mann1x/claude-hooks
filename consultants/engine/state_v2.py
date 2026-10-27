@@ -532,6 +532,9 @@ class CouncilStateV2(TypedDict, total=False):
     lane_retry: int
     # Plan council-memory M5 (see graph.CouncilState).
     research_lanes: Annotated[list, operator.add]
+    # Set only on a multi-critic fan-out Send: this critic is one of C
+    # parallel instances and writes no decision (critic_node).
+    critic_fanout: bool
     cross_exam: Annotated[list, operator.add]
     cross_exam_round: int
     # One per challenged report: the critic's ruling (stands / narrowed /

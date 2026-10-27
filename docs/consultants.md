@@ -1342,7 +1342,10 @@ challenged lane can answer with a run. Council run 10b (2026-10-26, the
 ac1ee35c56 baseline) graded it: after the adversary brief a lane
 answered with 12 runs, one claim narrowed and one fell, for 4% of the
 run's prompt tokens. `on` forces it for every run, `off` for none.
-Follow-ups never cross-examine (their graph has no such node).
+In a follow-up only the follow-up's own lanes answer: a challenge to a
+report carried over from the earlier run stays open and goes back as
+the ordinary reroute, since that lane's conversation and shell view
+ended with the earlier run.
 
 A critic not convinced by a claim challenges it instead of sending the
 whole round back:

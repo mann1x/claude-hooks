@@ -903,6 +903,10 @@ def make_follow_up_runner(*, ollama_base_url: str):
             synthesizer_fallback_models=synthesizer_fallback_followup,
             store=consultants_store_followup,
             sid=state.sid,
+            # Plan council-memory M5: the follow-up's own lanes answer
+            # challenges; inherited reports reroute (cross_exam.plan()).
+            cross_examination=cc.cross_examination_on(
+                cfg, runner_input.get("shell")),
             # M10: coder sandbox caps. Follow-ups inherit the
             # parent's effective limits via cfg (which may have
             # been mutated by a per-session control update).
@@ -995,10 +999,9 @@ def make_follow_up_runner(*, ollama_base_url: str):
         # merged parent+followup allowed-roots set.
         if extra_roots:
             initial["extra_roots"] = list(extra_roots)
-        # No cross-examination node in a follow-up graph: a critic asked
-        # for CHALLENGE lines here would raise ones nothing routes.
         initial["runtime_control"] = _seed_runtime_control(
-            cfg, enabled_t, cross_exam=False)
+            cfg, enabled_t,
+            cross_exam=cc.cross_examination_on(cfg, runner_input.get("shell")))
         initial["plan"] = (
             parent_state.plan
             if parent_state is not None and parent_state.plan
@@ -1028,6 +1031,13 @@ def make_follow_up_runner(*, ollama_base_url: str):
                         + parent_state.final_answer.strip()
                     )
             initial["research"] = prior_research
+        # Reports carried over from the parent are tagged as such, so the
+        # follow-up's own lanes' tags line up after them (report N → lane,
+        # for cross-examination and the labels), and a challenge to an
+        # inherited report is never sent to a lane of this run.
+        if initial.get("research"):
+            from consultants.engine.cross_exam import inherited_tags
+            initial["research_lanes"] = inherited_tags(len(initial["research"]))
 
         _start_progress(state, enabled, runner_input)
 

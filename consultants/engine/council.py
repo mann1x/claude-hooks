@@ -896,6 +896,8 @@ def report_tags(n: int, lanes=None) -> list[str]:
     for tag in lanes:
         tag = tag if isinstance(tag, dict) else {}
         bits = []
+        if tag.get("inherited"):
+            bits.append("from the earlier run")
         if tag.get("lane") is not None:
             bits.append(f"lane {tag['lane']}")
         if tag.get("round"):
@@ -3999,9 +4001,13 @@ def critic_node(state: dict, *, chat_client, model: str,
             )
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
-    # In multi-critic mode (Phase 10 xmax+critic-extras), the
-    # presence of ``lane_idx`` on this invocation means the critic
-    # is one of C parallel instances. Two consequences:
+    # In multi-critic mode (Phase 10 xmax+critic-extras), the fan-out's
+    # ``critic_fanout`` flag means the critic is one of C parallel
+    # instances — never ``lane_idx`` alone: a follow-up seeds
+    # ``lane_idx = 0`` for its researcher lane, and every follow-up
+    # critic's verdict was dropped as a parallel critic's (found
+    # 2026-10-27 wiring cross-examination into follow-ups). Two
+    # consequences:
     #
     # 1. Don't write critic_decision / critique — they're racy
     #    (last-writer-wins across C parallel lanes) and the
@@ -4016,7 +4022,7 @@ def critic_node(state: dict, *, chat_client, model: str,
     _emit_finished("critic", round=max(rounds_used, 1),
                     lane_idx=lane_idx,
                     duration_ms=int(dt * 1000), ok=True)
-    if lane_idx is not None:
+    if state.get("critic_fanout"):
         return {
             "turns": [turn],
             "total_prompt_tokens": pt,

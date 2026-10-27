@@ -40,21 +40,22 @@ class _Researcher:
 
 
 class _Critic:
-    def __init__(self, ruling="stands", after="DECISION: ready"):
+    def __init__(self, ruling="stands", after="DECISION: ready", report=2):
         self.payloads, self.ruling, self.after, self.verdicts = [], ruling, after, 0
+        self.report = report
         self._lock = threading.Lock()
 
     def chat(self, payload, *, think=True):
         with self._lock:
             self.payloads.append(payload)
             if payload["messages"][0]["content"].startswith(cx.RULING_SYSTEM):
-                return _reply(f"RULING report=2: {self.ruling} — the run shows it\n"
-                              "DECISION: ready")
+                return _reply(f"RULING report={self.report}: {self.ruling} — "
+                              "the run shows it\nDECISION: ready")
             self.verdicts += 1
             if self.verdicts == 1:
-                return _reply("Report 2 overclaims.\nCHALLENGE report=2: the "
-                              "edit is called blind. Settle with: a run.\n"
-                              "DECISION: needs_more_research")
+                return _reply(f"Report {self.report} overclaims.\nCHALLENGE "
+                              f"report={self.report}: the edit is called blind. "
+                              "Settle with: a run.\nDECISION: needs_more_research")
             return _reply(self.after)
 
 
@@ -393,10 +394,10 @@ class TestConfig:
         from consultants.server import runner
         src = inspect.getsource(runner)
         # The graph and the seed both take the value resolved for this
-        # run's shell; a follow-up graph has no node and seeds it off.
-        assert src.count('cc.cross_examination_on(\n                cfg, runner_input.get("shell"))') == 1
-        assert src.count('cross_exam=cc.cross_examination_on(cfg, runner_input.get("shell"))') == 1
-        assert "cfg, enabled_t, cross_exam=False)" in src
+        # run's shell, in the first run and in a follow-up alike.
+        assert src.count('cross_examination=cc.cross_examination_on(\n                cfg, runner_input.get("shell"))') == 2
+        assert src.count('cross_exam=cc.cross_examination_on(cfg, runner_input.get("shell"))') == 2
+        assert 'initial["research_lanes"] = inherited_tags(' in src
 
 
 def test_the_note_is_absent_when_off():
@@ -428,3 +429,70 @@ def test_a_reroute_is_shown_what_the_critic_asked():
     assert "THE CRITIC'S VERDICT ON THE ROUNDS ABOVE:\nGAP X" in again[-1]["content"]
     assert council.build_researcher_messages("q", "p", ["r1"], []) == \
         council.build_researcher_messages("q", "p", ["r1"], [], critique="  ")
+
+
+def _follow_up(tmp_path, *, on=True, critic=None):
+    """A follow-up that inherited two reports from its parent and runs one
+    lane of its own (report 3)."""
+    from consultants.engine.graph import build_follow_up_graph
+    roles = ("researcher", "critic", "synthesizer")
+    clients = {"researcher": _Researcher(answer="ANSWER report=3: settled — C1"),
+               "critic": critic or _Critic(report=3), "synthesizer": _Synth()}
+    rec = MessageRecorder(tmp_path / "transcript.db", meta=RecorderMeta(
+        sid="csl-cx-fu", cwd=str(tmp_path), question="q", effort="high",
+        topology="council", models={}))
+    deps = GraphDeps(chat_clients=clients, models={r: "m" for r in roles},
+                     enabled_roles=roles, cwd=str(tmp_path),
+                     tool_executor=lambda *a, **kw: "", tool_specs=[],
+                     grounding_msgs=[], disable_cache=True, recorder=rec,
+                     cross_examination=on)
+    state = council.initial_state(question="the follow-up", cwd=str(tmp_path),
+                                  models={}, topology="council", effort="high")
+    state.update(plan_item="read c", lane_idx=0,
+                 research=["PARENT about read a", "PARENT about read b"],
+                 research_lanes=cx.inherited_tags(2),
+                 runtime_control={"max_rounds": 10, "max_reroutes": 3,
+                                  **({"cross_examination": True} if on else {})})
+    g = build_follow_up_graph(deps)
+    out = g.invoke(state)
+    rec.close()
+    return g, clients, out
+
+
+class TestInAFollowUp:
+    """The follow-up's own lanes answer; a report it inherited cannot."""
+
+    def test_its_own_lane_answers(self, tmp_path):
+        g, clients, out = _follow_up(tmp_path)
+        assert graph.CROSS_EXAM_NODE in g.get_graph().nodes
+        [ex] = _exams(clients["researcher"])
+        assert "CHALLENGE report=3: the edit is called blind" in ex["messages"][-1]["content"]
+        assert out["critic_decision"] == "ready"
+        assert len(clients["researcher"].payloads) == 2      # its lane + exam
+        assert out["research_lanes"][:2] == cx.inherited_tags(2)
+        assert out["research_lanes"][2].get("lane") == 0
+
+    def test_an_inherited_report_is_not_examined_and_reroutes(self, tmp_path):
+        _, clients, out = _follow_up(tmp_path, critic=_Critic(report=1))
+        assert not _exams(clients["researcher"])
+        assert len(clients["researcher"].payloads) == 2      # its lane + reroute
+
+    def test_the_critic_sees_which_reports_are_the_earlier_runs(self, tmp_path):
+        _, clients, _ = _follow_up(tmp_path)
+        first = clients["critic"].payloads[0]["messages"][-1]["content"]
+        assert first.count("(from the earlier run)") == 2
+
+    def test_off_adds_no_node(self, tmp_path):
+        g, clients, _ = _follow_up(tmp_path, on=False)
+        assert graph.CROSS_EXAM_NODE not in g.get_graph().nodes
+        assert not _exams(clients["researcher"])
+
+
+def test_plan_skips_inherited_reports():
+    state = {"critic_decision": "needs_more_research", "research_rounds_used": 1,
+             "research": ["a", "b", "c"],
+             "research_lanes": cx.inherited_tags(2) + [{"lane": 0, "round": 1}],
+             "critique": "CHALLENGE report=1: x. Settle with: y.\n"
+                         "CHALLENGE report=3: z. Settle with: w."}
+    [exam] = cx.plan(state)
+    assert exam["lane"] == 0 and list(exam["reports"]) == [3]

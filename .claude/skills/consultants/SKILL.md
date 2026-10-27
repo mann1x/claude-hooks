@@ -990,7 +990,8 @@ and **More…** opens the next batch (ending with **Done**):
     on each claim (stands / narrowed / falls / open). An open challenge falls back to the usual
     reroute. Council run 10b (2026-10-26) graded it on a shell run: a
     lane answered with 12 runs, one claim narrowed and one fell, for 4%
-    of the run's prompt tokens. Follow-ups never cross-examine.
+    of the run's prompt tokens. In a follow-up only its own lanes
+    answer; a challenge to an earlier run's report reroutes.
 17. **Lane escalation** — `claude-consultants config set-escalation
     --model <expert> [--max N]` (`--model ''` = off, the default). A
     first-round lane a guard ended (struggle, loop guard, mistake limit,
