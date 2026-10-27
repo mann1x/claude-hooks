@@ -2,11 +2,10 @@
 
 # Tasks — claude-hooks
 
-2 active · 1 ready · 1 waiting · prefix `ch`
+1 active · 1 ready · 1 waiting · prefix `ch`
 
-## Active (2)
+## Active (1)
 
-- [ch-13](.claude-hooks/tasks/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 1m
 - [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 1d
 
 ## Ready (1)
@@ -20,10 +19,10 @@
 ## By plan
 
 - `docs/PLAN-council-cerebriline.md`: [ch-9](.claude-hooks/tasks/ch-9.md)
-- `docs/PLAN-council-memory.md`: [ch-13](.claude-hooks/tasks/ch-13.md)
 
-## Recently closed (15 of 22)
+## Recently closed (15 of 23)
 
+- [ch-13](.claude-hooks/tasks/archive/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 1m
 - [ch-25](.claude-hooks/tasks/archive/ch-25.md) `consultants.compaction` Compaction at 32k windows: a fold every 2–3 research calls — ~5k between where a fold lands and the trigger — 1d
 - [ch-18](.claude-hooks/tasks/archive/ch-18.md) **H** `mailbox.identity` Mailbox: lasting cloud aliases — a linked cloud thread registers and sends as <alias>@cloud without a per-session approval — 1d
 - [ch-11](.claude-hooks/tasks/archive/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 1d
@@ -38,4 +37,3 @@
 - [ch-16](.claude-hooks/tasks/archive/ch-16.md) **H** `resources` Resource manager: shared/exclusive/quiet locks on hosts, GPUs, pods, cloud — real-time waiters, no mail — 3d
 - [ch-17](.claude-hooks/tasks/archive/ch-17.md) `benchmarks.models` Model eval 2026-10-22: minimax-m3.1-flash full bench + gemma4 council re-run with thinking fixed — 3d
 - [ch-14](.claude-hooks/tasks/archive/ch-14.md) **H** `consultants.compaction` Compaction: the writer is never shown the task (bug-1087) — port the fork's pinned-prompt rule, re-bench — 3d
-- [ch-8](.claude-hooks/tasks/archive/ch-8.md) `consultants.guards` Council D — lane robustness: always-on loop guards, strict nudge profile, named terminal actions — 11d
