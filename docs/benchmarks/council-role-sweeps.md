@@ -484,3 +484,32 @@ on 22 of 24 calls and the synthesizer on 6 of 6.
   Tool-turn and forced-call-thinking arms in
   [`council-turns-and-forced-think-2026-10-22.md`](council-turns-and-forced-think-2026-10-22.md):
   keep 3 tool turns and thinking off on the forced call.
+
+## 2026-10-27 — gemma4 vs glm-5.3-flash, every role, direct to ollama.com
+
+The ch-13 all-roles comparison, N=3 each, interleaved 10 min apart on
+engine HEAD `e9fe819` (council memory M1–M5, the run-10 fixes and the
+follow-up critic fix are all in). First sweep on the **direct cloud
+route**: every call went to ollama.com itself (`[cloud] route = "direct"`,
+`d175b7e`), so no host's Ollama or xOllama served any of it. Bench engine
+on :38195 with its own HOME, every role pinned, no extra lanes.
+
+| Label | Runs | Smoke | Audit-med | Audit-hi | Roles | $ / run | Verdict |
+|---|---|---|---|---|---|---|---|
+| [`gemma4-31b-cloud-2026-10-27`](gemma4-31b-cloud-2026-10-27/results.md) | 3/3 | PASS | A | C | `P:A R:B C:B S:A` | $0.040 | EVALUATED-ONLY — Q3 C,B,C; median wall 15 / 45 / 46 s |
+| [`glm-5-3-flash-cloud-2026-10-27`](glm-5-3-flash-cloud-2026-10-27/results.md) | 3/3 | PASS | B | C+ | `P:B R:A C:B S:A` | $0.059 | EVALUATED-ONLY — all four Q3 claims every run, status flip every run; median wall 30 / 91 / 197 s |
+
+- **No change to the council default.** Neither label clears Q3 ≥ B;
+  gemma4 stays the fastest and cheapest, and its Q2 rose to A (r1 found
+  all six sites).
+- **glm-5.3-flash is the better researcher, gemma4 the better planner.**
+  glm states claim 1 (`error` / `_role_failed` are last-value channels)
+  in every run, as minimax-m3.1-flash did on 10-22; gemma4 never has.
+  Both still pick the status relabel on most Q3 runs.
+- **glm-5.3-flash leaks its reasoning on forced calls.** With
+  `think: false` it keeps reasoning and writes it into the answer, ending
+  in `</think>` — 8 of 9 forced planner / critic / synthesizer calls,
+  through the local relay as well as direct. The 10-22 arm that kept
+  thinking off on the forced call was measured on gemma4 and minimax,
+  which don't do this. A client-side split of a leading `</think>` block
+  is the fix candidate, to be measured on its own.

@@ -7,7 +7,7 @@
 ## Active (2)
 
 - [ch-13](.claude-hooks/tasks/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 1m
-- [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 19h
+- [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 21h
 
 ## Ready (1)
 
@@ -24,7 +24,7 @@
 
 ## Recently closed (15 of 22)
 
-- [ch-25](.claude-hooks/tasks/archive/ch-25.md) `consultants.compaction` Compaction at 32k windows: a fold every 2–3 research calls — ~5k between where a fold lands and the trigger — 21h
+- [ch-25](.claude-hooks/tasks/archive/ch-25.md) `consultants.compaction` Compaction at 32k windows: a fold every 2–3 research calls — ~5k between where a fold lands and the trigger — 23h
 - [ch-18](.claude-hooks/tasks/archive/ch-18.md) **H** `mailbox.identity` Mailbox: lasting cloud aliases — a linked cloud thread registers and sends as <alias>@cloud without a per-session approval — 1d
 - [ch-11](.claude-hooks/tasks/archive/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 1d
 - [ch-24](.claude-hooks/tasks/archive/ch-24.md) `consultants.budget` Council grounding sized by the role's window — 50 KB anchors fill 56% of a 32k head that compaction never folds — 1d
