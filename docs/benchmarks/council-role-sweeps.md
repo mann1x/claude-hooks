@@ -496,7 +496,7 @@ on :38195 with its own HOME, every role pinned, no extra lanes.
 
 | Label | Runs | Smoke | Audit-med | Audit-hi | Roles | $ / run | Verdict |
 |---|---|---|---|---|---|---|---|
-| [`gemma4-31b-cloud-2026-10-27`](gemma4-31b-cloud-2026-10-27/results.md) | 3/3 | PASS | A | C | `P:A R:B C:B S:A` | $0.040 | EVALUATED-ONLY — Q3 C,B,C; median wall 15 / 45 / 46 s |
+| [`gemma4-31b-cloud-2026-10-27`](gemma4-31b-cloud-2026-10-27/results.md) | 3/3 | PASS | A | C | `P:A R:B C:B S:A` | $0.039 | EVALUATED-ONLY — Q3 C,B,C; median wall 15 / 45 / 46 s |
 | [`glm-5-3-flash-cloud-2026-10-27`](glm-5-3-flash-cloud-2026-10-27/results.md) | 3/3 | PASS | B | C+ | `P:B R:A C:B S:A` | $0.059 | EVALUATED-ONLY — all four Q3 claims every run, status flip every run; median wall 30 / 91 / 197 s |
 
 - **No change to the council default.** Neither label clears Q3 ≥ B;
@@ -513,3 +513,20 @@ on :38195 with its own HOME, every role pinned, no extra lanes.
   thinking off on the forced call was measured on gemma4 and minimax,
   which don't do this. A client-side split of a leading `</think>` block
   is the fix candidate, to be measured on its own.
+
+**Mix, same day** — glm-5.3-flash researcher with gemma4 planner / critic /
+synthesizer, engine `2dbbe40` (the sweep's engine plus the reasoning-leak
+split):
+
+| Label | Runs | Smoke | Audit-med | Audit-hi | Roles | $ / run | Verdict |
+|---|---|---|---|---|---|---|---|
+| [`mix-glm-R-gemma4-PCS-2026-10-27`](mix-glm-R-gemma4-PCS-2026-10-27/results.md) | 3/3 | PASS | B | C+ | `P:A R:A C:B S:A` | $0.046 | EVALUATED-ONLY — all four Q3 claims every run, status flip every run |
+
+- **Better evidence does not change the fix.** With glm researching,
+  gemma4's answers carry claim 1 every time, then all three pick the
+  status relabel. Every model that explains the false `failed` stamp
+  proposes changing the stamp; the Q3 ceiling here is the question's
+  framing, not the evidence.
+- **r2's audit-high was a FLAP** (both glm lanes `startup_stall`, no token
+  120 s after admission) while a giano xhigh council shared the cloud
+  account; re-run alone as `r2b`.

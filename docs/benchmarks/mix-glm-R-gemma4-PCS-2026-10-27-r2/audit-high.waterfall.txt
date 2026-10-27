@@ -1,0 +1,45 @@
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/mix-glm-R-gemma4-PCS-2026-10-27-r2/audit-high.transcript.db
+
+sid: csl-2026-10-27-1514-18af
+status: failed  error: researcher failed: stall retries exhausted after 2 attempt(s); last outcome=startup_stall
+total wall: 1100.5s
+
+  planner       node=1.1m    (entries) llm=4x=1.1m    tool=3x=7ms     tok=p9892/c1715
+      LLM round=1 model=gemma4:31b-cloud            51.7s  p=1376   c=313   
+      LLM round=1 model=gemma4:31b-cloud             7.1s  p=2395   c=700   
+      LLM round=1 model=gemma4:31b-cloud             3.1s  p=3093   c=258   
+      LLM round=1 model=gemma4:31b-cloud             2.1s  p=3028   c=444   
+      tool glob               x1       7ms chars=29
+      tool survey_project     x1       0ms chars=3779
+      tool list_files         x1       0ms chars=116
+
+  researcher    node=13.5m   (3xentries) llm=8x=5.4m    tool=18x=8ms     tok=p240875/c5208
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud          2.2m  p=16937  c=45    
+      LLM round=3 model=glm-5.3-flash:cloud          1.4m  p=46691  c=954   
+      LLM round=3 model=glm-5.3-flash:cloud          1.2m  p=17314  c=62    
+      LLM round=3 model=glm-5.3-flash:cloud         26.3s  p=51994  c=3248  
+      LLM round=3 model=glm-5.3-flash:cloud          9.7s  p=43837  c=754   
+      LLM round=3 model=glm-5.3-flash:cloud          1.2s  p=18848  c=31    
+      LLM round=3 model=glm-5.3-flash:cloud          1.2s  p=28308  c=35    
+      LLM round=1 lane=0 model=glm-5.3-flash:cloud          1.2s  p=16946  c=79    
+      tool grep               x4       5ms chars=23024
+      tool read_file          x5       3ms chars=96165
+      tool list_files         x7       0ms chars=966
+      tool survey_project     x2       0ms chars=7558
+
+  critic        node=7.8m    (2xentries) llm=3x=7.8m    tool=4x=0ms     tok=p15479/c1764
+      LLM round=2 model=gemma4:31b-cloud             4.2m  p=2309   c=440   
+      LLM round=3 model=gemma4:31b-cloud             2.3m  p=8711   c=485   
+      LLM round=3 model=gemma4:31b-cloud             1.3m  p=4459   c=839   
+      tool read_file          x4       0ms chars=12141
+
+  synthesizer   node=3.5s    (entries) llm=1x=3.5s    tool=0x=0ms     tok=p4604/c696
+      LLM round=1 model=gemma4:31b-cloud             3.5s  p=4604   c=696   
+
+totals
+  wall                  1100.5s
+  sum of node spans     22.4m
+  sum of LLM call time  14.3m  (78.0% of wall)
+  sum of tool call time 15ms
+  total prompt tokens   270850
+  total completion tok  9383

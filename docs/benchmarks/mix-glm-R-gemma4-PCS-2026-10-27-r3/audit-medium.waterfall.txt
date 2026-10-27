@@ -1,0 +1,42 @@
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/mix-glm-R-gemma4-PCS-2026-10-27-r3/audit-medium.transcript.db
+
+sid: csl-2026-10-27-1543-77f2
+status: completed
+total wall: 79.0s
+
+  planner       node=17.7s   (entries) llm=4x=17.6s   tool=3x=42ms    tok=p19502/c2327
+      LLM round=1 model=gemma4:31b-cloud            10.3s  p=7817   c=1153  
+      LLM round=1 model=gemma4:31b-cloud             3.5s  p=7567   c=631   
+      LLM round=1 model=gemma4:31b-cloud             2.5s  p=1232   c=347   
+      LLM round=1 model=gemma4:31b-cloud             1.3s  p=2886   c=196   
+      tool grep               x1      42ms chars=11346
+      tool survey_project     x1       0ms chars=3779
+      tool read_file          x1       0ms chars=2624
+
+  researcher    node=1.4m    (2xentries) llm=12x=1.4m    tool=25x=375ms   tok=p426588/c4543
+      LLM round=1 lane=0 model=glm-5.3-flash:cloud         14.2s  p=33479  c=1207  
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud         12.8s  p=39834  c=136   
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud          9.8s  p=35255  c=371   
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud          9.7s  p=55300  c=1279  
+      LLM round=1 lane=0 model=glm-5.3-flash:cloud          8.9s  p=32240  c=324   
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud          6.3s  p=43369  c=604   
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud          4.9s  p=22262  c=212   
+      LLM round=1 lane=0 model=glm-5.3-flash:cloud          4.4s  p=28952  c=149   
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud          4.0s  p=16781  c=81    
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud          3.3s  p=55234  c=30    
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud          2.0s  p=47064  c=64    
+      LLM round=1 lane=0 model=glm-5.3-flash:cloud          1.6s  p=16818  c=86    
+      tool grep               x12    375ms chars=140904
+      tool survey_project     x1       0ms chars=3779
+      tool read_file          x12      0ms chars=35673
+
+  synthesizer   node=8.0s    (entries) llm=1x=8.0s    tool=0x=0ms     tok=p4594/c1762
+      LLM round=1 model=gemma4:31b-cloud             8.0s  p=4594   c=1762  
+
+totals
+  wall                  79.0s
+  sum of node spans     1.8m
+  sum of LLM call time  1.8m  (136.2% of wall)
+  sum of tool call time 417ms
+  total prompt tokens   450684
+  total completion tok  8632

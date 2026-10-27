@@ -11,7 +11,7 @@ Engine HEAD `e9fe819`, subject `bench-baseline-2026-05-07` with the answer key r
 | audit-medium | **A** | A / A / B | 45s ± 0 |
 | audit-high | **C** | C / B / C | 46s ± 0 |
 
-Cost per run (list price, Appendix A, no cache discount): $0.036–0.044 (median $0.040).
+Cost per run (list price, Appendix A, no cache discount): $0.036–0.044 (median $0.039).
 
 ## Per-query grades
 
@@ -44,4 +44,4 @@ Cost per run (list price, Appendix A, no cache discount): $0.036–0.044 (median
 
 ## Commentary
 
-Unchanged from [2026-10-22](../gemma4-31b-cloud-2026-10-22/results.md) where it counts: Q3 is C with one actionable run (the synthesizer-prompt fix) and claim 1 is never stated; Q2 rises from B to A (r1 found all six sites, r2 five). Still the fastest and cheapest label measured: ~105 s for all three queries at ~$0.04. Against [glm-5.3-flash](../glm-5-3-flash-cloud-2026-10-27/results.md) on the same engine and route: glm is the stronger researcher (claim 1 every run) and the weaker auditor of its own role outputs (reasoning leaked into eight of nine forced answers); both land at C on Q3.
+Unchanged from [2026-10-22](../gemma4-31b-cloud-2026-10-22/results.md) where it counts: Q3 is C with one actionable run (the synthesizer-prompt fix) and claim 1 is never stated; Q2 rises from B to A (r1 found all six sites, r2 five). Still the fastest and cheapest label measured: ~105 s for all three queries at ~$0.04 a run. Against [glm-5.3-flash](../glm-5-3-flash-cloud-2026-10-27/results.md) on the same engine and route: glm is the stronger researcher (claim 1 every run) and the weaker auditor of its own role outputs (reasoning leaked into eight of nine forced answers); both land at C on Q3.
