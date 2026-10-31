@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v2.0.1** — ~8.8k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v2.0.2** — ~8.8k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -445,6 +445,9 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > numbered inject is one directive, a stray violation is kept, a cut
 > audit is stated as incomplete, and the audit has its own 32k cap.
 > It also takes `vitest` to 4.1.12 in `episodic-memory`.
+> v2.0.2 clears `npm audit` in `episodic-memory`: runtime dependencies
+> are raised, `overrides` set floors for transitive ones, and the
+> `dist/mcp-server.js` bundle is rebuilt, since it holds the SDK and `zod`.
 
 ---
 

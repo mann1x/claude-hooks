@@ -16,6 +16,22 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [2.0.2] — 2026-10-31
+
+### Security
+- `episodic-memory`: all 9 `npm audit` findings cleared, on the host's own lock
+  as well as a fresh install. `@modelcontextprotocol/sdk` goes to 1.32.2, `zod`
+  to 4.6.7 and `@huggingface/transformers` to 4.3.2, each within its major
+  version. `overrides` set floors for `sharp`, `body-parser`, `qs`, `hono`,
+  `@hono/node-server`, `fast-uri` and `ip-address`, because `package-lock.json`
+  is gitignored and a host's lock would keep the old versions.
+- `episodic-memory/dist/mcp-server.js` is rebuilt. It is an esbuild bundle holding
+  the SDK and `zod`, so it kept the old code whatever `node_modules` held, and
+  `npm audit` cannot see into it.
+
+### Known limits
+- Not smoke-tested on Windows, as with 2.0.0 and 2.0.1.
+
 ## [2.0.1] — 2026-10-31
 
 ### Fixed
@@ -10140,7 +10156,8 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v2.0.2...HEAD
+[2.0.2]: https://github.com/mann1x/claude-hooks/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/mann1x/claude-hooks/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/mann1x/claude-hooks/compare/v1.20.2...v2.0.0
 [1.20.2]: https://github.com/mann1x/claude-hooks/compare/v1.20.1...v1.20.2
