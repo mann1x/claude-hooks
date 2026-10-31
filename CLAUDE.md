@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.20.2** — ~7.1k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v2.0.0** — ~8.8k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -433,6 +433,14 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > opening prompt (43 ms, 41 MB). Per-host task state moves to
 > `~/.claude/claude-hooks-tasks/`, the only place the sandboxed daemon
 > may write.
+>
+> v2.0.0 is major for one default: `[cloud] route = "direct"` sends a
+> council's Ollama Cloud models to ollama.com, so a host with no API key
+> fails verify until it adds one or sets the route to `local`. It also
+> ships the sandboxed shell, PolyKV placement, the findings ledger and
+> cross-examination, resource claims, durable mailbox aliases, the commit
+> secret gate, and the rebuilt compaction. An inject now binds the final
+> answer. Tested on Linux only. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 

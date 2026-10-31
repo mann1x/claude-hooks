@@ -16,21 +16,79 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-10-31
+
+The major bump is for one changed default: councils now call Ollama Cloud
+directly. **This release was tested on Linux only.** The Windows smoke test
+was not run, because the Windows host was unreachable at the cut.
+
+### Upgrade notes
+
+- **Cloud models need a key, or the old route.** `[cloud] route` defaults to
+  `direct`, so a council sends `:cloud` models to ollama.com rather than
+  through a local Ollama. A host with no API key fails `verify_deploy.py`.
+  Either put the key in `~/.claude/ollama-api-key` (mode 0600) and set
+  `ollama.api_key_file`, or keep the old path with
+  `claude-consultants config set-cloud local`.
+- **`gitleaks` is required on a development host.** `step_repo` installs the
+  pre-commit secret gate, and `verify_deploy.py` fails if the hook or
+  gitleaks is missing.
+- **No Ollama host is shipped.** `ollama.url` defaults to `""`, so set it if
+  you relied on the old default. `install.py` asks.
+
+### Added
+
+- **Sandboxed shell for council lanes** (off by default): `run_command` under
+  bwrap or the static `council-sandbox` launcher, write mode with a private
+  worktree or reflink clone per lane, held patches, and measured systemd
+  hardening of the engine. Linux only; Windows and macOS refuse it.
+- **PolyKV placement** (off by default) on opencoti and xOllama: a run-scoped
+  pool manager, shared prompt layers, owner windows, follow-up holds and leak
+  audits.
+- **Council memory:** a findings ledger under `.claude-hooks/findings/`, the
+  code comments at cited lines shown to judges, a critic that can run checks,
+  and cross-examination of a report's claims.
+- **Council control:** wrap-up, retry-lanes, per-lane model escalation, xauto
+  retry of infrastructure failures, and a read-only dashboard (`/dashboard`).
+- **Typed role messages** (`[protocol] typed`, off by default) and **decision
+  models** (`[decision]`, off by default, advice only).
+- **Resource claims:** `claude-hooks-res` and `resource-*` MCP tools for
+  shared, exclusive and quiet claims on hosts, GPUs, pods and the cloud
+  account, with queued waiters and claim extension.
+- **Durable mailbox aliases** (`mailbox-durable`): an address that lasts with
+  no session behind it.
+- **Ollama Cloud direct:** no local Ollama needed, and `[cloud]` with
+  `claude-consultants config set-cloud` chooses the route.
+- **Commit secret gate:** gitleaks plus a search for this host's own secrets
+  on every commit, and a scan of every push in CI.
+
 ### Changed
 
-- **The mail badge appears within ~15 s instead of ~50 s.** The unread
-  count is cached for 5 s (was 20; `MAIL_CACHE_SECONDS`, also the
-  `--mail-ttl` default now), and the documented `refreshInterval` is 10
-  (was 30). A working session reads its own mail within a turn or two,
-  so the badge is only visible between arrival and that read: opencoti
-  read #763 66 s after it arrived, before the old badge had reliably
-  shown it. The lookup measures ~120 ms.
-- **The process guard's self-match message covers `! pgrep`.** It said
-  "the test is always true: a `while` on it never ends", which only
-  describes `while pgrep`. opencoti's Monitor waited with
-  `until [ -s out ] || ! pgrep -f "gate.sh kld …"` over ssh, where the
-  negated test is the crash check, and it is that check which can never
-  fire. The message now names both polarities.
+- **An inject now binds the final answer.** Every role is told so. An auditor
+  checks the answer against each inject, a violation gets one re-ask, and
+  what the delivered answer still breaks, or what could not be checked, is
+  listed under `## Operator directives not met`.
+- **Compaction was rebuilt:** same-model folds with a retrospective and
+  reviewers, flows sized by the window, and a citation key checked against
+  the calls actually made.
+- **Budgets come from the model:** the trained context is the default window,
+  grounding is sized by the smallest role window, and output and thinking are
+  sized per role and per backend.
+- **Guards are always on:** reasoning-loop, tool-loop, mistake limit, struggle
+  supervisor and silent-turn detection, with thresholds fitted by replaying
+  recorded lanes.
+- The mail badge appears within ~15 s instead of ~50 s.
+- The process guard's self-match message covers `! pgrep`.
+
+### Fixed
+
+- **A stream that ended with no end signal could read as a finished answer.**
+  Both stream readers now retry it as a transport failure. An audit of 12,683
+  recorded calls found no text lost this way.
+- **A warm follow-up's synthesizer never received injects.**
+- **`state` previews now say they are partial** (`… [preview: 300 of N chars]`).
+- **Follow-up critics' verdicts were dropped**, so a follow-up never rerouted.
+- **glm-5.3-flash reasoning written into the answer** is moved to thinking.
 
 ## [1.20.2] — 2026-10-04
 
@@ -10056,7 +10114,8 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.20.2...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/mann1x/claude-hooks/compare/v1.20.2...v2.0.0
 [1.20.2]: https://github.com/mann1x/claude-hooks/compare/v1.20.1...v1.20.2
 [1.20.1]: https://github.com/mann1x/claude-hooks/compare/v1.20.0...v1.20.1
 [1.20.0]: https://github.com/mann1x/claude-hooks/compare/v1.19.0...v1.20.0
