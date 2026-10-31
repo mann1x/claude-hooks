@@ -1726,6 +1726,12 @@ the researcher to also check the staging branch" or "remind the
 synthesizer to call out latency cost". ``--role any`` is the safe
 default if you don't know which role should see it.
 
+An inject **binds**: its instructions are orders, not context. An auditor
+holds the final answer to each one, a violation gets one re-ask, and
+whatever the delivered answer still breaks (or could not be checked) is
+listed under `## Operator directives not met`. Read that section before
+accepting. A fact stated in an inject is not thereby verified.
+
 ### control — mutate runtime_control mid-flight
 
 ```

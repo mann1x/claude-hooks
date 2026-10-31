@@ -189,7 +189,10 @@ class TestSynthesizerNode:
         synthesizer_node(_state(additional_context=[
             Doc(role="synthesizer", text="brief", ts=0.0, source="adversary")]),
             chat_client=c, model="m")
-        assert len(c.calls) == 2
+        from consultants.engine.directives import AUDIT_SYSTEM
+        synth = [p for p in c.calls
+                 if AUDIT_SYSTEM not in p["messages"][0]["content"]]
+        assert len(synth) == 2
         assert "COMMANDS THE LANES RAN" not in json.dumps(c.calls[0])
 
 

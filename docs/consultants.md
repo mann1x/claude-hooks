@@ -1002,6 +1002,12 @@ by subscribing to `events`, reading `state` (each lane's
 `research_previews` and the `critique`), `inject`-ing the brief, and
 `adversary-ack`-ing — see the SKILL's **Dynamic adversary** subsection.
 
+An inject binds. Every role is told so in its prompt, and the final answer
+is audited against each one (`synthesizer:directive-audit`): a violation gets
+one re-ask, and what the delivered answer still breaks, or what could not be
+checked, is listed under `## Operator directives not met`. A fact stated in
+an inject is not thereby verified.
+
 Where a checkpoint brief goes (the inject reply's `routed`):
 
 | brief for | round left | routed | what runs |

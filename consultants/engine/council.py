@@ -792,8 +792,11 @@ def _additional_context_block(additional_context) -> str:
     """
     if not additional_context:
         return ""
+    from consultants.engine import directives
     lines = ["ADDITIONAL CONTEXT (injected after session start, "
              "in order received):"]
+    if directives.directives_of(additional_context):
+        lines.append(directives.BINDING_NOTE)
     for i, doc in enumerate(additional_context, start=1):
         text = getattr(doc, "text", "") or ""
         lines.append(f"{i}. {text.strip()}")
@@ -4249,6 +4252,59 @@ def _unverified_revision(chat_client, model, msgs, text, *, state, think,
     return text, rpt + apt, rct + act
 
 
+def _directive_audit(chat_client, model, text, docs, *, state, recorder
+                     ) -> tuple:
+    """One auditor call holding ``text`` to the operator's directives.
+    A failed call checks nothing and says so. Returns ``(audit, prompt
+    tokens, completion tokens)``; recorded as
+    ``synthesizer:directive-audit``."""
+    from consultants.engine import directives
+    try:
+        reply, p, c = _single_shot(
+            chat_client, model, [
+                {"role": "system", "content": directives.AUDIT_SYSTEM},
+                {"role": "user",
+                 "content": directives.audit_prompt(docs, text)}],
+            think=False, recorder=recorder,
+            role="synthesizer:directive-audit", round=1,
+            knobs=_budget_knobs(state, "synthesizer", model),
+            sampling=_instance_sampling(state, "synthesizer", model,
+                                        chat_client))
+    except Exception:
+        log.exception("directive audit failed; directives left unchecked")
+        return directives.unchecked(len(docs)), 0, 0
+    return directives.parse_audit(reply, len(docs)), p, c
+
+
+def _directive_revision(chat_client, model, msgs, text, docs, *, state, think,
+                        recorder, tool_specs, tool_executor, cwd
+                        ) -> tuple[str, int, int]:
+    """One re-ask of an answer that breaks an operator directive, before
+    the evidence bar, so the revision goes through every later audit."""
+    from consultants.engine import directives
+    audit, pt, ct = _directive_audit(chat_client, model, text, docs,
+                                     state=state, recorder=recorder)
+    if not audit.violated:
+        return text, pt, ct
+    try:
+        revised, rpt, rct = _role_turn(
+            chat_client, model, list(msgs) + [
+                {"role": "assistant", "content": text},
+                harness_note(directives.revision_note(audit, docs))],
+            think=_think_for(state, "synthesizer", model, think),
+            recorder=recorder, role="synthesizer", round=1,
+            tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
+            knobs=_budget_knobs(state, "synthesizer", model),
+            sampling=_instance_sampling(state, "synthesizer", model,
+                                        chat_client))
+        pt, ct = pt + rpt, ct + rct
+        if revised and revised.strip():
+            text = revised
+    except Exception:
+        log.exception("directive revision failed; keeping the first answer")
+    return text, pt, ct
+
+
 def _after_audits(chat_client, model, text, rows, patches, *, state,
                   recorder) -> tuple[str, int, int]:
     """The claim audit, then the patch-comment audit."""
@@ -4469,6 +4525,10 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
             )
         if wrap_up:
             user_parts.append("\n" + WRAP_UP_SYNTHESIS_NOTE)
+        _extra = _additional_context_block(
+            _additional_context_for(state, "synthesizer"))
+        if _extra:
+            user_parts.append("\n" + _extra)
         user_parts.append(
             "\nWrite the answer to the follow-up question. Reuse "
             "the prior reasoning above where it still applies; only "
@@ -4548,6 +4608,9 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                     str(msgs[-1].get("content") or "") + "\n\n"
                     + held_patches.held_block(_patches, _ovl))}]
     msgs = _with_decision_advice(msgs, state, "synthesizer", recorder)
+    from consultants.engine import directives
+    _binding = directives.directives_of(
+        _additional_context_for(state, "synthesizer"))
     models_to_try: list[str] = [model] + list(fallback_models or [])
     t0 = time.monotonic()
     text: Optional[str] = None
@@ -4562,6 +4625,12 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                 cwd=cwd, knobs=_budget_knobs(state, "synthesizer", try_model),
             sampling=_instance_sampling(state, "synthesizer", try_model, chat_client),
             )
+            if _binding:
+                text, dpt, dct = _directive_revision(
+                    chat_client, try_model, msgs, text, _binding, state=state,
+                    think=think, recorder=recorder, tool_specs=tool_specs,
+                    tool_executor=tool_executor, cwd=cwd)
+                pt, ct = pt + dpt, ct + dct
             if evidence_mode:
                 text, rpt, rct = _unverified_revision(
                     chat_client, try_model, msgs, text, state=state,
@@ -4641,6 +4710,13 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
     # so the CONFIDENCE line never reaches the answer.
     text, _self_conf = _extract_confidence(text)
     _emit_confidence(_self_conf, source="synthesizer", state=state)
+    if _binding:
+        # On the delivered text: the re-ask and every audit are behind it.
+        _audit, _dpt, _dct = _directive_audit(
+            chat_client, try_model, text, _binding, state=state,
+            recorder=recorder)
+        pt, ct = pt + _dpt, ct + _dct
+        text = directives.enforce(text, _audit, _binding)
     # 2026-05-18: post-synthesis citation lint. The 2026-05-18 first
     # M14 consult caught two fabrication classes in the synthesizer's
     # output — an entirely fake filename relayed forward from a
