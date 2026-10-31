@@ -52,7 +52,18 @@ VALID_INJECT_ROLES: tuple[str, ...] = (
     "planner", "researcher", "critic", "synthesizer", "any",
 )
 
-VALID_TOOL_PERMISSION_VALUES: tuple[str, ...] = ("allow", "deny", "ask")
+# The tool gate's four-level ladder (``claude_hooks.tool_registry.policy``).
+# The original ``allow`` / ``ask`` spellings are still accepted and stored
+# as their ladder level, so what this validates is exactly what the gate
+# enforces: validating one enum while the gate read another turned an
+# operator's ``allow`` into a deny.
+VALID_TOOL_PERMISSION_VALUES: tuple[str, ...] = (
+    "auto", "ask_assistant", "ask_human", "deny",
+)
+#: Deprecated spellings -> ladder level (mirrors ``policy.LEGACY_ALIASES``).
+TOOL_PERMISSION_ALIASES: dict[str, str] = {
+    "allow": "auto", "ask": "ask_human",
+}
 
 VALID_STRICTNESS_VALUES: tuple[str, ...] = (
     "lax", "normal", "strict", "adversarial",
@@ -185,13 +196,19 @@ INJECT_STATUS_FAILED = "failed"
 #                            research round before re-synthesizing.
 #                            (Realized by the gated rewind follow-up;
 #                            the safe-layer path does not emit this.)
+#   rewound_extra_round    — a researcher / critic brief at the
+#                            adversary checkpoint with the round cap
+#                            spent: the cap is raised by exactly one
+#                            (once per council) and the run rewinds.
 #   best_effort_cap_reached — synthesis-phase inject but the reroute
-#                            budget was exhausted; applied in place to
-#                            the synthesizer instead of rewinding.
+#                            budget was exhausted: no rewind, and the
+#                            brief reaches the synthesizer only
+#                            (labelled with the role it named).
 #   queued                 — still pending (not yet routed).
 ROUTED_IN_PLACE = "in_place"
 ROUTED_REWOUND_TO_RESEARCHER = "rewound_to_researcher"
 ROUTED_BEST_EFFORT_CAP_REACHED = "best_effort_cap_reached"
+ROUTED_REWOUND_EXTRA_ROUND = "rewound_extra_round"
 ROUTED_QUEUED = "queued"
 
 
@@ -346,9 +363,10 @@ def build_runtime_control_delta(
     - ``adversarial_focus`` (str; ``""`` clears) — M4 free-text attack
       brief naming the claims the critic should hunt to break.
     - ``enabled_roles`` (list[str]) — subset of the project's roles.
-    - ``tool_permissions`` (dict[str, "allow" / "deny" / "ask"]).
+    - ``tool_permissions`` (dict[str, "auto" / "ask_assistant" /
+      "ask_human" / "deny"]; the deprecated ``"allow"`` and ``"ask"``
+      are stored as ``"auto"`` and ``"ask_human"``).
     - ``review_before_synthesis`` (bool) — toggle static interrupt.
-    - ``interrupt_on_low_confidence`` (bool) — toggle dynamic interrupt.
 
     The returned shape::
 
@@ -419,18 +437,22 @@ def build_runtime_control_delta(
         elif k == "tool_permissions":
             if not isinstance(v, dict):
                 raise ControlInputError(
-                    "tool_permissions must be a dict of "
-                    "tool_name -> 'allow'|'deny'|'ask'"
+                    "tool_permissions must be a dict of tool_name -> "
+                    "'auto'|'ask_assistant'|'ask_human'|'deny'"
                 )
+            perms: dict[str, str] = {}
             for tn, perm in v.items():
-                if perm not in VALID_TOOL_PERMISSION_VALUES:
+                level = (TOOL_PERMISSION_ALIASES.get(perm, perm)
+                         if isinstance(perm, str) else perm)
+                if level not in VALID_TOOL_PERMISSION_VALUES:
                     raise ControlInputError(
                         f"tool_permissions[{tn!r}] must be one of "
-                        f"{VALID_TOOL_PERMISSION_VALUES}; got {perm!r}"
+                        f"{VALID_TOOL_PERMISSION_VALUES} (or the "
+                        f"deprecated 'allow' / 'ask'); got {perm!r}"
                     )
-            out[k] = dict(v)
-        elif k in ("review_before_synthesis",
-                   "interrupt_on_low_confidence"):
+                perms[tn] = level
+            out[k] = perms
+        elif k == "review_before_synthesis":
             out[k] = bool(v)
         else:
             raise ControlInputError(
@@ -450,11 +472,9 @@ def build_interrupt_delta(
     """Build the delta for ``POST /interrupt``.
 
     Doesn't actually pause anything — it just flips the
-    ``runtime_control.pause_requested`` flag. The next node that
-    enters consults :func:`consultants.engine.interrupt_policy
-    .should_interrupt_on_user_pause` and, if the flag is set,
-    calls ``langgraph.types.interrupt(...)`` which durably parks
-    execution.
+    ``runtime_control.pause_requested`` flag, the record of the request.
+    The pause itself is out-of-band, ``RunControl.request_pause()`` in
+    ``POST /interrupt``: a running graph never re-reads this channel.
 
     ``reason`` is recorded on the runtime_mutation event so the
     transcript shows why the pause was requested.
@@ -465,6 +485,15 @@ def build_interrupt_delta(
             "pause_requested": True,
             "pause_reason": reason_str,
         }
+    }
+
+
+def clear_interrupt(state: dict) -> dict:
+    """The state delta ``POST /resume`` applies before re-entry: no
+    active interrupt, and the recorded pause request turned off."""
+    return {
+        "interrupt_state": None,
+        "runtime_control": {"pause_requested": False},
     }
 
 
@@ -493,8 +522,7 @@ def build_resume_command(
                      config={"configurable": {"thread_id": sid}})
 
     where the first update clears the ``interrupt_state`` channel
-    so the next-node-entry guard in
-    :func:`should_interrupt_before_synthesis` doesn't re-fire.
+    and the recorded pause request together (:func:`clear_interrupt`).
     """
     return InterruptResume(value=value, decision=decision or "")
 
@@ -537,6 +565,20 @@ def build_cancel_request(
 # State-snapshot summarizer (for GET /state)
 # ============================================================== #
 
+#: ``GET /state`` keeps reports short: the opening of each, and the critique.
+STATE_PREVIEW_CHARS = 300
+STATE_CRITIQUE_CHARS = 4000
+
+
+def _clip(text, n: int):
+    if text is None:
+        return None
+    text = str(text)
+    if len(text) <= n:
+        return text
+    return f"{text[:n]}… [preview: {n} of {len(text)} chars]"
+
+
 def summarize_state_for_get(
     raw: dict[str, Any],
     *,
@@ -575,6 +617,12 @@ def summarize_state_for_get(
             if interrupt_state is not None else None
         ),
         "research_count": len(research),
+        # What a reviewer at the adversary checkpoint is judging: each
+        # lane's report opening and the critic's verdict, short. The
+        # counts alone left a reviewer reading transcript.db by hand.
+        "research_previews": [
+            _clip(r, STATE_PREVIEW_CHARS) for r in research],
+        "critique": _clip(state.get("critique"), STATE_CRITIQUE_CHARS),
         "plan_items_count": len(plan_items),
         "research_rounds_used": int(state.get("research_rounds_used") or 0),
         "critic_reroutes_used": int(state.get("critic_reroutes_used") or 0),
@@ -673,9 +721,11 @@ __all__ = [
     "VALID_INJECT_ROLES",
     "VALID_STRICTNESS_VALUES",
     "VALID_TOOL_PERMISSION_VALUES",
+    "TOOL_PERMISSION_ALIASES",
     "build_cancel_request",
     "build_inject_delta",
     "build_interrupt_delta",
+    "clear_interrupt",
     "build_resume_command",
     "build_runtime_control_delta",
     "classify_phase",

@@ -1135,9 +1135,9 @@ class ToolsTests(StoreHarness):
         self.them = MailboxTools(self.store, alias="osync",
                                  session_id="s-osync", host="solidpc")
 
-    def test_catalog_is_eight_tools(self):
+    def test_catalog_is_nine_tools(self):
         from claude_hooks.mailbox.tools import TOOL_NAMES, tool_catalog
-        self.assertEqual(len(tool_catalog()), 8)
+        self.assertEqual(len(tool_catalog()), 9)
         self.assertEqual({t["name"] for t in tool_catalog()}, set(TOOL_NAMES))
 
     def test_every_tool_declares_a_schema(self):
@@ -1186,6 +1186,23 @@ class ToolsTests(StoreHarness):
         self.me.call("mailbox-sent", {})
         out = self.them.call("mailbox-ack", {"id": 1, "note": "second"})
         self.assertIn("frozen", out)
+
+    def test_ack_takes_ids_as_mailbox_read_does(self):
+        # xollama 2026-10-24: ids='["1882"]' got "KeyError: 'id'".
+        for n in range(2):
+            self.me.call("mailbox-send", {"to": "osync", "subject": f"s{n}",
+                                          "body": "b"})
+        self.them.call("mailbox-read", {"ids": [1, 2]})
+        out = self.them.call("mailbox-ack", {"ids": '["1", "2"]',
+                                             "note": "thanks"})
+        self.assertIn("note on #1", out)
+        self.assertIn("note on #2", out)
+        out = self.them.call("mailbox-ack", {"ids": [1]})
+        self.assertIn("empty one would announce nothing", out)
+        self.assertNotIn("KeyError", out)
+        self.assertIn("Pass id", self.them.call("mailbox-ack",
+                                                {"note": "x"}))
+        self.assertIn("Pass id", self.me.call("mailbox-cancel", {}))
 
     def test_edit_then_refused_after_read(self):
         self.me.call("mailbox-send", {"to": "osync", "subject": "v1",

@@ -17,15 +17,14 @@ from __future__ import annotations
 import unittest
 # Module-level imports so TypedDict forward-ref evaluation (used by
 # langgraph's StateGraph schema introspection) can resolve names
-# like ``Annotated``/``Optional``. Function-local imports don't work
+# like ``Annotated``. Function-local imports don't work
 # here — ``get_type_hints`` uses the schema class's module globals.
-from typing import Annotated, Optional, TypedDict
+from typing import Annotated, TypedDict
 
 
 try:
     from langgraph.checkpoint.memory import InMemorySaver
     from langgraph.graph import StateGraph, START, END
-    from langgraph.types import Command, interrupt
     HAVE_LANGGRAPH = True
 except ImportError:
     HAVE_LANGGRAPH = False
@@ -121,125 +120,3 @@ class TestStaticReviewBeforeSynthesis(unittest.TestCase):
         out2 = graph.invoke(None, config=config)
         self.assertIn("ANSWER", out2["final_answer"])
         self.assertIn("Lead with the bottom line", out2["final_answer"])
-
-
-@unittest.skipUnless(HAVE_LANGGRAPH, "langgraph not installed")
-class TestDynamicInterruptPolicy(unittest.TestCase):
-    """Verify the dynamic ``interrupt()`` flow with a Command resume.
-
-    A node calls ``interrupt(decision.to_payload())`` based on the
-    interrupt_policy module's decision; ``graph.invoke(None,
-    Command(resume=...))`` answers the prompt.
-    """
-
-    def test_dynamic_interrupt_with_command_resume(self):
-        from consultants.engine.interrupt_policy import (
-            should_interrupt_on_low_confidence,
-        )
-
-        class S(TypedDict, total=False):
-            runtime_control: dict
-            confidence: list[float]
-            decision_recorded: Optional[str]
-
-        def gate(state):
-            d = should_interrupt_on_low_confidence(state)
-            if d is None:
-                return {"decision_recorded": "no_interrupt"}
-            # Real node code: dispatch the interrupt and consume
-            # the resume value.
-            answer = interrupt(d.to_payload())
-            return {"decision_recorded": str(answer)}
-
-        sg = StateGraph(S)
-        sg.add_node("gate", gate)
-        sg.add_edge(START, "gate")
-        sg.add_edge("gate", END)
-        checkpointer = InMemorySaver()
-        graph = sg.compile(checkpointer=checkpointer)
-        config = {"configurable": {"thread_id": "csl-test-dynamic"}}
-
-        # Set up a low-confidence state via update_state before
-        # invoke; the gate's first run will pause.
-        initial = {
-            "runtime_control": {"interrupt_on_low_confidence": True,
-                                "confidence_target": 0.7},
-            "confidence": [0.3],
-        }
-        graph.invoke(initial, config=config)
-
-        snap = graph.get_state(config)
-        # The thread should have a pending interrupt on the "gate"
-        # task.
-        self.assertTrue(any(
-            t.interrupts for t in snap.tasks
-        ))
-
-        # Resume with a decision.
-        out2 = graph.invoke(
-            Command(resume="user_chose_proceed"),
-            config=config,
-        )
-        self.assertEqual(out2["decision_recorded"],
-                         "user_chose_proceed")
-
-
-@unittest.skipUnless(HAVE_LANGGRAPH, "langgraph not installed")
-class TestInterruptPolicyPayloadShape(unittest.TestCase):
-    """The policy's payload is what the consumer sees on the
-    ``state.tasks[i].interrupts[0].value`` field.
-
-    Verify the shape contract end-to-end: build a decision, dispatch
-    it through ``interrupt()``, fetch the interrupt value via
-    ``graph.get_state``, and assert it matches what the policy
-    produced.
-    """
-
-    def test_decision_to_payload_round_trips_through_interrupt(self):
-        from consultants.engine.interrupt_policy import (
-            InterruptDecision,
-        )
-
-        class S(TypedDict, total=False):
-            done: bool
-            # The schema must declare ``answer`` so LangGraph's
-            # state-update merger keeps it. Anything not on the
-            # schema is dropped silently — that's where the v0 of
-            # this test failed.
-            answer: dict
-
-        def pause_here(_state):
-            d = InterruptDecision(
-                kind="review", prompt="Approve draft",
-                payload={"draft": "test draft body"},
-            )
-            answer = interrupt(d.to_payload())
-            return {"done": True, "answer": answer}
-
-        sg = StateGraph(S)
-        sg.add_node("p", pause_here)
-        sg.add_edge(START, "p")
-        sg.add_edge("p", END)
-        graph = sg.compile(checkpointer=InMemorySaver())
-        config = {"configurable": {"thread_id": "csl-shape"}}
-
-        graph.invoke({"done": False}, config=config)
-        snap = graph.get_state(config)
-        # Walk to find the interrupt value.
-        interrupts = []
-        for t in snap.tasks:
-            interrupts.extend(t.interrupts)
-        self.assertEqual(len(interrupts), 1)
-        v = interrupts[0].value
-        self.assertEqual(v["kind"], "review")
-        self.assertEqual(v["prompt"], "Approve draft")
-        self.assertEqual(v["payload"], {"draft": "test draft body"})
-
-        # Resume.
-        out = graph.invoke(Command(resume={"approve": True}),
-                            config=config)
-        self.assertEqual(out["answer"], {"approve": True})
-
-
-if __name__ == "__main__":
-    unittest.main()

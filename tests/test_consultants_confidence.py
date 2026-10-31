@@ -1,7 +1,6 @@
 """M0 — latest_confidence: synthesizer + critic now emit a real
 self-confidence signal into ``state['confidence']`` so the
-fully-plumbed-but-dead channel actually fires (interrupt_on_low_confidence,
-xauto escalation, the M2 adversary-checkpoint gate).
+fully-plumbed-but-dead channel actually fires (xauto escalation, the M2 adversary-checkpoint gate).
 
 Covers:
 - ``_extract_confidence`` pure parsing: trailing ``CONFIDENCE: <x>`` line is
@@ -9,8 +8,6 @@ Covers:
 - ``synthesizer_node`` emits the rating into ``confidence`` and the rating
   never leaks into ``final_answer``.
 - ``critic_node`` (single path) emits + strips; decision parsing unaffected.
-- Integration: a low score makes ``should_interrupt_on_low_confidence`` fire;
-  an empty series stays silent (no stall).
 """
 
 from __future__ import annotations
@@ -18,8 +15,6 @@ from __future__ import annotations
 import pytest
 
 from consultants.engine import council
-from consultants.engine import interrupt_policy
-from consultants.engine.state_v2 import latest_confidence
 
 
 # ----------------------- pure parser ----------------------------- #
@@ -123,24 +118,3 @@ class TestCriticConfidence:
         assert out["critic_decision"] == "ready"
         assert out["confidence"] == [pytest.approx(0.91)]
         assert "CONFIDENCE" not in out["critique"]
-
-
-# ----------------------- integration with interrupt -------------- #
-
-class TestLowConfidenceInterrupt:
-    def test_low_score_fires_when_enabled(self):
-        st = _state()
-        st["confidence"] = [0.30]
-        st["runtime_control"] = dict(st.get("runtime_control") or {})
-        st["runtime_control"]["interrupt_on_low_confidence"] = True
-        st["runtime_control"]["confidence_target"] = 0.70
-        assert latest_confidence(st) == pytest.approx(0.30)
-        decision = interrupt_policy.should_interrupt_on_low_confidence(st)
-        assert decision is not None
-
-    def test_empty_series_stays_silent(self):
-        st = _state()
-        st["runtime_control"] = dict(st.get("runtime_control") or {})
-        st["runtime_control"]["interrupt_on_low_confidence"] = True
-        assert latest_confidence(st) is None
-        assert interrupt_policy.should_interrupt_on_low_confidence(st) is None

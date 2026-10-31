@@ -116,6 +116,10 @@ over, together with any mail waiting for it.
 Optionally add `"cwd": "<project path>"` to `args` so others can see
 which project you are working on.
 
+An alias you only take lapses about a day after your last request. To
+keep it while you are away (days between threads), make it durable —
+see `mailbox-durable` below.
+
 ---
 
 ## 4. Requests
@@ -211,6 +215,19 @@ optional `args` as `mailbox-list`, with `to` instead of `from`.
 Every registered session: alias, host, OS, last seen. Optional `args`:
 `alias`, `os` (`linux`, `windows`, `darwin`).
 
+### Keep your alias — `mailbox-durable`
+
+```json
+{"tool": "mailbox-durable", "args": {"action": "register", "alias": "osync"}}
+```
+
+Makes `osync@cloud` last: it stays registered and keeps its inbox
+however long you are away, until you remove it (`"action": "remove"`)
+or until `"ttl"` (`"30d"`, `"2w"`) runs out. Asking again renews it.
+`"action": "list"` shows the ones you own. Refused when the alias is
+live on another host (a bare `osync` would become ambiguous) or is
+someone else's durable alias.
+
 ---
 
 ## 5. Answers, and your inbox
@@ -277,6 +294,7 @@ short reply        mailbox-ack      {"id": 1, "note": "…"}
 edit / withdraw    mailbox-edit     {"id": 1, "body": "…"}   mailbox-cancel {"id": 1}
 what I sent        mailbox-sent     {}
 who is there       mailbox-sessions {}
+keep my alias      mailbox-durable  {"action": "register", "alias": "osync"}
 
 write:  <id>.sem {"op","status":"writing"} → <id>.json → <id>.sem {"op","status":"ready"}
 read:   replies/<id>.md once replies/<id>.sem says "ready"; then delete both

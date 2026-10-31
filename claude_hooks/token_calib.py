@@ -41,7 +41,7 @@ for 78,138 prompt tokens, a ratio of **8.26**. An earlier ceiling of 8
 discarded that observation and every later one, so the ratio stayed
 frozen while the estimate it fed ran 1.7x high.
 
-**Calibration is per model.** The fork keys none of this — its sessions
+**Calibration is per (session, model).** The fork keys none of this — its sessions
 run one model at a time, so a single global ratio describes whatever is
 loaded. The council does not: x-tier fanout runs N models concurrently
 in one process, and gemma4 (262k vocab, measured at 8.26 chars/token on
@@ -49,6 +49,30 @@ serialized JSON) shares nothing useful with a 32k-vocab model. A blended
 ratio would describe neither and would move every time the lane mix
 changed. So every entry point takes a ``model`` and the state is a dict
 keyed by it.
+
+Within one model a second key matters: the *session* — one lane's tool
+loop, one single-shot call and its continuations. The last counted
+request is an anchor for the next estimate of **that** conversation;
+read by a sibling lane on the same model it is a count for a different
+prompt, and the fork measured exactly that contamination
+(``a8d4ae171``, ``4adbd6182``). So a caller that names a ``session``
+gets its own anchor and its own ratio, and the model-level ratio — fed
+by every session of that model — is only the cold-start prior a new
+session reads until it has measured something itself. A caller that
+names no session gets the model-level state, as before.
+
+**Three guards on an observation** (the fork's ``observeRequestTokens``):
+
+* a count larger than the context window is dropped, count and ratio
+  both — measured 166,848 "prompt tokens" against a 131,072 window
+  (``2403f40e8``);
+* a ratio under 1.2 chars/token drops the count too, not only the
+  ratio — a token per character is not a prompt, it is a provider
+  counting something else (138,549 tokens for 138,262 characters,
+  ``c61cb3600``); a ratio over 16 still keeps the count;
+* when reasoning leaves less than 20% of the tokens to the rest of the
+  request (``RESIDUAL_SIGNAL_SHARE``), the anchor is kept but the ratio
+  is not updated: the remainder is too small a signal to divide by.
 
 State is module-global and lock-guarded. The TypeScript original needs
 ``Symbol.for`` to survive a bundler that produces several copies of the
@@ -63,7 +87,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -86,6 +112,23 @@ MAX_OBSERVED_CHARS_PER_TOKEN = 16.0
 #: a measurement.
 OBSERVATION_WEIGHT = 0.3
 
+#: When reasoning leaves less than this share of a request's tokens to
+#: everything else, the remainder is too small to calibrate on: the
+#: anchor is kept, the ratio is not moved (fork ``RESIDUAL_SIGNAL_SHARE``).
+RESIDUAL_SIGNAL_SHARE = 0.2
+
+#: A turn counts as "mostly reasoning" — and may calibrate the reasoning
+#: ratio from its output — only above this share of what it produced
+#: (fork ``MOSTLY_REASONING_SHARE``, ``gateway.ts:52``). At 0.6 a turn
+#: that was 40% tool-call JSON still taught the reasoning ratio.
+MOSTLY_REASONING_SHARE = 0.8
+
+#: Sessions are cheap and short-lived (one per tool loop, one per
+#: single-shot call), and nothing is obliged to release them; the
+#: oldest are dropped beyond this many so a long-lived engine does not
+#: accumulate one record per call it ever made.
+MAX_SESSIONS = 512
+
 #: Reasoning-part type names. The runtime calls it ``reasoning``; Ollama
 #: and the stored transcript call it ``thinking``. A filter that knew
 #: only one would silently do nothing on the other — not a visible
@@ -101,14 +144,20 @@ class _Calibration:
     chars_per_token: Optional[float] = None
     thinking_chars_per_token: Optional[float] = None
     request_tokens: Optional[int] = None
-    output_cap: Optional["OutputCapReport"] = None
-    context_overflow: Optional["ContextOverflowReport"] = None
+    #: The anchor's own measurement: the characters (and the reasoning
+    #: share of them) of the request ``request_tokens`` was counted for.
+    request_chars: Optional[int] = None
+    request_reasoning_chars: int = 0
 
 
 #: One calibration per model. ``""`` is the entry for a caller that
 #: does not name one, which keeps the API usable without making the
 #: unkeyed case silently share a bucket with a real model.
 _states: dict[str, _Calibration] = {}
+
+
+#: One calibration per (session, model), LRU-bounded at MAX_SESSIONS.
+_sessions: "OrderedDict[tuple[str, str], _Calibration]" = OrderedDict()
 
 
 def _for(model: Optional[str]) -> _Calibration:
@@ -119,6 +168,35 @@ def _for(model: Optional[str]) -> _Calibration:
             state = _Calibration()
             _states[key] = state
         return state
+
+
+def _session_for(model: Optional[str],
+                 session: Optional[str]) -> _Calibration:
+    """The session's own state, or the model-level one without a session."""
+    if not session:
+        return _for(model)
+    key = (str(session), model or "")
+    with _lock:
+        state = _sessions.get(key)
+        if state is None:
+            state = _Calibration()
+            _sessions[key] = state
+            while len(_sessions) > MAX_SESSIONS:
+                _sessions.popitem(last=False)
+        else:
+            _sessions.move_to_end(key)
+        return state
+
+
+def release_session(session: str) -> None:
+    """Forget a finished session's anchor and ratios, for every model.
+
+    Optional — the LRU bound is the backstop — but a caller that knows
+    its conversation is over should say so.
+    """
+    with _lock:
+        for key in [k for k in _sessions if k[0] == session]:
+            _sessions.pop(key, None)
 
 
 # --------------------------------------------------------------------- #
@@ -190,63 +268,40 @@ class ContextOverflowReport:
         }
 
 
-def note_output_cap(report: OutputCapReport, model: str = "") -> None:
-    """Record which term capped the reply on the request going out.
-
-    Read rather than consumed, unlike an overflow report: this is a
-    standing fact about the last request, overwritten by the next. A
-    reader asking "was the cap that just truncated this turn the
-    window's?" wants the answer to survive being asked.
-    """
-    _for(model).output_cap = report
-
-
-def last_output_cap(model: str = "") -> Optional[OutputCapReport]:
-    return _for(model).output_cap
-
-
-def note_context_overflow(report: ContextOverflowReport,
-                          model: str = "") -> None:
-    _for(model).context_overflow = report
-
-
-def consume_context_overflow(
-        model: str = "") -> Optional[ContextOverflowReport]:
-    """Take the pending overflow report and clear it.
-
-    Consumed rather than read so a single overflow forces a single
-    compaction: left set, it would force one on every following turn,
-    including the ones the compaction it triggered already made room for.
-    """
-    state = _for(model)
-    with _lock:
-        report = state.context_overflow
-        state.context_overflow = None
-        return report
-
-
 # --------------------------------------------------------------------- #
 # Ratios
 # --------------------------------------------------------------------- #
 
-def chars_per_token(model: str = "") -> float:
+def chars_per_token(model: str = "", session: Optional[str] = None) -> float:
+    """The session's measured ratio, else the model's, else the default."""
+    if session:
+        own = _session_for(model, session).chars_per_token
+        if own:
+            return own
     return _for(model).chars_per_token or CHARS_PER_TOKEN
 
 
-def thinking_chars_per_token(model: str = "") -> float:
+def thinking_chars_per_token(model: str = "",
+                             session: Optional[str] = None) -> float:
+    if session:
+        own = _session_for(model, session).thinking_chars_per_token
+        if own:
+            return own
     return _for(model).thinking_chars_per_token or THINKING_CHARS_PER_TOKEN
 
 
-def estimate_tokens(chars: int, model: str = "") -> int:
+def estimate_tokens(chars: int, model: str = "",
+                    session: Optional[str] = None) -> int:
     if chars <= 0:
         return 0
-    return max(1, int(chars / chars_per_token(model)) + 1)
+    return max(1, int(chars / chars_per_token(model, session)) + 1)
 
 
-def estimate_thinking_tokens(chars: int, model: str = "") -> int:
+def estimate_thinking_tokens(chars: int, model: str = "",
+                             session: Optional[str] = None) -> int:
     if chars <= 0:
         return 0
-    return max(1, int(chars / thinking_chars_per_token(model)) + 1)
+    return max(1, int(chars / thinking_chars_per_token(model, session)) + 1)
 
 
 def _blend(current: Optional[float], ratio: float) -> float:
@@ -256,7 +311,8 @@ def _blend(current: Optional[float], ratio: float) -> float:
 
 
 def observe_thinking_tokens(chars: int, tokens: int,
-                            model: str = "") -> None:
+                            model: str = "",
+                            session: Optional[str] = None) -> None:
     """Calibrate the reasoning ratio from a turn's own output.
 
     The evidence is already in the response: a completed turn carries
@@ -271,58 +327,143 @@ def observe_thinking_tokens(chars: int, tokens: int,
     if not (MIN_OBSERVED_CHARS_PER_TOKEN <= ratio
             <= MAX_OBSERVED_CHARS_PER_TOKEN):
         return
-    state = _for(model)
     with _lock:
-        state.thinking_chars_per_token = _blend(
-            state.thinking_chars_per_token, ratio)
+        for state in _targets(model, session):
+            state.thinking_chars_per_token = _blend(
+                state.thinking_chars_per_token, ratio)
+
+
+def _targets(model: Optional[str],
+             session: Optional[str]) -> list[_Calibration]:
+    """Where a ratio observation lands: the session, and the model-level
+    prior every new session of that model starts from."""
+    if not session:
+        return [_for(model)]
+    return [_session_for(model, session), _for(model)]
 
 
 def observe_request_tokens(chars: int, tokens: int,
                            reasoning_chars: int = 0,
-                           model: str = "") -> None:
+                           model: str = "", *,
+                           session: Optional[str] = None,
+                           context_window: Optional[int] = None) -> None:
     """Record that a request of ``chars`` cost ``tokens`` input tokens.
 
-    The count and the ratio are recorded **independently**, because only
-    one of them can be wrong. ``tokens`` is what the provider counted for
-    the request that just ran; nothing about the character measurement
-    can make that untrue. The ratio pairs it with a character count, and
-    a mismatched pairing is what the bounds reject — so a rejected ratio
-    must not take the count down with it. Keeping them together froze
-    the fork's last-observed count at a value fourteen turns stale while
-    the compaction trigger kept reading it.
+    The fork's ``observeRequestTokens``, step for step:
 
-    With ``reasoning_chars`` known, the ratio describes the *rest* of the
-    request rather than a blend. Charging reasoning at its own rate first
-    and calibrating on what is left is what keeps the two halves of the
-    estimate from both accounting for the same characters.
+    1. a count larger than ``context_window`` is dropped — count and
+       ratio — because no prompt that fits a window costs more than it;
+    2. with ``reasoning_chars`` known, the ratio describes the *rest* of
+       the request: reasoning is charged at its own rate first, so the
+       two halves of the estimate never account for the same characters;
+    3. when that leaves under ``RESIDUAL_SIGNAL_SHARE`` of the tokens to
+       the rest, the count is kept as the anchor and the ratio is not
+       moved;
+    4. a ratio under the floor drops the count as well: a request that
+       cost a token per character was not measured, something else was;
+    5. otherwise the count becomes the anchor, and a ratio over the
+       ceiling is refused while the count stays — ``tokens`` is what the
+       provider counted, and only the pairing with ``chars`` is suspect.
+
+    The anchor (count + the characters it was counted for) lands on the
+    session when one is named, never on the model-level state a sibling
+    lane would read. The ratio lands on both.
     """
     if chars <= 0 or tokens <= 0:
         return
-    state = _for(model)
-    with _lock:
-        state.request_tokens = int(tokens)
-
+    if context_window and context_window > 0 and tokens > context_window:
+        log.debug("token count %d exceeds the %d window; dropped",
+                  tokens, context_window)
+        return
+    tcpt = thinking_chars_per_token(model, session)
     reasoning = max(0, min(int(reasoning_chars or 0), chars))
     ratio = chars / tokens
-    if 0 < reasoning < chars:
-        remaining_tokens = tokens - estimate_thinking_tokens(reasoning, model)
-        if remaining_tokens > 0:
-            ratio = (chars - reasoning) / remaining_tokens
-    if not (MIN_OBSERVED_CHARS_PER_TOKEN <= ratio
-            <= MAX_OBSERVED_CHARS_PER_TOKEN):
+    residual = tokens
+    if reasoning > 0 and tcpt > 0:
+        residual = tokens - math.ceil(reasoning / tcpt)
+        if reasoning < chars and residual > 0:
+            ratio = (chars - reasoning) / residual
+    anchor = _session_for(model, session)
+    if reasoning > 0 and residual < RESIDUAL_SIGNAL_SHARE * tokens:
+        _store_anchor(anchor, chars, tokens, reasoning)
+        return
+    if ratio < MIN_OBSERVED_CHARS_PER_TOKEN:
+        return
+    _store_anchor(anchor, chars, tokens, reasoning)
+    if ratio > MAX_OBSERVED_CHARS_PER_TOKEN:
         return
     with _lock:
-        state.chars_per_token = _blend(state.chars_per_token, ratio)
+        for state in _targets(model, session):
+            state.chars_per_token = _blend(state.chars_per_token, ratio)
 
 
-def last_observed_request_tokens(model: str = "") -> Optional[int]:
+def _store_anchor(state: _Calibration, chars: int, tokens: int,
+                  reasoning: int) -> None:
+    with _lock:
+        state.request_tokens = int(tokens)
+        state.request_chars = int(chars)
+        state.request_reasoning_chars = int(reasoning)
+
+
+def last_observed_request_tokens(model: str = "",
+                                 session: Optional[str] = None
+                                 ) -> Optional[int]:
     """What the last request actually cost, per the provider.
 
     Unlike an estimate this cannot be wrong — it is what was counted —
     but it describes the *previous* request, so a caller trades
     exactness for being one turn behind.
     """
-    return _for(model).request_tokens
+    return _session_for(model, session).request_tokens
+
+
+def anchored_request_tokens(chars: int, reasoning_chars: int = 0,
+                            model: str = "",
+                            session: Optional[str] = None) -> int:
+    """Project the next request's cost from the last one counted.
+
+    The fork's ``anchoredRequestTokens``: a conversation's next request is
+    the last one plus whatever was added since, so its cost is the last
+    count plus the *added* characters at the anchor's own measured ratio
+    — not the whole request re-estimated from an average. Reasoning is
+    split out when either side has any, so a turn that dropped or added
+    a thinking block moves the estimate at the reasoning rate.
+
+    Without an anchor this is the plain split estimate.
+    """
+    reasoning = min(chars, max(0, int(reasoning_chars or 0)))
+    state = _session_for(model, session)
+    anchor_tokens = state.request_tokens
+    anchor_chars = state.request_chars
+    if (not anchor_tokens or not anchor_chars or anchor_tokens <= 0
+            or anchor_chars <= 0):
+        return _plain_split(chars, reasoning, model, session)
+    delta = chars - anchor_chars
+    if delta == 0:
+        blended = anchor_tokens
+    else:
+        blended = max(1, round(anchor_tokens
+                               + delta / (anchor_chars / anchor_tokens)))
+    tcpt = thinking_chars_per_token(model, session)
+    anchor_reasoning = state.request_reasoning_chars or 0
+    if tcpt <= 0 or (anchor_reasoning <= 0 and reasoning <= 0):
+        return blended
+    anchor_content_tokens = anchor_tokens - anchor_reasoning / tcpt
+    anchor_content_chars = anchor_chars - anchor_reasoning
+    if anchor_content_tokens <= 0 or anchor_content_chars <= 0:
+        return blended
+    content_ratio = anchor_content_chars / anchor_content_tokens
+    content_delta = chars - reasoning - anchor_content_chars
+    return max(1, round(anchor_content_tokens + content_delta / content_ratio
+                        + reasoning / tcpt))
+
+
+def _plain_split(chars: int, reasoning: int, model: str,
+                 session: Optional[str]) -> int:
+    if reasoning <= 0:
+        return estimate_tokens(chars, model, session)
+    return (estimate_tokens(chars - reasoning, model, session)
+            + estimate_thinking_tokens(reasoning, model, session))
 
 
 def reset_calibration(model: Optional[str] = None) -> None:
@@ -335,8 +476,11 @@ def reset_calibration(model: Optional[str] = None) -> None:
     with _lock:
         if model is None:
             _states.clear()
+            _sessions.clear()
         else:
             _states.pop(model, None)
+            for key in [k for k in _sessions if k[1] == model]:
+                _sessions.pop(key, None)
 
 
 # --------------------------------------------------------------------- #
@@ -383,22 +527,28 @@ def measure_request_chars(messages: list[dict], *,
 def estimate_request_tokens(messages: list[dict], *,
                             system: Optional[str] = None,
                             tools: Optional[list] = None,
-                            model: str = "") -> int:
-    """Estimate a request's prompt cost, counting reasoning apart."""
+                            model: str = "",
+                            session: Optional[str] = None) -> int:
+    """Estimate a request's prompt cost, counting reasoning apart.
+
+    Tool schemas are part of the request and are counted: the provider's
+    count includes them, so an estimate without them is low by exactly
+    the part that is the same on every call. With a ``session`` the
+    estimate is anchored on that session's last counted request.
+    """
     chars, reasoning = measure_request_chars(
         messages, system=system, tools=tools)
-    if reasoning <= 0:
-        return estimate_tokens(chars, model)
-    return (estimate_tokens(chars - reasoning, model)
-            + estimate_thinking_tokens(reasoning, model))
+    if session:
+        return anchored_request_tokens(chars, reasoning, model, session)
+    return _plain_split(chars, reasoning, model, None)
 
 
 __all__ = [
     "CHARS_PER_TOKEN", "THINKING_CHARS_PER_TOKEN", "REASONING_KEYS",
+    "RESIDUAL_SIGNAL_SHARE", "MOSTLY_REASONING_SHARE", "MAX_SESSIONS",
+    "release_session", "anchored_request_tokens",
     "OUTPUT_CAP_SOURCES", "WINDOW_BOUND_SOURCES",
     "OutputCapReport", "ContextOverflowReport",
-    "note_output_cap", "last_output_cap",
-    "note_context_overflow", "consume_context_overflow",
     "chars_per_token", "thinking_chars_per_token",
     "estimate_tokens", "estimate_thinking_tokens",
     "observe_thinking_tokens", "observe_request_tokens",

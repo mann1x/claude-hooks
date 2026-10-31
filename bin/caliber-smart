@@ -10,7 +10,8 @@
 #
 # Env knobs (all optional):
 #
-#   OLLAMA_HEALTH_URL          default http://192.168.178.2:11433/api/tags
+#   OLLAMA_HEALTH_URL          default <host Ollama URL>/api/tags — the URL
+#                              `python -m claude_hooks.ollama_upstream` resolves
 #   CALIBER_GROUNDING_URL      default http://127.0.0.1:38090/v1
 #   CALIBER_MODEL              default gemma4-98e:cd-q6k-256k
 #   CALIBER_FAST_MODEL         default gemma4-98e:cd-q6k-256k
@@ -22,7 +23,12 @@
 # Exit: runs caliber and forwards its exit code. Never modifies the
 # user's ~/.caliber/config.json — the dispatcher is pure env injection.
 
-: "${OLLAMA_HEALTH_URL:=http://192.168.178.2:11433/api/tags}"
+if [ -z "$OLLAMA_HEALTH_URL" ]; then
+    HERE="$(cd "$(dirname "$0")" && pwd)"
+    . "$HERE/_resolve_python.sh"
+    _upstream="$(cd "$HERE/.." && "$PY" -m claude_hooks.ollama_upstream 2>/dev/null)"
+    OLLAMA_HEALTH_URL="${_upstream:-http://localhost:11434}/api/tags"
+fi
 : "${CALIBER_GROUNDING_URL:=http://127.0.0.1:38090/v1}"
 : "${CALIBER_MODEL:=gemma4-98e:cd-q6k-256k}"
 : "${CALIBER_FAST_MODEL:=gemma4-98e:cd-q6k-256k}"

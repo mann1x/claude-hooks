@@ -158,6 +158,8 @@ def cmd_consult(args, base: str) -> int:
     }
     if args.effort:
         body["effort"] = args.effort
+    if getattr(args, "guards", None):
+        body["guards"] = args.guards
     if getattr(args, "add_dir", None):
         # v1.8+: forward extra allowed roots to the engine. The engine
         # unions them with settings-file auto-discovery and stores the
@@ -165,6 +167,15 @@ def cmd_consult(args, base: str) -> int:
         body["extra_roots"] = list(args.add_dir)
     if getattr(args, "skip_preflight", False):
         body["skip_preflight"] = True
+    if getattr(args, "shell", None) is not None:
+        body["shell"] = _shell_body(args)
+    if getattr(args, "tried", None):
+        # Plan G5: what you already tried, with its verbatim output.
+        try:
+            body["tried"] = json.loads(Path(args.tried).read_text())
+        except (OSError, ValueError) as e:
+            print(f"error: --tried {args.tried}: {e}", file=sys.stderr)
+            return 2
     # --trace / --no-trace are deprecated in v1.1 (the JSONL trace
     # was replaced by the per-session transcript.db). The flag is
     # still accepted but no longer forwarded to the engine; warn
@@ -291,6 +302,8 @@ def cmd_follow_up(args, base: str) -> int:
     body = {"message": args.message}
     if args.effort:
         body["effort"] = args.effort
+    if getattr(args, "guards", None):
+        body["guards"] = args.guards
     if args.trace is True or args.trace is False:
         _warn_trace_deprecated()
     # Always include cwd so cold-path follow-ups (parent evicted /
@@ -305,6 +318,8 @@ def cmd_follow_up(args, base: str) -> int:
         body["extra_roots"] = list(args.add_dir)
     if getattr(args, "skip_preflight", False):
         body["skip_preflight"] = True
+    if getattr(args, "shell", None) is not None:
+        body["shell"] = _shell_body(args)
     # Consultancy review loop: ``--allow-extra [N]`` / ``--force`` is
     # the over-cap approval carrier. In the Claude Code harness the
     # skill re-issues the followup with this flag after the user
@@ -429,6 +444,61 @@ def cmd_list(args, base: str) -> int:
     return 0
 
 
+def cmd_gc(args, base: str) -> int:
+    """Local sweep of a project's council leftovers — does not hit the
+    engine. Removes ``coder-out/`` trees untouched for ``--days`` and
+    empty session subdirectories; never a session's records, never a
+    council still in the in-flight index."""
+    from consultants.server.session_gc import sweep_project
+    cwd = str(Path(args.cwd or os.getcwd()).resolve())
+    actions = sweep_project(cwd, ttl_days=args.days, dry_run=args.dry_run)
+    print(json.dumps({"ok": True, "cwd": cwd, "dry_run": args.dry_run,
+                      "actions": actions}, indent=2))
+    return 0
+
+
+def cmd_findings(args, base: str) -> int:
+    """The project's findings ledger (docs/PLAN-council-memory.md) —
+    local, does not hit the engine. ``settle`` / ``reopen`` take
+    ``--by user|assistant``; a council only records candidates."""
+    from claude_hooks.findings.ledger import FindingNotFound, Ledger
+    from claude_hooks.findings.tools import row, show
+    lg = Ledger.for_cwd(args.cwd)
+    try:
+        if args.action == "list":
+            fs = lg.list(args.status)
+            print("\n".join(row(f) for f in fs) if fs else "No findings.")
+        elif args.action == "show":
+            print(show(lg.read(_need(args.id, "id")), lg))
+        elif args.action == "settle":
+            f = lg.settle(_need(args.id, "id"), _need(args.status, "--status"),
+                          _need(args.reason, "--reason"), by=args.by,
+                          commit=args.commit or "", task=args.task or "")
+            print(f"settled {row(f)}")
+        elif args.action == "reopen":
+            f = lg.reopen(_need(args.id, "id"), _need(args.reason, "--reason"),
+                          by=args.by)
+            print(f"reopened {row(f)}")
+        elif args.action == "merge":
+            f = lg.merge(_need(args.id, "id"), _need(args.into, "--into"),
+                         _need(args.reason, "--reason"), by=args.by)
+            print(f"merged {args.id} into {row(f)}")
+        elif args.action == "note":
+            f = lg.note(_need(args.id, "id"), _need(args.reason, "--reason"))
+            print(f"noted on {f.id}")
+    except FindingNotFound as e:
+        raise CLIError(str(e))
+    except ValueError as e:
+        raise CLIError(f"not done: {e}")
+    return 0
+
+
+def _need(value, name: str) -> str:
+    if not value:
+        raise CLIError(f"{name} is required here")
+    return value
+
+
 def cmd_show(args, base: str) -> int:
     """Local read of a session's summary.md — does not hit the
     engine. Useful when the service is down.
@@ -454,8 +524,57 @@ def cmd_show(args, base: str) -> int:
         "metadata": (json.loads(metadata_path.read_text(encoding="utf-8"))
                      if metadata_path.exists() else None),
     }
+    if out["metadata"] and out["metadata"].get("decision"):
+        # Plan H: the decision model's accept / followup / research
+        # recommendation, for the review loop.
+        out["decision"] = out["metadata"]["decision"]
+    samplers = _session_samplers(sdir / storage.TRANSCRIPT_DB_FILENAME)
+    if samplers:
+        out["samplers"] = samplers
+    lanes = _session_lane_stops(sdir / storage.TRANSCRIPT_DB_FILENAME)
+    if lanes:
+        out["lanes"] = lanes
     print(json.dumps(out, indent=2))
     return 0
+
+
+def _session_lane_stops(db_path: Path) -> list[dict]:
+    """How each node ended (plan D7); see
+    :func:`consultants.engine.retry_lanes.lane_stops`."""
+    from consultants.engine.retry_lanes import lane_stops
+    return lane_stops(db_path)
+
+
+def _session_samplers(db_path: Path) -> list[dict]:
+    """The realized seed / temperature per (role, round, lane, model),
+    from the requests the run sent (plan B4). Empty when the session has
+    no transcript.db or sent none."""
+    if not db_path.exists():
+        return []
+    import sqlite3
+    seen: dict = {}
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                "SELECT role, round, lane_idx, model, request_json FROM events "
+                "WHERE kind = 'llm_call' ORDER BY event_id").fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return []
+    for role, rnd, lane, model, req in rows:
+        try:
+            body = json.loads(req or "{}")
+        except ValueError:
+            continue
+        opts = body.get("options") if isinstance(body.get("options"), dict) else body
+        picked = {k: opts[k] for k in ("seed", "temperature") if k in opts}
+        if picked:
+            seen.setdefault((role, rnd, lane, model),
+                            {"role": role, "round": rnd, "lane_idx": lane,
+                             "model": model, **picked})
+    return list(seen.values())
 
 
 # Whitelist of WHERE-clause columns acceptable from --filter. Anything
@@ -571,6 +690,27 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
             "mode": cfg.service.mode,
             "http_port": cfg.service.http_port,
         },
+        "protocol": {"typed": cfg.protocol.typed},
+        "guards": {"profile": cfg.guards.profile,
+                   "roles": dict(cfg.guards.roles)},
+        "decision": {k: getattr(cfg.decision, k) for k in (
+            "enabled", "url", "model", "key_file", "floor",
+            "high_stakes_floor", "timeout_s", "seams")},
+        # Plan B: only the keys set; unset ones use the shipped defaults.
+        "budget": dict(cfg.budget),
+        "sampling": dict(cfg.sampling),
+        "compaction": dict(cfg.compaction),
+        # Named chat servers roles use as ``@name`` / ``@name/model``.
+        # The key is never printed, only whether one is set.
+        "endpoints": {
+            n: {"url": e.url, "backend": e.backend, "model": e.model,
+                "api_key_set": bool(e.api_key), "key_file": e.key_file,
+                "window": e.window}
+            for n, e in sorted(cfg.endpoints.items())
+        },
+        # Where Ollama Cloud models run: direct = ollama.com itself.
+        "cloud": {"route": cfg.cloud.route, "url": cfg.cloud.url,
+                  "key_file": cfg.cloud.key_file},
         "smart_start": {
             "enabled": bool(smart_block.get("enabled", False)),
             "idle_timeout_seconds": int(
@@ -590,6 +730,12 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
                 # uses presence to decide whether to render the
                 # extras list.
                 "extra_models": list(cfg.roles[r].extra_models),
+                "think": cc.role_think(cfg, r),
+                "budget": dict(cfg.roles[r].budget),
+                "sampling": dict(cfg.roles[r].sampling),
+                "compaction": dict(cfg.roles[r].compaction),
+                "models": {m: dict(v) for m, v
+                           in cfg.roles[r].model_overrides.items()},
                 # The coder routes per language. The skill's status
                 # block renders `coder.default_route` and each
                 # per-language entry from THIS output, so leaving them
@@ -616,6 +762,9 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
             "all_roles": cfg.tools.all_roles,
             "default_level": cfg.tools.default_level,
             "permissions": dict(cfg.tools.permissions),
+            # Plan E: what `config set-shell` mutates.
+            "shell": {k: (list(v) if isinstance(v, list) else v)
+                      for k, v in vars(cfg.tools.shell).items()},
         },
         # M8 + M14 (#220): expose the cross-session store block so
         # `config show` reveals the same knobs that `set-store{,-ttl,
@@ -781,6 +930,17 @@ def cmd_config_set_service_mode(args, base: str) -> int:
     return _emit_config(cfg, args, follow_up=(
         "Run `python install.py` to install/uninstall the systemd "
         "unit, then restart `claude-hooks-daemon`."))
+
+
+def cmd_config_set_dashboard_host(args, base: str) -> int:
+    try:
+        cfg = cc.set_dashboard_host(args.host, **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args, follow_up=(
+        "Restart the engine (`python scripts/deploy.py`) for the listener "
+        "to change. The LAN gets the dashboard only: every other route "
+        "answers 403 to a client that is not on loopback."))
 
 
 def cmd_config_set_override_user_global(args, base: str) -> int:
@@ -956,15 +1116,28 @@ def cmd_config_set_store_distillation(args, base: str) -> int:
     return _emit_config(cfg, args)
 
 
+def cmd_account(args, base: str) -> int:
+    """The Ollama account behind the council: plan, and per cloud model
+    the window, max output and thinking values the service publishes,
+    with a flag when the plan does not cover a model. Read through the
+    server's own ``/api/me`` and model recommendations, so no key is
+    needed here."""
+    from claude_hooks import ollama_account
+    from consultants.server.runner import default_ollama_url
+    upstream = (args.ollama_url or default_ollama_url()).rstrip("/")
+    st = ollama_account.status(upstream, models=list(args.model or []) or None)
+    if not st["account"].get("reachable"):
+        raise CLIError(f"Could not read the account through {upstream}")
+    print(json.dumps({"ok": True, **st}, indent=2))
+    return 0
+
+
 def cmd_config_list_models(args, base: str) -> int:
     """Proxy /api/tags from the configured Ollama upstream and filter
     to tools-capable models. The skill uses this to populate the
     AskUserQuestion options."""
-    upstream = (
-        os.environ.get("CALIBER_GROUNDING_UPSTREAM")
-        or os.environ.get("OLLAMA_HOST")
-        or "http://192.168.178.2:11433"
-    )
+    from claude_hooks import ollama_upstream
+    upstream = ollama_upstream.url()
     try:
         with urllib.request.urlopen(f"{upstream}/api/tags",
                                     timeout=10.0) as resp:
@@ -1155,6 +1328,360 @@ def _add_scope_args(p) -> None:
                    help="Force the user-global config, ignoring any active "
                         "per-project file.")
     p.add_argument("--cwd", help="Project root (default: current dir).")
+
+
+def cmd_config_set_endpoint(args, base: str) -> int:
+    try:
+        cfg = cc.set_endpoint(args.name, url=args.url, backend=args.backend,
+                              model=args.model, api_key=args.api_key,
+                              key_file=args.key_file,
+                              window=args.window,
+                              **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_config_set_protocol(args, base: str) -> int:
+    typed = None
+    if args.typed is not None:
+        typed = args.typed.lower() in ("on", "true", "yes", "1")
+    try:
+        cfg = cc.set_protocol(typed=typed, **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_config_set_guards(args, base: str) -> int:
+    try:
+        cfg = cc.set_guards(profile=args.profile, role=args.role,
+                            **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def _shell_body(args):
+    """``--shell`` as the request's ``shell`` value; ``--write-scope``
+    paths are made absolute against the run's cwd."""
+    scopes = getattr(args, "write_scope", None)
+    if not scopes or args.shell is False:
+        return args.shell
+    if args.shell != "write":
+        raise CLIError("--write-scope names what --shell write may change; "
+                       "pass --shell write", exit_code=2)
+    base = Path(getattr(args, "cwd", None) or os.getcwd())
+    return {"mode": "write",
+            "scopes": [str((base / s).resolve()) for s in scopes]}
+
+
+def _add_shell_args(p) -> None:
+    g = p.add_mutually_exclusive_group()
+    g.add_argument(
+        "--shell", nargs="?", const="read", choices=("read", "write"),
+        default=None,
+        help="Give the researcher and tool_executor lanes a sandboxed "
+             "run_command (plan E): the project read-only at its real "
+             "path, a private /scratch, no network, limits on time, memory "
+             "and processes. On a follow-up it stays on for the rest of "
+             "the consultancy. Refused, before the run starts, on a host "
+             "that cannot sandbox it.")
+    g.add_argument(
+        "--no-shell", dest="shell", action="store_false",
+        help="No shell for this run (and, on a follow-up, the rest of the "
+             "consultancy), even with [tools.shell] default = \"always\".")
+    p.add_argument(
+        "--write-scope", action="append", default=None, metavar="PATH",
+        help="With --shell write: the only directories the lanes may "
+             "change (repeatable). Each lane gets a reflink clone of them "
+             "at their real paths, the rest stays read-only — the way to "
+             "give a writable view of a tree that is not a git repo, or "
+             "of a small part of a huge one.")
+
+
+def cmd_config_set_shell(args, base: str) -> int:
+    values: dict = {}
+    for k in ("default", "mode", "net", "backend", "timeout_s",
+              "max_timeout_s", "memory_mib", "pids", "cpu_pct",
+              "lane_disk_gib", "free_floor_gib", "free_floor_pct",
+              "held_ttl_days"):
+        v = getattr(args, k, None)
+        if v is not None:
+            values[k] = v
+    if args.clear_ro_binds or args.ro_bind:
+        base_binds = [] if args.clear_ro_binds else \
+            list(cc.load_config(cwd=Path(os.getcwd())).tools.shell.ro_binds)
+        values["ro_binds"] = base_binds + [str(Path(b).expanduser())
+                                           for b in args.ro_bind]
+    try:
+        cfg = cc.set_shell(values=values, reset=bool(args.reset),
+                           **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def _session_views(args):
+    from claude_hooks.sandbox.views import session_views
+    cwd = Path(args.cwd or os.getcwd()).resolve()
+    v = session_views(sid=args.sid, cwd=str(cwd))
+    if v is None or not v.state_path.exists():
+        raise CLIError(f"no sandbox views for {args.sid} under {cwd} (write "
+                       f"mode keeps them in .claude-hooks/consultants/"
+                       f"{args.sid}/sandbox.json)", exit_code=1)
+    return v
+
+
+def cmd_changes(args, base: str) -> int:
+    """``changes <sid>``: what each write-mode lane changed."""
+    v = _session_views(args)
+    lanes = {k: r for k, r in v.lanes().items()
+             if not args.lane or k == args.lane}
+    if args.json:
+        print(json.dumps({"sid": args.sid, "repo": v.repo, "lanes": lanes},
+                         indent=2))
+        return 0
+    if not lanes:
+        print(f"{args.sid}: no lane {args.lane!r}" if args.lane
+              else f"{args.sid}: no lanes")
+        return 1 if args.lane else 0
+    for lane, rec in sorted(lanes.items()):
+        files = rec.get("files") or []
+        print(f"lane {lane}: {rec.get('state')}, {len(files)} file(s)"
+              + (f", patch {rec['patch']}" if rec.get("patch") else ""))
+        for f in files:
+            print(f"  {f['status']} {f['path']} (+{f['added']}/-{f['removed']})")
+        if args.diff and rec.get("patch") and os.path.exists(rec["patch"]):
+            print(Path(rec["patch"]).read_text(encoding="utf-8"))
+    return 0
+
+
+def cmd_apply(args, base: str) -> int:
+    """``apply <sid> --lane L``: apply a held patch to the user's tree."""
+    from claude_hooks.sandbox.views import ViewError
+    v = _session_views(args)
+    try:
+        print(f"lane {args.lane}: " + v.apply(args.lane, dry_run=args.dry_run,
+                                             three_way=args.three_way))
+    except ViewError as e:
+        raise CLIError(str(e), exit_code=1) from None
+    return 0
+
+
+def cmd_discard(args, base: str) -> int:
+    """``discard <sid> --lane L | --all``: drop held changes."""
+    from claude_hooks.sandbox.views import ViewError
+    v = _session_views(args)
+    names = list(v.lanes()) if args.all else [args.lane]
+    if not args.all and not args.lane:
+        raise CLIError("name --lane L or --all", exit_code=2)
+    try:
+        for n in names:
+            print(f"lane {n}: {v.discard(n).get('state')}")
+    except ViewError as e:
+        raise CLIError(str(e), exit_code=1) from None
+    return 0
+
+
+def cmd_sandbox(args, base: str) -> int:
+    """``sandbox ls | gc``: every write view on this host."""
+    from claude_hooks.sandbox import views
+    if args.action == "ls":
+        rows = views.registered()
+        if args.json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        if not rows:
+            print("no live or held sandbox views")
+        for r in rows:
+            lanes = ", ".join(f"{k}={v}" for k, v in sorted(
+                (r.get("lanes") or {}).items()))
+            age = (time.time() - float(r.get("updated_at") or time.time())) / 3600
+            print(f"{r.get('sid')}  {r.get('repo')}  {lanes}  ({age:.1f} h ago)")
+        return 0
+    from consultants.server import inflight
+    ttl = cc.load_config(cwd=Path(os.getcwd())).tools.shell.held_ttl_days
+    did = views.sweep(live_sids={r.get("sid") for r in inflight.load()},
+                      held_ttl_days=ttl, dry_run=args.dry_run)
+    for d in did:
+        print(("would " if args.dry_run else "") + d)
+    if not did:
+        print("nothing to do")
+    return 0
+
+
+def cmd_shell_preflight(args, base: str) -> int:
+    """``shell-preflight``: can this host sandbox a council shell, and
+    which layers is it made of. Runs a real (trivial) sandboxed command."""
+    from claude_hooks.sandbox import backend_for
+    cfg = cc.load_config(cwd=Path(args.cwd or os.getcwd()))
+    pre = backend_for(cfg.tools.shell.backend).preflight(refresh=True)
+    if args.json:
+        print(json.dumps({"backend": pre.backend, "ok": pre.ok,
+                          "layers": pre.layers, "missing": pre.missing,
+                          "detail": pre.detail,
+                          "default": cfg.tools.shell.default}, indent=2))
+    else:
+        print(pre.reason())
+        for k, v in pre.layers.items():
+            print(f"  {k:10s} {v}")
+        print(f"[tools.shell] default = {cfg.tools.shell.default}")
+    return 0 if pre.ok else 1
+
+
+def cmd_config_set_escalation(args, base: str) -> int:
+    try:
+        cfg = cc.set_escalation(model=args.model, max_per_council=args.max,
+                                **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_config_set_cross_examination(args, base: str) -> int:
+    state = {"on": True, "off": False}.get(args.state, args.state)
+    cfg = cc.set_cross_examination(enabled=state,
+                                   **_resolve_active_scope(args))
+    return _emit_config(cfg, args)
+
+
+def cmd_config_set_cloud(args, base: str) -> int:
+    try:
+        cfg = cc.set_cloud(route=args.route, url=args.url,
+                           key_file=args.key_file,
+                           **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_config_set_polykv(args, base: str) -> int:
+    try:
+        cfg = cc.set_polykv(
+            enabled=None if args.state is None else args.state == "on",
+            mode=args.mode, layout=args.layout,
+            **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_config_set_xauto_retry(args, base: str) -> int:
+    cfg = cc.set_xauto_retry(enabled=args.state == "on",
+                             **_resolve_active_scope(args))
+    return _emit_config(cfg, args)
+
+
+def cmd_config_set_decision(args, base: str) -> int:
+    enabled = None
+    if args.enabled is not None:
+        enabled = args.enabled == "on"
+    try:
+        cfg = cc.set_decision(
+            enabled=enabled, url=args.url, model=args.model,
+            key_file=args.key_file, floor=args.floor,
+            high_stakes_floor=args.high_stakes_floor,
+            timeout_s=args.timeout_s, seams=args.seams,
+            shadow=args.shadow, reset=args.reset,
+            **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_decision_models(args, base: str) -> int:
+    """The decision models the configured (or given) endpoint serves."""
+    from claude_hooks import decision_client as dc
+    cfg = cc.load_config(Path(args.cwd or os.getcwd()).resolve())
+    d = cfg.decision
+    ep = dc.Endpoint(base_url=args.url or d.url or dc.DEFAULT_BASE_URL,
+                     model=d.model, key_file=d.key_file)
+    try:
+        models = dc.list_models(ep)
+    except dc.DecisionError as e:
+        raise CLIError(str(e), exit_code=1) from None
+    print(json.dumps({"ok": True, "url": dc.routes(ep.base_url).systemone,
+                      "models": models}, indent=2))
+    return 0
+
+
+def cmd_config_set_budget(args, base: str) -> int:
+    values: dict = {}
+    for key in ("output_ceiling", "output_window_share", "reserve_min",
+                "reserve_share", "num_ctx", "announce", "trigger_ratio",
+                "output_room_min"):
+        v = getattr(args, key, None)
+        if v is not None:
+            values[key] = v
+    if not values and not args.clear:
+        raise CLIError("set-budget: name at least one setting or --clear KEY",
+                       exit_code=2)
+    try:
+        cfg = cc.set_budget(values, clear=args.clear, role=args.role,
+                            model=args.model, **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_config_set_sampling(args, base: str) -> int:
+    values: dict = {}
+    for key in ("seed", "temperature", "temperature_range_pct"):
+        v = getattr(args, key, None)
+        if v is not None:
+            values[key] = v
+    if not values and not args.clear:
+        raise CLIError("set-sampling: name at least one setting or --clear KEY",
+                       exit_code=2)
+    try:
+        cfg = cc.set_sampling(values, clear=args.clear, role=args.role,
+                              model=args.model, **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+_COMPACTION_ARGS = ("flow", "placement", "review", "target_share",
+                    "writer_attempts", "ledger", "tool_result_max_chars",
+                    "file_result_max_chars", "stale_read_share",
+                    "reasoning_replay", "continuation")
+
+
+def cmd_config_set_compaction(args, base: str) -> int:
+    values: dict = {}
+    for key in _COMPACTION_ARGS:
+        v = getattr(args, key, None)
+        if v is not None:
+            values[key] = v
+    if not values and not args.clear:
+        raise CLIError("set-compaction: name at least one setting or "
+                       "--clear KEY", exit_code=2)
+    try:
+        cfg = cc.set_compaction(values, clear=args.clear, role=args.role,
+                                model=args.model, **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_config_set_think(args, base: str) -> int:
+    if args.value is None and not args.clear:
+        raise CLIError("set-think: give a value or --clear", exit_code=2)
+    try:
+        cfg = cc.set_think(args.role, args.value, model=args.model,
+                           clear=args.clear, **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_config_remove_endpoint(args, base: str) -> int:
+    try:
+        cfg = cc.remove_endpoint(args.name, **_resolve_active_scope(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
 
 
 def cmd_config_coder_set(args, base: str) -> int:
@@ -1458,6 +1985,40 @@ def cmd_cancel(args, base: str) -> int:
     return 0
 
 
+def cmd_retry_lanes(args, base: str) -> int:
+    """POST /v1/consult/<sid>/retry-lanes — plan D9: the parent's lanes
+    that failed for a reason the question did not cause, run again as a
+    child session that re-answers the parent's question."""
+    body: dict = {"cwd": args.cwd or os.getcwd()}
+    if args.lanes:
+        try:
+            body["lanes"] = [int(x) for x in args.lanes.split(",") if x.strip()]
+        except ValueError:
+            raise CLIError(f"--lanes must be numbers: {args.lanes!r}")
+    if args.effort:
+        body["effort"] = args.effort
+    out = _http("POST", f"{base}/v1/consult/{args.sid}/retry-lanes", body=body)
+    print(json.dumps(out, indent=2))
+    if out.get("reason") == "no_retryable_lanes":
+        print("note: no lane of this run failed in a retryable way "
+              "(infra / model_missing / context_overflow).", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_wrap_up(args, base: str) -> int:
+    """POST /v1/consult/<sid>/wrap-up — plan D9's graceful stop: the
+    run ends on an answer from the research it has, marked ``partial``.
+    ``cancel`` is the verb for no answer at all."""
+    out = _http("POST", f"{base}/v1/consult/{args.sid}/wrap-up",
+                body={"reason": args.reason or "user-wrap-up"})
+    print(json.dumps({"ok": True, **out}, indent=2))
+    if not out.get("stops_the_run", True):
+        print("note: the run is not executing; nothing to wrap up.",
+              file=sys.stderr)
+    return 0
+
+
 #: Event kinds worth a human's attention. ``llm_call`` / ``tool_call``
 #: are the bulk of the stream — a single ``xhigh`` council emits
 #: hundreds, each with a full payload — and reading them is how the
@@ -1471,6 +2032,8 @@ _MILESTONE_KINDS = (
     # never be filtered out of the monitor view.
     "awaiting_tool_approval", "tool_approval_resolved",
     "tool_approval_auto",
+    # Plan D9: a wrap-up skipped a node that had not started.
+    "node_wrap_up_skipped",
 )
 
 
@@ -1826,6 +2389,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Project root (default: current directory).")
     c.add_argument("--effort", choices=tuple(cc.EFFORT_BUDGETS),
                    help="Override effort tier for this consultation.")
+    c.add_argument("--guards", choices=cc.GUARD_PROFILES,
+                   help="Nudge profile for this run (plan §0.7): strict "
+                        "for small models. Default: the config's.")
     # DEPRECATED in v1.1 — kept as a no-op so muscle memory doesn't
     # break. v1.1 always writes the structured event log to
     # transcript.db; there's no on/off switch any more.
@@ -1847,6 +2413,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     c.add_argument(
+        "--tried", metavar="FILE",
+        help=("JSON file listing what you already tried, "
+              '[{"what": "ran pytest tests/x.py", "output": "<verbatim>"}]; '
+              "every role gets it as ALREADY TRIED so the council does not "
+              "redo it."))
+    c.add_argument(
         "--skip-preflight", dest="skip_preflight", action="store_true",
         help=(
             "Start even when none of the files the question names are "
@@ -1858,6 +2430,7 @@ def build_parser() -> argparse.ArgumentParser:
             "are right."
         ),
     )
+    _add_shell_args(c)
     _add_wait_args(c)
     c.set_defaults(fn=cmd_consult)
 
@@ -1885,6 +2458,8 @@ def build_parser() -> argparse.ArgumentParser:
     fu.add_argument("--effort", choices=tuple(cc.EFFORT_BUDGETS),
                     help="Override effort for this follow-up "
                          "(default: same as parent).")
+    fu.add_argument("--guards", choices=cc.GUARD_PROFILES,
+                    help="Nudge profile for this follow-up (plan §0.7).")
     fu.add_argument("--trace", dest="trace",
                     action="store_true", default=None,
                     help="DEPRECATED: no-op in v1.1.")
@@ -1934,6 +2509,7 @@ def build_parser() -> argparse.ArgumentParser:
              "default number of extra rounds for this consultancy).",
     )
     _add_wait_args(fu)
+    _add_shell_args(fu)
     fu.set_defaults(fn=cmd_follow_up)
 
     # accept — consultancy review loop: mark the consultancy ACCEPTED.
@@ -1947,6 +2523,15 @@ def build_parser() -> argparse.ArgumentParser:
     ac.add_argument("--note", help="Optional note recorded with the "
                                    "acceptance.")
     ac.set_defaults(fn=cmd_accept)
+
+    dm = sub.add_parser(
+        "decision-models",
+        help="List the decision models the [decision] endpoint (or --url) "
+             "serves: TypeSafe's /v1/models, or Ollama's decision-capable "
+             "tags.")
+    dm.add_argument("--url", help="Ask this server instead.")
+    dm.add_argument("--cwd", help="Project root (default: cwd).")
+    dm.set_defaults(fn=cmd_decision_models)
 
     # grant — consultancy review loop: raise the followup cap now.
     gr = sub.add_parser(
@@ -1988,11 +2573,102 @@ def build_parser() -> argparse.ArgumentParser:
              "Closed sessions don't appear here.")
     lo.set_defaults(fn=cmd_list_open)
 
+    # account (plan A3)
+    acc = sub.add_parser(
+        "account",
+        help="Ollama account: plan, and each cloud model's window, max "
+             "output, thinking values and plan requirement.")
+    acc.add_argument("--model", action="append",
+                     help="Only these models (repeatable). Default: every "
+                          "cloud model the server lists or recommends.")
+    acc.add_argument("--ollama-url", dest="ollama_url",
+                     help="Ollama server (default: the engine's).")
+    acc.set_defaults(fn=cmd_account)
+
     # list
     l_ = sub.add_parser("list", help="List sessions for a project.")
     l_.add_argument("--cwd", help="Project root (default: cwd).")
     l_.add_argument("--limit", type=int, default=50)
     l_.set_defaults(fn=cmd_list)
+
+    # gc
+    gc_ = sub.add_parser(
+        "gc", help="Remove stale coder-out/ trees and empty session "
+                   "dirs of a project (local; records are kept).")
+    gc_.add_argument("--cwd", help="Project root (default: cwd).")
+    gc_.add_argument("--days", type=float, default=30.0,
+                     help="Age of the newest file in a coder-out/ tree "
+                          "before it is removed (default 30).")
+    gc_.add_argument("--dry-run", action="store_true",
+                     help="Report what would be removed; remove nothing.")
+    gc_.set_defaults(fn=cmd_gc)
+
+    # findings ledger (docs/PLAN-council-memory.md)
+    fd_ = sub.add_parser(
+        "findings", help="The project's council findings ledger: list, "
+                         "show, settle, reopen, merge, note (local).")
+    fd_.add_argument("action", choices=("list", "show", "settle", "reopen",
+                                        "merge", "note"))
+    fd_.add_argument("--into", help="merge: the finding the duplicate restates")
+    fd_.add_argument("id", nargs="?")
+    fd_.add_argument("--cwd", help="Project root (default: cwd).")
+    fd_.add_argument("--status", help="list: filter (a status or 'settled'); "
+                                      "settle: confirmed | refuted | "
+                                      "by_design | fixed")
+    fd_.add_argument("--reason", help="settle / reopen / merge: why; note: the text")
+    fd_.add_argument("--by", choices=("user", "assistant"), default="user",
+                     help="who decides (default user)")
+    fd_.add_argument("--commit", help="settle fixed: the commit")
+    fd_.add_argument("--task", help="settle: the task tracking the fix")
+    fd_.set_defaults(fn=cmd_findings)
+
+    # write-mode views (plan E4)
+    ch_ = sub.add_parser(
+        "changes", help="What each write-mode lane of a council changed "
+                        "(held as patches; your files are unchanged). Local.")
+    ch_.add_argument("sid")
+    ch_.add_argument("--cwd", help="Project root (default: cwd).")
+    ch_.add_argument("--lane")
+    ch_.add_argument("--diff", action="store_true", help="print the patches")
+    ch_.add_argument("--json", action="store_true")
+    ch_.set_defaults(fn=cmd_changes)
+    ap_ = sub.add_parser(
+        "apply", help="Apply a lane's held patch to your tree. Checks first; "
+                      "refuses when it does not apply as your tree is now.")
+    ap_.add_argument("sid")
+    ap_.add_argument("--cwd", help="Project root (default: cwd).")
+    ap_.add_argument("--lane", required=True)
+    ap_.add_argument("--dry-run", action="store_true",
+                     help="only check that it applies")
+    ap_.add_argument("--3way", dest="three_way", action="store_true",
+                     help="fall back to a 3-way merge (stages the result; "
+                          "may leave conflict markers)")
+    ap_.set_defaults(fn=cmd_apply)
+    di_ = sub.add_parser("discard", help="Drop a lane's held changes.")
+    di_.add_argument("sid")
+    di_.add_argument("--cwd", help="Project root (default: cwd).")
+    g_ = di_.add_mutually_exclusive_group()
+    g_.add_argument("--lane")
+    g_.add_argument("--all", action="store_true")
+    di_.set_defaults(fn=cmd_discard)
+    sb_ = sub.add_parser(
+        "sandbox", help="ls: every live or held write view on this host; "
+                        "gc: freeze views of councils that are not running "
+                        "and expire held patches past held_ttl_days.")
+    sb_.add_argument("action", choices=("ls", "gc"))
+    sb_.add_argument("--dry-run", action="store_true")
+    sb_.add_argument("--json", action="store_true")
+    sb_.set_defaults(fn=cmd_sandbox)
+
+    # shell-preflight
+    sp_ = sub.add_parser(
+        "shell-preflight",
+        help="Can this host sandbox a council shell (--shell)? Runs one "
+             "trivial sandboxed command and lists each layer (local; exit "
+             "1 when a required layer is missing).")
+    sp_.add_argument("--cwd", help="Project root (default: cwd).")
+    sp_.add_argument("--json", action="store_true")
+    sp_.set_defaults(fn=cmd_shell_preflight)
 
     # show
     sh = sub.add_parser(
@@ -2153,6 +2829,36 @@ def build_parser() -> argparse.ArgumentParser:
     can.add_argument("--reason", default="user-cancel",
                      help="Human-readable cancel reason (logged).")
     can.set_defaults(fn=cmd_cancel)
+
+    # retry-lanes — rerun a finished run's failed lanes (plan D9).
+    rl = sub.add_parser(
+        "retry-lanes",
+        help="Run a finished consultation's researcher lanes that failed "
+             "on infra / model_missing / context_overflow again, then "
+             "answer its question again (as a child session).",
+    )
+    rl.add_argument("sid")
+    rl.add_argument("--lanes", default=None,
+                    help="Comma-separated lane numbers (default: every "
+                         "retryable one; see `show <sid>` lanes).")
+    rl.add_argument("--effort", default=None,
+                    help="Effort for the retry (default: the parent's).")
+    rl.add_argument("--cwd", default=None,
+                    help="Project dir, when the parent is not loaded.")
+    rl.set_defaults(fn=cmd_retry_lanes)
+
+    # wrap-up — stop and synthesize what the run has (plan D9).
+    wu = sub.add_parser(
+        "wrap-up",
+        help="Stop a running consultation and synthesize what it has: "
+             "running lanes report, nothing new starts, the answer is "
+             "marked partial.",
+    )
+    wu.add_argument("sid")
+    wu.add_argument("--reason", default="user-wrap-up",
+                    help="Human-readable reason (logged, recorded on the "
+                         "result).")
+    wu.set_defaults(fn=cmd_wrap_up)
 
     # tool-ack — answer a parked ask_human tool approval (M-A).
     ta = sub.add_parser(
@@ -2319,6 +3025,14 @@ def build_parser() -> argparse.ArgumentParser:
     csm.add_argument("mode", choices=cc.VALID_SERVICE_MODES)
     _add_scope_args(csm)
     csm.set_defaults(fn=cmd_config_set_service_mode)
+
+    cdh = cfg_sub.add_parser("set-dashboard-host",
+                             help="Also serve the read-only council "
+                             "dashboard on this address (0.0.0.0, a LAN "
+                             "IP, or off).")
+    cdh.add_argument("host")
+    _add_scope_args(cdh)
+    cdh.set_defaults(fn=cmd_config_set_dashboard_host)
 
     cit = cfg_sub.add_parser("set-idle-timeout",
                              help="Smart-start idle timeout (seconds).")
@@ -2490,6 +3204,307 @@ def build_parser() -> argparse.ArgumentParser:
     _add_scope_args(csd)
     csd.set_defaults(fn=cmd_config_set_store_distillation)
 
+    cep = cfg_sub.add_parser(
+        "set-endpoint",
+        help="Add or update a named chat server (opencoti, llama.cpp, "
+             "xOllama, Ollama) that roles use as @name or @name/<model>.")
+    cep.add_argument("name")
+    cep.add_argument("--url", help="Server root, e.g. http://host:8240.")
+    cep.add_argument("--backend", choices=list(cc.ENDPOINT_BACKENDS))
+    cep.add_argument("--model", help="Served model when a reference names "
+                                     "none ('' clears).")
+    cep.add_argument("--window", choices=["dynamic", "assured"],
+                     help="PolyKV window mode. dynamic (default): no fixed "
+                          "context; each agent's request is its own "
+                          "allocation up to the engine's session_ctx_max. "
+                          "assured (booked window per agent session) "
+                          "arrives with Milestone F.")
+    cep.add_argument("--api-key", dest="api_key",
+                     help="Bearer key written into the config (legacy; "
+                          "prefer --key-file; '' clears).")
+    cep.add_argument("--key-file", dest="key_file",
+                     help="File holding the Bearer key, first line ('' "
+                          "clears). An https://ollama.com endpoint with "
+                          "no key uses the host's Ollama Cloud key "
+                          "(ollama.api_key_file, else OLLAMA_API_KEY).")
+    _add_scope_args(cep)
+    cep.set_defaults(fn=cmd_config_set_endpoint)
+
+    cpr = cfg_sub.add_parser(
+        "set-protocol",
+        help="How roles hand results to each other: --typed on makes "
+             "planner, researcher, critic and adversary hand in typed "
+             "records (plan G); the synthesizer stays prose.")
+    cpr.add_argument("--typed", choices=["on", "off"])
+    _add_scope_args(cpr)
+    cpr.set_defaults(fn=cmd_config_set_protocol)
+
+    cgd = cfg_sub.add_parser(
+        "set-guards",
+        help="The nudge profile (plan §0.7): --profile strict for small "
+             "models — lanes open with a tool call, the planner is re-asked "
+             "when its plan does not parse, 3 thinking-only re-asks, the cap "
+             "warning 2+ turns early. --role sets one role. The loop guards "
+             "are always on, in no profile.")
+    cgd.add_argument("--profile", required=True, choices=cc.GUARD_PROFILES)
+    cgd.add_argument("--role", choices=cc.GUARD_ROLES)
+    _add_scope_args(cgd)
+    cgd.set_defaults(fn=cmd_config_set_guards)
+
+    csh = cfg_sub.add_parser(
+        "set-shell",
+        help="[tools.shell]: the sandboxed run_command (plan E). --default "
+             "always gives it to every run; off (the default) means only "
+             "runs started with --shell. Limits apply per command.")
+    csh.add_argument("--default", choices=("off", "always"))
+    csh.add_argument("--mode", choices=("read", "write"),
+                     help="read: project read-only, private /scratch; "
+                          "write: each lane a private git worktree, changes "
+                          "handed back as a patch (git roots only)")
+    csh.add_argument("--net", choices=("none",))
+    csh.add_argument("--backend", choices=("auto", "launcher", "bwrap"))
+    csh.add_argument("--ro-bind", action="append", default=[],
+                     metavar="DIR", help="Toolchain dir shown read-only, its "
+                     "bin/ first on PATH (repeatable; appends)")
+    csh.add_argument("--clear-ro-binds", action="store_true")
+    csh.add_argument("--timeout", dest="timeout_s", type=int)
+    csh.add_argument("--max-timeout", dest="max_timeout_s", type=int)
+    csh.add_argument("--memory-mib", type=int)
+    csh.add_argument("--pids", type=int)
+    csh.add_argument("--cpu-pct", type=int)
+    csh.add_argument("--lane-disk-gib", type=float)
+    csh.add_argument("--free-floor-gib", type=float)
+    csh.add_argument("--free-floor-pct", type=float)
+    csh.add_argument("--held-ttl-days", type=float,
+                     help="days a held write-mode patch waits before it "
+                          "moves to expired/ (default 7)")
+    csh.add_argument("--reset", action="store_true",
+                     help="restore every [tools.shell] default first")
+    _add_scope_args(csh)
+    csh.set_defaults(fn=cmd_config_set_shell)
+
+    ces = cfg_sub.add_parser(
+        "set-escalation",
+        help="Per-lane model escalation: a first-round lane a guard ended "
+             "(struggle, loop guard, mistake limit, reasoning loop) or that "
+             "failed on its task reruns once on --model, given a brief of "
+             "the failed attempt; at most --max per council (default 2). "
+             "--model '' turns it off (the default).")
+    ces.add_argument("--model", help="The expert model: a tag on the "
+                     "engine's server or @endpoint/model; '' = off.")
+    ces.add_argument("--max", type=int, help="Lanes escalated per council "
+                     f"(0-{cc.ESCALATION_MAX}).")
+    _add_scope_args(ces)
+    ces.set_defaults(fn=cmd_config_set_escalation)
+
+    cxr = cfg_sub.add_parser(
+        "set-xauto-retry",
+        help="Plan D9: whether an xauto run reruns, once and before the "
+             "critic, the first-round lanes that failed on infrastructure "
+             "(default on). Other tiers never do; `retry-lanes` is the "
+             "after-the-run verb.")
+    cxr.add_argument("state", choices=["on", "off"])
+    _add_scope_args(cxr)
+    cxr.set_defaults(fn=cmd_config_set_xauto_retry)
+
+    ccx = cfg_sub.add_parser(
+        "set-cross-examination",
+        help="Plan council-memory M5: a critic not convinced challenges "
+             "the claims it doubts (CHALLENGE report=N); each challenged "
+             "lane resumes its own conversation and answers with a run or "
+             "a concession, then the critic rules (stands / narrowed / "
+             "falls / open; open falls back to the reroute). Default "
+             "shell: on for runs with the sandboxed shell only.")
+    ccx.add_argument("state", choices=["on", "off", "shell"])
+    _add_scope_args(ccx)
+    ccx.set_defaults(fn=cmd_config_set_cross_examination)
+
+    ccl = cfg_sub.add_parser(
+        "set-cloud",
+        help="Where Ollama Cloud models (<m>:cloud / <m>:<tag>-cloud) "
+             "run. direct (default): ollama.com itself, with the account "
+             "key, under their bare names, so a cloud council holds no "
+             "host's Ollama. local: the host's Ollama relays them.")
+    ccl.add_argument("route", nargs="?", choices=list(cc.CLOUD_ROUTES))
+    ccl.add_argument("--url", default=None,
+                     help="Ollama Cloud's URL (default https://ollama.com)")
+    ccl.add_argument("--key-file", default=None,
+                     help="File holding the key (first line); empty "
+                          "clears it. Default: the host's Ollama Cloud "
+                          "key (ollama.api_key_file, else OLLAMA_API_KEY)")
+    _add_scope_args(ccl)
+    ccl.set_defaults(fn=cmd_config_set_cloud)
+
+    cpk = cfg_sub.add_parser(
+        "set-polykv",
+        help="Plan F: PolyKV placement on opencoti and xOllama models "
+             "with client-pool seats — an engine session per conversation "
+             "and the council's shared prompt head as one pool, prefilled "
+             "once. Other backends are never touched. Default off.")
+    cpk.add_argument("state", nargs="?", choices=["on", "off"])
+    cpk.add_argument("--mode", choices=list(cc.POLYKV_MODES))
+    cpk.add_argument("--layout", choices=list(cc.POLYKV_LAYOUTS),
+                     help="shared (default): the roles' common blocks "
+                          "first and each role's instructions last, a "
+                          "layer per block; as-built: as the roles build "
+                          "their prompts")
+    _add_scope_args(cpk)
+    cpk.set_defaults(fn=cmd_config_set_polykv)
+
+    cde = cfg_sub.add_parser(
+        "set-decision",
+        help="A decision model (plan H): TypeSafe's Jev (no --url; key "
+             "from --key-file or TYPESAFE_API_KEY) or a /v1/systemone "
+             "server such as xOllama (--url). Seams: review, confidence, "
+             "struggle, citations.")
+    cde.add_argument("--enabled", choices=["on", "off"])
+    cde.add_argument("--url", help="Server root, its /v1 or the full "
+                     "/v1/systemone path; '' = TypeSafe.")
+    cde.add_argument("--model", help="jev-latest / jev-preview on "
+                     "TypeSafe; a decision-capable tag (tev1, nimble, …) "
+                     "on Ollama. `claude-consultants decision-models` "
+                     "lists them.")
+    cde.add_argument("--key-file", dest="key_file",
+                     help="File holding the API key (the key itself is "
+                          "never written to config); '' clears.")
+    cde.add_argument("--floor", type=float,
+                     help="Confidence floor (default 0.6).")
+    cde.add_argument("--high-stakes-floor", dest="high_stakes_floor",
+                     type=float, help="Floor for a struggle nudge "
+                                      "(default 0.85).")
+    cde.add_argument("--timeout-s", dest="timeout_s", type=float,
+                     help="Whole-call deadline, retries included "
+                          "(default 15).")
+    cde.add_argument("--seams", help="Comma list of review, confidence, "
+                                     "struggle, citations.")
+    cde.add_argument("--shadow", help="Comma list of seams to ask and "
+                     "record but never act on (collect live scores before "
+                     "trusting them); '' clears.")
+    cde.add_argument("--reset", action="store_true",
+                     help="Back to the defaults (off) before applying.")
+    _add_scope_args(cde)
+    cde.set_defaults(fn=cmd_config_set_decision)
+
+    cbu = cfg_sub.add_parser(
+        "set-budget",
+        help="Output cap and context window (plan B): globally, per role "
+             "(--role) or per (role, model) (--role --model). Unset keys "
+             "use the shipped defaults; --clear KEY removes a setting.")
+    cbu.add_argument("--role", choices=list(cc.ROLES))
+    cbu.add_argument("--model", help="Model exactly as the role names it.")
+    cbu.add_argument("--output-ceiling", dest="output_ceiling", type=int,
+                     help="Largest output any call may request (96000).")
+    cbu.add_argument("--output-window-share", dest="output_window_share",
+                     type=float, help="Share of the window a call asks for "
+                                      "(0.75).")
+    cbu.add_argument("--reserve-min", dest="reserve_min", type=int,
+                     help="Minimum room kept for estimate error (1024).")
+    cbu.add_argument("--reserve-share", dest="reserve_share", type=float,
+                     help="Room kept for estimate error, as a share of the "
+                          "prompt estimate (0.12).")
+    cbu.add_argument("--num-ctx", dest="num_ctx",
+                     help="'model' (resolve from the backend) or a window "
+                          "in tokens.")
+    cbu.add_argument("--announce", choices=["on", "off"],
+                     help="State the cap in the role's prompt (on).")
+    cbu.add_argument("--trigger-ratio", dest="trigger_ratio", type=float,
+                     help="Compact once the prompt reaches this share of "
+                          "the window (default 0.9, 0.3-0.98).")
+    cbu.add_argument("--output-room-min", dest="output_room_min", type=int,
+                     help="Never reserve less reply room than this when "
+                          "deciding to compact (default 8000).")
+    cbu.add_argument("--clear", action="append", default=[], metavar="KEY",
+                     help="Remove a setting (repeatable).")
+    _add_scope_args(cbu)
+    cbu.set_defaults(fn=cmd_config_set_budget)
+
+    csa = cfg_sub.add_parser(
+        "set-sampling",
+        help="Sampling diversity (plan B4): each role instance gets its own "
+             "seed and a small temperature jitter, globally, per role or per "
+             "(role, model). --clear KEY removes a setting.")
+    csa.add_argument("--role", choices=list(cc.ROLES))
+    csa.add_argument("--model", help="Model exactly as the role names it.")
+    csa.add_argument("--seed", help="random (default), off, or an integer "
+                                    "(the i-th same-model instance gets "
+                                    "seed + i).")
+    csa.add_argument("--temperature", type=float,
+                     help="Base temperature (default: the model's own).")
+    csa.add_argument("--temperature-range-pct", dest="temperature_range_pct",
+                     type=float, help="Jitter around the base, percent "
+                                      "(default 2, max 10; 0 = none).")
+    csa.add_argument("--clear", action="append", default=[], metavar="KEY")
+    _add_scope_args(csa)
+    csa.set_defaults(fn=cmd_config_set_sampling)
+
+    cco = cfg_sub.add_parser(
+        "set-compaction",
+        help="Compaction (plan C), globally, per role or per (role, model). "
+             "Every step runs on the role's own model. --clear KEY removes "
+             "a setting.")
+    cco.add_argument("--role", choices=list(cc.ROLES))
+    cco.add_argument("--model", help="Model exactly as the role names it.")
+    cco.add_argument("--flow", choices=["auto", "reduced", "full", "basic"],
+                     help="auto (default): full from a 64k window up, "
+                          "reduced below. full: halfway marker, two "
+                          "half-critics, synthesizer. reduced: replay "
+                          "writer, retrospective, one reviewer. basic: no "
+                          "model call.")
+    cco.add_argument("--placement", choices=["system", "user"],
+                     help="Role of the message that replaces the folded "
+                          "span (default system).")
+    cco.add_argument("--review", choices=["on", "off"],
+                     help="The reduced flow's reviewer (default on).")
+    cco.add_argument("--target-share", dest="target_share", type=float,
+                     help="Fold to this share of the free window "
+                          "(default 0.25, 0.05-0.6).")
+    cco.add_argument("--writer-attempts", dest="writer_attempts", type=int,
+                     help="Writer retries, with the measured overrun fed "
+                          "back (default 3, max 5).")
+    cco.add_argument("--ledger", choices=["on", "off"],
+                     help="Numbered tool record with [#N] citations "
+                          "(default on).")
+    cco.add_argument("--tool-result-max-chars", dest="tool_result_max_chars",
+                     type=int, help="Middle-truncate a tool result in "
+                                    "history past this (default 32000).")
+    cco.add_argument("--file-result-max-chars", dest="file_result_max_chars",
+                     type=int, help="The same for file contents "
+                                    "(default 50000).")
+    cco.add_argument("--stale-read-share", dest="stale_read_share",
+                     type=float, help="Rewrite superseded reads once the "
+                                      "history reaches this share of the "
+                                      "window (default 0.4).")
+    cco.add_argument("--reasoning-replay", dest="reasoning_replay",
+                     choices=["none", "all", "inline"],
+                     help="Past-turn reasoning on the wire (default none).")
+    cco.add_argument("--continuation", choices=["auto", "on", "off"],
+                     help="Writer and critics as the lane's next turn: auto "
+                          "under PolyKV pooled / assured, on for any "
+                          "backend, off (default) the transcript as text.")
+    cco.add_argument("--clear", action="append", default=[], metavar="KEY")
+    _add_scope_args(cco)
+    cco.set_defaults(fn=cmd_config_set_compaction)
+
+    cth = cfg_sub.add_parser(
+        "set-think",
+        help="A role's thinking (plan B3): off, on/auto (the model's own "
+             "budget), a level (minimal/low/medium/high/max, xhigh = max) "
+             "or a token count. --model sets it for that model only.")
+    cth.add_argument("role", choices=list(cc.ROLES))
+    cth.add_argument("value", nargs="?")
+    cth.add_argument("--model", help="Model exactly as the role names it.")
+    cth.add_argument("--clear", action="store_true",
+                     help="Back to the role default (or, with --model, to "
+                          "the role's own value).")
+    _add_scope_args(cth)
+    cth.set_defaults(fn=cmd_config_set_think)
+
+    crep = cfg_sub.add_parser("remove-endpoint",
+                              help="Remove a named chat server.")
+    crep.add_argument("name")
+    _add_scope_args(crep)
+    crep.set_defaults(fn=cmd_config_remove_endpoint)
+
     clm = cfg_sub.add_parser("list-models",
                              help="Available Ollama tags.")
     clm.set_defaults(fn=cmd_config_list_models)
@@ -2529,7 +3544,7 @@ def build_parser() -> argparse.ArgumentParser:
     cset.add_argument("language",
                       help="Language id (e.g. python, csharp, cpp).")
     cset.add_argument("--primary",
-                      help="Primary model tag (e.g. glm-5.2:cloud).")
+                      help="Primary model tag (e.g. glm-5.3-flash:cloud).")
     cset.add_argument("--fallback", default=None,
                       help="Fallback model tag. Empty string clears "
                            "the failover model on an existing entry.")
@@ -2596,7 +3611,7 @@ def build_parser() -> argparse.ArgumentParser:
     se_coder.add_argument(
         "--ollama-base", default=None,
         help="Override the cloud proxy URL. Default: read from "
-             "config or 192.168.178.2:11433.",
+             "config or the host's Ollama URL.",
     )
     se_coder.add_argument(
         "--judge-model", default=None,
@@ -2663,7 +3678,7 @@ def build_parser() -> argparse.ArgumentParser:
     se_stall.add_argument(
         "--ollama-base", default=None,
         help="Override the cloud proxy URL. Default: read from "
-             "config or 192.168.178.2:11433.",
+             "config or the host's Ollama URL.",
     )
     se_stall.add_argument(
         "--output-dir", default=None,
@@ -2738,7 +3753,7 @@ def build_parser() -> argparse.ArgumentParser:
     se_te.add_argument(
         "--ollama-base", default=None,
         help="Override the cloud proxy URL. Default: read from "
-             "config or 192.168.178.2:11433.",
+             "config or the host's Ollama URL.",
     )
     se_te.add_argument(
         "--judge-model", default=None,

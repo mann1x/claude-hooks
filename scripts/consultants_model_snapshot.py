@@ -39,7 +39,7 @@ Output (capture)
 
     {
       "captured_at": "2026-05-07T12:34:56+02:00",
-      "endpoint": "http://192.168.178.2:11433",
+      "endpoint": "http://localhost:11434",
       "models": {
         "kimi-k2.6:cloud": {
           "modified_at": "2026-03-31T00:00:00Z",
@@ -57,7 +57,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import urllib.error
 import urllib.request
@@ -67,19 +66,36 @@ from typing import Any
 
 
 def _default_endpoint() -> str:
-    """Pick the same Ollama endpoint the consultants engine uses
-    (caliber proxy). Order: env CALIBER_GROUNDING_UPSTREAM, env
-    OLLAMA_HOST (only when http(s)://), then 192.168.178.2:11433."""
-    upstream = os.environ.get("CALIBER_GROUNDING_UPSTREAM")
-    if upstream:
-        return upstream
-    ollama_host = os.environ.get("OLLAMA_HOST", "")
-    if ollama_host.startswith(("http://", "https://")):
-        return ollama_host
-    return "http://192.168.178.2:11433"
+    """The Ollama endpoint the consultants engine uses
+    (:func:`claude_hooks.ollama_upstream.url`)."""
+    repo = Path(__file__).resolve().parent.parent
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    from claude_hooks import ollama_upstream
+    return ollama_upstream.url()
+
+
+def _cloud_direct_url() -> str | None:
+    """Ollama Cloud's URL when the council sends cloud models there
+    directly (``[cloud] route = "direct"``), else ``None``."""
+    try:
+        from consultants import config as cc
+        cloud = cc.load_config(Path.cwd()).cloud
+    except Exception:
+        return None
+    return cloud.url if cloud.route == "direct" else None
 
 
 def _api_show(endpoint: str, model: str, timeout_s: float = 10.0) -> dict:
+    # Probe the model where the council calls it: a cloud name on the
+    # direct route is ollama.com's bare name, not the local relay's.
+    repo = Path(__file__).resolve().parent.parent
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    from claude_hooks.get_advice.chat_client import bare_cloud_name
+    direct = _cloud_direct_url() if bare_cloud_name(model) else None
+    if direct:
+        endpoint, model = direct, bare_cloud_name(model)
     body = json.dumps({"model": model}).encode()
     req = urllib.request.Request(
         f"{endpoint.rstrip('/')}/api/show",
@@ -140,6 +156,8 @@ def cmd_capture(args: argparse.Namespace) -> int:
     snapshot: dict[str, Any] = {
         "captured_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "endpoint": endpoint,
+        # Cloud models are probed here instead when it is set.
+        "cloud_direct": _cloud_direct_url(),
         "models": {},
     }
     failed: list[str] = []
@@ -223,7 +241,7 @@ def main() -> int:
                      help="benchmark label directory (will be created)")
     cap.add_argument("--endpoint",
                      help="Ollama base URL (default: CALIBER_GROUNDING_UPSTREAM "
-                          "or http://192.168.178.2:11433)")
+                          "or the host's ollama.url)")
     cap.add_argument("--model", action="append",
                      help="Probe this model (repeatable). Default: every "
                           "model in the consultants config.")

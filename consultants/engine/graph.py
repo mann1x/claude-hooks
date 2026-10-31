@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import operator
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
@@ -56,6 +57,11 @@ if TYPE_CHECKING:
     )
 
 from consultants.engine import council
+from consultants.engine.lane_executor import (
+    bind_lane,
+    researcher_lane_id,
+    tool_executor_lane_id,
+)
 
 
 # ----------------------- state schema --------------------------- #
@@ -112,6 +118,29 @@ class CouncilState(TypedDict, total=False):
     retries_by_role: dict
     error: Optional[str]
     _role_failed: Optional[str]
+    # Plan H: the decision model's accept / followup / research
+    # recommendation on the final answer (the ``review`` seam).
+    decision_review: Optional[dict]
+    # Plan D9: the xauto automatic lane retry — 0 not yet decided,
+    # 1 retrying, 2 done. Written only by the ``lane_retry`` node.
+    lane_retry: int
+    # Plan council-memory M5: ``research_lanes[i]`` is ``{"lane": idx}``
+    # of the lane that wrote ``research[i]`` (filled beside it by the
+    # researcher wrapper); ``cross_exam`` one entry per examined lane;
+    # ``cross_exam_round`` the last round examined (ruling node only).
+    research_lanes: Annotated[list, operator.add]
+    # Set only on a multi-critic fan-out Send: this critic is one of C
+    # parallel instances and writes no decision (critic_node).
+    critic_fanout: bool
+    cross_exam: Annotated[list, operator.add]
+    cross_exam_round: int
+    # One per challenged report: the critic's ruling (stands / narrowed /
+    # falls / open), read by the synthesis audits.
+    cross_exam_rulings: Annotated[list, operator.add]
+    # Plan G5: a typed follow-up's route (``follow_up_route_node``).
+    follow_up_route: Optional[str]
+    # Send-injected: the one lane a cross_examine node answers for.
+    cross_exam_item: Optional[dict]
     # Send-injected, per-lane fields. Set on a researcher invocation
     # spawned by the fan-out conditional edge after planner; absent
     # on the single-researcher path used by critic re-routes.
@@ -182,7 +211,7 @@ def _wire_v2_reducers():
         from consultants.engine.state_v2 import (
             CoderArtifact, CoderTaskItem,
             Doc, ToolPlanItem, ToolResult, append_doc,
-            merge_runtime_control,
+            join_errors, latest_non_none, merge_runtime_control,
         )
     except ImportError:  # pragma: no cover
         return
@@ -203,6 +232,10 @@ def _wire_v2_reducers():
     hints["coder_tasks"] = _Ann[list[CoderTaskItem], operator.add]
     hints["coder_artifacts"] = _Ann[list[CoderArtifact], operator.add]
     hints["coder_task_item"] = Optional[CoderTaskItem]
+    # Lanes that fail in the same superstep each write a tombstone; a
+    # plain channel aborted the whole run (InvalidUpdateError) instead.
+    hints["error"] = _Ann[Optional[str], join_errors]
+    hints["_role_failed"] = _Ann[Optional[str], latest_non_none]
 
 
 _wire_v2_reducers()
@@ -221,20 +254,58 @@ TOOLABLE_ROLES: tuple[str, ...] = (
 )
 
 
-def _tools_for(deps: "GraphDeps", role: str) -> dict:
+def _tools_for(deps: "GraphDeps", role: str, lane: Optional[str] = None) -> dict:
     """Kwargs handing ``role`` its tools, or an empty dict.
 
     Returning ``{}`` rather than ``tool_specs=None`` matters: the node
     signatures default these to None, so an ungated role is called with
     exactly the argument list it had before M-B.
+
+    Plan council-memory M4: on a shell run a judging role (``critic``,
+    ``meta_critic``) gets every tool, the shell included, bound to its
+    own ``lane`` (its own view), whether or not ``[tools] all_roles``
+    is on: if the lanes can run commands, the critic can check a doubt.
     """
-    if role not in (deps.tooled_roles or ()):
-        return {}
     if not deps.tool_specs or deps.tool_executor is None:
         return {}
-    return {"tool_specs": deps.tool_specs,
-            "tool_executor": deps.tool_executor,
+    if role in JUDGE_SHELL_ROLES and lane and any(
+            (s.get("function") or {}).get("name") in LANE_ONLY_TOOLS
+            for s in deps.tool_specs):
+        return {"tool_specs": deps.tool_specs,
+                "tool_executor": bind_lane(deps.tool_executor, lane, deps.sid),
+                "cwd": deps.cwd}
+    if role not in (deps.tooled_roles or ()):
+        return {}
+    specs = [s for s in deps.tool_specs
+             if (s.get("function") or {}).get("name") not in LANE_ONLY_TOOLS]
+    if len(specs) == len(deps.tool_specs):
+        return {"tool_specs": deps.tool_specs,
+                "tool_executor": deps.tool_executor,
+                "cwd": deps.cwd}
+    return {"tool_specs": specs,
+            "tool_executor": _without_lane_tools(deps.tool_executor, role),
             "cwd": deps.cwd}
+
+
+#: The shell's tools (plan E5): its state lives in a lane's view, so only
+#: a role bound to a lane gets them.
+LANE_ONLY_TOOLS = frozenset({"run_command"})
+#: Roles that may run commands (plan council-memory M4). The lanes, and
+#: the judges, each in a view of its own; the planner and the
+#: synthesizer stay without.
+JUDGE_SHELL_ROLES = frozenset({"critic", "meta_critic"})
+SHELL_ROLES = frozenset({"researcher", "tool_executor", "coder"}) | JUDGE_SHELL_ROLES
+
+
+def _without_lane_tools(executor: Callable[..., str], role: str):
+    """``executor``, refusing :data:`LANE_ONLY_TOOLS` — a role that was
+    not offered the shell does not get it by naming it anyway."""
+    def run(name: str, raw_args: str, cwd: str, **kw: Any) -> str:
+        if name in LANE_ONLY_TOOLS:
+            return (f"error: {name} is not offered to the {role}; only "
+                    f"{', '.join(sorted(SHELL_ROLES))} have the shell")
+        return executor(name, raw_args, cwd, **kw)
+    return run
 
 
 @dataclass
@@ -259,6 +330,10 @@ class GraphDeps:
     cwd: str
     tool_executor: Optional[Callable[..., str]] = None
     tool_specs: list[dict] = field(default_factory=list)
+    # Plan E (``--shell write``): ``lane id -> (host view dir, owner uid)``
+    # for a lane's own worktree view, or None. Set by the runner only in
+    # write mode; the coder then writes and runs its tests there.
+    lane_workspace: Optional[Callable[[str], Optional[tuple]]] = None
     # M-B: roles that receive ``tool_specs`` + ``tool_executor``.
     # ``researcher`` is not listed because its tool loop is wired
     # directly rather than through this gate. Empty (the default)
@@ -362,6 +437,23 @@ class GraphDeps:
     # unread. ``None`` — every caller that builds a graph without a
     # session — leaves every node byte-identical to pre-gate.
     run_control: Optional[Any] = None
+    # Plan D9: rerun first-round lanes that failed on infrastructure,
+    # once, before the critic. The runner sets it for xauto runs only
+    # (``[runtime] xauto_retry_infra_lanes``); off, the node is not wired.
+    xauto_lane_retry: bool = False
+    # Plan council-memory M5: ``[critic] cross_examination``. Off: the
+    # graph is unchanged.
+    cross_examination: bool = False
+    # Per-lane model escalation (plan D): a first-round lane a guard ended,
+    # or one that failed on its task, reruns once on this model with a
+    # brief of the attempt, at most ``escalation_max`` lanes. Empty: off,
+    # and with ``xauto_lane_retry`` off too the node is not wired.
+    escalation_model: str = ""
+    escalation_max: int = 2
+    # Plan G5: on the typed protocol a follow-up is routed by one tiny call
+    # (synthesize from the parent's evidence, or research). Off: the
+    # follow-up graph starts at the researcher as before.
+    follow_up_route: bool = False
     # Called with (kind, payload) for gate events (``node_cancelled`` /
     # ``awaiting_resume`` / ``resumed``). The runner passes a recorder
     # bridge; ``None`` means the gate still works, silently.
@@ -404,6 +496,250 @@ def _wrap_planner(deps: GraphDeps):
     return _node
 
 
+def _pass_through(state: dict) -> dict:
+    return {}
+
+
+def _shell_kw(deps: GraphDeps) -> dict:
+    """``{"shell": True}`` when the lanes have ``run_command`` (the
+    evidence bar applies), nothing otherwise — the call is then exactly
+    what it was."""
+    on = any((t.get("function") or {}).get("name") == "run_command"
+             for t in (deps.tool_specs or []))
+    return {"shell": True} if on else {}
+
+
+def _wrap_up_check(deps: GraphDeps) -> Optional[Callable[[], bool]]:
+    """Plan D9: what a running lane's loop asks before each turn, or
+    ``None`` when the graph has no run control (tests, benchmarks)."""
+    rc = getattr(deps, "run_control", None)
+    if rc is None:
+        return None
+    return lambda: bool(rc.wrapping_up)
+
+
+def _wrap_up_kw(deps: GraphDeps) -> dict:
+    """``{"wrap_up_check": …}`` for a lane node, or nothing when the graph
+    has no run control — the call is then exactly what it was."""
+    check = _wrap_up_check(deps)
+    return {} if check is None else {"wrap_up_check": check}
+
+
+def _wrapping_up(deps: GraphDeps) -> bool:
+    rc = getattr(deps, "run_control", None)
+    return rc is not None and bool(rc.wrapping_up)
+
+
+def _retry_lane_send(state: dict, spec: dict) -> Any:
+    """One researcher lane rerun from a ``retry_lanes.retry_specs`` spec
+    (plan D9): the ``retry-lanes`` child and the xauto automatic retry
+    build it the same way."""
+    from langgraph.types import Send
+    return Send("researcher", {
+        "question": state.get("question"),
+        "plan": state.get("plan", ""),
+        "cwd": state.get("cwd"),
+        # A Send lane sees only the keys in its own dict (see the
+        # planner fan-out in build_council_graph).
+        "extra_roots": list(state.get("extra_roots") or []),
+        "runtime_control": dict(state.get("runtime_control") or {}),
+        # Injected briefs: a Send lane sees no global channel
+        # it was not handed (#1626).
+        "additional_context": list(state.get("additional_context") or []),
+        "effort": state.get("effort"),
+        "models": state.get("models", {}),
+        "topology": state.get("topology"),
+        "plan_item": spec.get("plan_item") or state.get("plan", ""),
+        "lane_idx": spec.get("lane_idx"),
+        "model_override": spec.get("model") or None,
+        "research": [],
+        "turns": [],
+        "research_rounds_used": 0,
+        "total_prompt_tokens": 0,
+        "total_completion_tokens": 0,
+    })
+
+
+#: The node a checkpoint rewind re-enters the graph at (#1626). It is
+#: never reached by an edge: ``update_state(as_node=REWIND_NODE)`` runs
+#: its router, which continues research from the existing plan and
+#: reports. ``START`` led to the planner, which re-planned from scratch
+#: and fanned out lanes that never carried the brief.
+REWIND_NODE = "rewind"
+#: Plan G5: the typed follow-up's routing call.
+FOLLOW_UP_ROUTE_NODE = "follow_up_route"
+#: Rewind lanes are numbered from here, clear of the first round's.
+REWIND_LANE_BASE = 100
+
+
+def _rewind_router(deps: GraphDeps, synthesizer_target: str):
+    """``rewind``'s router: one researcher pass on the full plan with every
+    report so far and the injected brief (the critic-reroute shape),
+    fanned out once per council model on an x-tier so the round keeps
+    its model diversity; a single invocation otherwise."""
+    from langgraph.types import Send
+
+    def _route(state: dict) -> Any:
+        if _stopping(deps):
+            return synthesizer_target
+        models = [deps.models.get("researcher", "")] + list(
+            deps.extra_models_by_role.get("researcher") or [])
+        if len(models) < 2:
+            return "researcher"      # the whole state, brief included
+        rounds = int(state.get("research_rounds_used") or 0)
+        return [Send("researcher", {
+            "question": state.get("question"),
+            "plan": state.get("plan", ""),
+            "cwd": state.get("cwd"),
+            "extra_roots": list(state.get("extra_roots") or []),
+            "runtime_control": dict(state.get("runtime_control") or {}),
+            "additional_context": list(state.get("additional_context") or []),
+            "effort": state.get("effort"),
+            "models": state.get("models", {}),
+            "topology": state.get("topology"),
+            # No plan_item: the full plan and the reports so far are the
+            # lane's context (``prior_rounds`` in researcher_node).
+            "research": list(state.get("research") or []),
+            "lane_idx": REWIND_LANE_BASE + i,
+            "model_override": m,
+            "research_rounds_used": rounds,
+            "turns": [],
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+        }) for i, m in enumerate(models)]
+    return _route
+
+
+#: Plan D9: the failure classes an xauto run retries on its own. Narrower
+#: than ``retry_lanes.RETRYABLE_CLASSES``: a missing model or an overflow
+#: fails the same way again inside the same run.
+AUTO_RETRY_CLASSES = frozenset({"infra"})
+
+
+def _wrap_lane_retry(deps: GraphDeps, *, next_node: str):
+    """A pass-through barrier after the first research round that reruns
+    lanes once, then lets the run go on to ``next_node``:
+
+    - plan D9, xauto (``deps.xauto_lane_retry``): lanes that failed on
+      infrastructure, on their own model, as ``retry-lanes`` would after
+      the run;
+    - per-lane escalation (``deps.escalation_model``): lanes a guard ended
+      or that failed on their task, on the expert model, their plan item
+      led by a brief of the failed attempt (``retry_lanes.attempt_brief``),
+      at most ``deps.escalation_max``.
+
+    Lanes are chosen from this session's D7 ``node_exit`` rows (the
+    recorder commits each), so the rule is ``retry-lanes``' own. Returns
+    ``(node, router)``."""
+    from consultants.engine import retry_lanes as rl
+    from consultants.engine.control import runtime_deadline_passed
+
+    def _specs(state: dict) -> list[dict]:
+        db = getattr(deps.recorder, "db_path", None)
+        if not db:
+            return []
+        stops = rl.lane_stops(Path(db))
+        models = [deps.models.get("researcher", "")] + list(
+            deps.extra_models_by_role.get("researcher") or [])
+        rebuild = lambda lanes: rl.retry_specs(  # noqa: E731
+            lanes, plan=state.get("plan", ""),
+            plan_items=state.get("plan_items"), models_per_lane=models)
+        out: list[dict] = []
+        if getattr(deps, "xauto_lane_retry", False):
+            lanes = rl.failed_lanes(stops, AUTO_RETRY_CLASSES)
+            out += [dict(s, why="retry") for s in rebuild(lanes)] if lanes else []
+        expert = getattr(deps, "escalation_model", "") or ""
+        if expert:
+            picked = rl.escalation_lanes(
+                stops, int(getattr(deps, "escalation_max", 2)))
+            by_lane = {s["lane_idx"]: s for s in rebuild(
+                [p["lane_idx"] for p in picked])} if picked else {}
+            for stop in picked:
+                spec = by_lane.get(stop["lane_idx"])
+                if spec is None or spec["model"] == expert:
+                    continue
+                brief = rl.attempt_brief(Path(db), stop, model=spec["model"])
+                item = spec.get("plan_item") or state.get("plan", "")
+                out.append({"lane_idx": spec["lane_idx"], "model": expert,
+                            "plan_item": f"{item}\n\nNote from the harness — "
+                                         f"{brief}",
+                            "why": "escalation",
+                            "from_model": spec["model"],
+                            "reason": stop.get("failure_class")
+                            or stop.get("stop_reason")})
+        return out
+
+    def _node(state: dict) -> dict:
+        phase = int(state.get("lane_retry") or 0)
+        if phase == 1:
+            return {"lane_retry": 2}
+        if phase:
+            return {}
+        if _stopping(deps) or runtime_deadline_passed(state):
+            return {"lane_retry": 2}
+        specs = _specs(state)
+        if not specs:
+            return {"lane_retry": 2}
+        log.info("lane retry: rerunning lanes %s",
+                 [(s["lane_idx"], s["why"], s["model"]) for s in specs])
+        if deps.recorder is not None:
+            for why, kind, role in (("retry", "lane_retry", "xauto_lane_retry"),
+                                    ("escalation", "lane_escalation",
+                                     "lane_escalation")):
+                mine = [s for s in specs if s["why"] == why]
+                if not mine:
+                    continue
+                try:
+                    deps.recorder.record_event(
+                        kind=kind, role=role, round=1, lane_idx=None,
+                        payload={"lanes": [
+                            {k: s[k] for k in ("lane_idx", "model",
+                                               "from_model", "reason")
+                             if s.get(k)} for s in mine]})
+                except Exception:  # pragma: no cover
+                    log.exception("lane retry: recorder raised; ignored")
+        # Every lane adds 1 to the additive round counter the critic budgets
+        # re-routes against; the retried lanes add theirs again, so take
+        # them back here: a retry is not a research round.
+        return {"lane_retry": 1, "research_rounds_used": -len(specs)}
+
+    def _router(state: dict) -> Any:
+        if int(state.get("lane_retry") or 0) == 1:
+            specs = _specs(state)
+            if specs:
+                return [_retry_lane_send(state, s) for s in specs]
+        return next_node
+
+    return _node, _router
+
+
+def _stopping(deps: GraphDeps) -> bool:
+    """Wrapping up or cancelled: either way no router may start new work.
+    The gate skips the nodes, but a skipped node writes nothing, so a
+    router reading their last verdict (a critic's "needs more research",
+    an unconsumed tool plan) would send the run round the same skipped
+    nodes until LangGraph's recursion limit — which is what a cancel
+    during a critic asking for more research did, ending the run as
+    "graph crashed" instead of "cancelled"."""
+    rc = getattr(deps, "run_control", None)
+    return rc is not None and bool(rc.wrapping_up or rc.cancelled)
+
+
+def _route_unless_wrapping(deps: GraphDeps, route: Callable) -> Callable:
+    """``route``, except that a run wrapping up or cancelled goes to the
+    synthesizer (which the gate skips on a cancel): another research
+    round is new work (plan D9; see :func:`_stopping`)."""
+    if deps.run_control is None:
+        return route
+
+    def _routed(state: dict) -> Any:
+        if _stopping(deps):
+            return council.ROUTE_SYNTHESIZER
+        return route(state)
+    _routed.__name__ = getattr(route, "__name__", "route_after_critic")
+    return _routed
+
+
 def _wrap_researcher(deps: GraphDeps):
     # M6: when the tool_executor role is enabled in this build, flip
     # the researcher into PLAN/REPORT mode (no inline tool subloop —
@@ -413,10 +749,14 @@ def _wrap_researcher(deps: GraphDeps):
     tool_exec_on = "tool_executor" in deps.enabled_roles
 
     def _node(state: dict) -> dict:
-        return council.researcher_node(
+        return _with_lane_tags(state, council.researcher_node(
             state,
+            held_note=_held_note(deps, state),
             chat_client=deps.chat_clients["researcher"],
-            tool_executor=deps.tool_executor,
+            # The shared executor, told which lane is calling (read
+            # cache scoping now; the shell's lane views later).
+            tool_executor=bind_lane(deps.tool_executor,
+                                    researcher_lane_id(state), deps.sid),
             tool_specs=deps.tool_specs,
             grounding_msgs=deps.grounding_msgs,
             model=deps.models["researcher"],
@@ -427,8 +767,130 @@ def _wrap_researcher(deps: GraphDeps):
             tool_executor_enabled=tool_exec_on,
             store=deps.store,
             sid=deps.sid,
-        )
+            **_wrap_up_kw(deps),
+        ))
     return _node
+
+
+def _held_note(deps: GraphDeps, state: dict) -> str:
+    """A lane after the first round (a reroute or a checkpoint rewind:
+    no plan item, reports before it) on a shell run gets every other
+    lane's changes in its /scratch and a note naming them. First-round
+    lanes stay blind to each other."""
+    if state.get("plan_item") or not state.get("research") \
+            or not deps.sid or not _has_shell(deps):
+        return ""
+    from consultants.engine.held_patches import hand_over
+    from claude_hooks.tool_registry.shell_provider import lane_dirname
+    me = lane_dirname(researcher_lane_id(state))
+    idx = state.get("lane_idx")
+    rnd = (int(idx) // REWIND_LANE_BASE) if isinstance(idx, int) else None
+
+    def _sibling(other: str) -> bool:     # the same round, still writing
+        role, _, n = other.rpartition("-")
+        return (rnd is not None and role == "researcher" and n.isdigit()
+                and int(n) // REWIND_LANE_BASE == rnd)
+    return hand_over(state.get("cwd") or deps.cwd, deps.sid, me, skip=_sibling)
+
+
+def _has_shell(deps: GraphDeps) -> bool:
+    return any((s.get("function") or {}).get("name") in LANE_ONLY_TOOLS
+               for s in deps.tool_specs or ())
+
+
+def _with_lane_tags(state: dict, out: dict) -> dict:
+    """``out`` with one ``research_lanes`` entry per report it adds, so
+    report N can be traced to the lane and round that wrote it (plan
+    council-memory M5; the prompts label it, plan G3). A lane runs in the
+    round after the ones already counted."""
+    reports = out.get("research") if isinstance(out, dict) else None
+    if not reports:
+        return out
+    rnd = int(state.get("research_rounds_used") or 0) + 1
+    return {**out, "research_lanes": [{"lane": state.get("lane_idx"),
+                                       "round": rnd} for _ in reports]}
+
+
+def _wrap_cross_examine(deps: GraphDeps):
+    """Plan council-memory M5: a challenged lane answers in its own
+    conversation, with its own tools and view."""
+    from consultants.engine import cross_exam
+
+    def _node(state: dict) -> dict:
+        lane = (state.get("cross_exam_item") or {}).get("lane")
+        return cross_exam.examine_node(
+            state, chat_client=deps.chat_clients["researcher"],
+            recorder=deps.recorder,
+            tool_specs=deps.tool_specs,
+            tool_executor=bind_lane(deps.tool_executor,
+                                    researcher_lane_id({"lane_idx": lane}),
+                                    deps.sid),
+            cwd=deps.cwd, think=_think_for(deps, "researcher"))
+    return _node
+
+
+def _wrap_cross_exam_ruling(deps: GraphDeps):
+    from consultants.engine import cross_exam
+
+    def _node(state: dict) -> dict:
+        return cross_exam.ruling_node(
+            state, chat_client=deps.chat_clients["critic"],
+            model=deps.models["critic"], recorder=deps.recorder,
+            think=_think_for(deps, "critic"), **_shell_kw(deps))
+    return _node
+
+
+def _route_to_cross_exam(deps: GraphDeps, route: Callable) -> Callable:
+    """``route``, except that a critic's challenges go to the challenged
+    lanes first (one ``Send`` each) when cross-examination is on."""
+    from consultants.engine import cross_exam
+    from consultants.engine.control import runtime_deadline_passed
+
+    def _routed(state: dict):
+        from langgraph.types import Send
+        if not _stopping(deps) and not runtime_deadline_passed(state):
+            exams = cross_exam.plan(state)
+            if exams:
+                rnd = max(int(state.get("research_rounds_used") or 0), 1)
+                return [Send(CROSS_EXAM_NODE, {
+                    "question": state.get("question"),
+                    "cwd": state.get("cwd"),
+                    "extra_roots": list(state.get("extra_roots") or []),
+                    "runtime_control": dict(state.get("runtime_control") or {}),
+                    "additional_context": list(state.get("additional_context") or []),
+                    "effort": state.get("effort"),
+                    "models": state.get("models", {}),
+                    "topology": state.get("topology"),
+                    "research_rounds_used": rnd,
+                    "cross_exam_item": {**e, "round": rnd},
+                    "turns": [], "total_prompt_tokens": 0,
+                    "total_completion_tokens": 0,
+                }) for e in exams]
+        return route(state)
+    _routed.__name__ = getattr(route, "__name__", "route_after_critic")
+    return _routed
+
+
+CROSS_EXAM_NODE = "cross_examine"
+CROSS_EXAM_RULING_NODE = "cross_exam_ruling"
+
+
+def _with_cross_exam(sg, deps: GraphDeps, wrap: Callable,
+                     critic_route: Callable, routes: dict
+                     ) -> tuple[Callable, dict]:
+    """Plan council-memory M5, for both builders: challenged lanes answer
+    in parallel, the critic rules, then the critic's route. Returns the
+    critic's route and route map; off returns them unchanged and adds no
+    node."""
+    if not deps.cross_examination:
+        return critic_route, routes
+    sg.add_node(CROSS_EXAM_NODE, wrap(CROSS_EXAM_NODE, _wrap_cross_examine(deps)))
+    sg.add_node(CROSS_EXAM_RULING_NODE,
+                wrap(CROSS_EXAM_RULING_NODE, _wrap_cross_exam_ruling(deps)))
+    sg.add_edge(CROSS_EXAM_NODE, CROSS_EXAM_RULING_NODE)
+    sg.add_conditional_edges(CROSS_EXAM_RULING_NODE, critic_route, dict(routes))
+    return (_route_to_cross_exam(deps, critic_route),
+            {**routes, CROSS_EXAM_NODE: CROSS_EXAM_NODE})
 
 
 def _wrap_critic(deps: GraphDeps):
@@ -439,7 +901,9 @@ def _wrap_critic(deps: GraphDeps):
             model=deps.models["critic"],
             think=_think_for(deps, "critic"),
             recorder=deps.recorder,
-            **_tools_for(deps, "critic"),
+            **_tools_for(deps, "critic",
+                         f"critic:{state.get('lane_idx') or 0}"),
+            **_shell_kw(deps),
         )
     return _node
 
@@ -524,13 +988,15 @@ def _wrap_tool_executor(deps: GraphDeps):
         return tool_executor_node(
             state,
             chat_client=deps.chat_clients[role],
-            tool_executor=deps.tool_executor,
+            tool_executor=bind_lane(deps.tool_executor,
+                                    tool_executor_lane_id(state), deps.sid),
             tool_specs=deps.tool_specs,
             grounding_msgs=deps.grounding_msgs,
             model=deps.models[role],
             cwd=deps.cwd,
             think=_think_for(deps, role),
             recorder=deps.recorder,
+            **_wrap_up_kw(deps),
         )
     return _node
 
@@ -559,9 +1025,21 @@ def _wrap_coder(deps: GraphDeps, *, max_file_bytes: int,
     # body is a fast dict lookup, not a config-walk.
     resolver = _build_coder_chain_resolver(deps)
 
+    shell_spec = next((t for t in deps.tool_specs or []
+                       if (t.get("function") or {}).get("name")
+                       in LANE_ONLY_TOOLS), None)
+
     def _node(state: dict) -> dict:
+        ws_kw = {}
+        if deps.lane_workspace is not None and shell_spec is not None:
+            lane = f"coder:{state.get('lane_idx') or 0}"
+            ws_kw = {"workspace": lambda: deps.lane_workspace(lane),
+                     "shell_executor": bind_lane(deps.tool_executor, lane,
+                                                 deps.sid),
+                     "shell_spec": shell_spec}
         return coder_node(
             state,
+            **ws_kw,
             chat_client=deps.chat_clients.get(role),
             grounding_msgs=deps.grounding_msgs,
             model=deps.models.get(role, ""),
@@ -573,6 +1051,7 @@ def _wrap_coder(deps: GraphDeps, *, max_file_bytes: int,
             max_total_bytes=max_total_bytes,
             max_files=max_files,
             model_chain_resolver=resolver,
+            **_wrap_up_kw(deps),
         )
     return _node
 
@@ -646,7 +1125,9 @@ def _wrap_synthesizer(deps: GraphDeps):
             recorder=deps.recorder,
             prior_messages=deps.prior_messages_by_role.get("synthesizer"),
             fallback_models=list(deps.synthesizer_fallback_models),
+            **({"wrap_up": True} if _wrapping_up(deps) else {}),
             **_tools_for(deps, "synthesizer"),
+            **_shell_kw(deps),
         )
     return _node
 
@@ -680,7 +1161,8 @@ def _wrap_meta_critic(deps: GraphDeps):
             model=deps.models["critic"],
             think=_think_for(deps, "critic"),
             recorder=deps.recorder,
-            **_tools_for(deps, "meta_critic"),
+            **_tools_for(deps, "meta_critic", "meta_critic:0"),
+            **_shell_kw(deps),
         )
     return _node
 
@@ -915,6 +1397,11 @@ def build_council_graph(deps: GraphDeps,
     # substitution is a single string everywhere — the rest of the
     # topology wiring is unaware of the coder layer.
     synthesizer_target = "coder_router" if coder_enabled else "synthesizer"
+    if "researcher" in enabled:
+        sg.add_node(REWIND_NODE, _pass_through)
+        sg.add_conditional_edges(
+            REWIND_NODE, _rewind_router(deps, synthesizer_target),
+            ["researcher", synthesizer_target])
     if coder_enabled:
         sg.add_node("coder", _wrap("coder", _wrap_coder(
             deps,
@@ -992,6 +1479,13 @@ def build_council_graph(deps: GraphDeps,
                             # the lane's citation lint runs with cwd alone
                             # and calls every --add-dir cite unverified.
                             "extra_roots": list(state.get("extra_roots") or []),
+                            # The run record (stall thresholds, typed protocol,
+                            # budget / think / sampling layers): read-only here,
+                            # and absent from a lane unless handed over.
+                            "runtime_control": dict(state.get("runtime_control") or {}),
+                            # Injected briefs: a Send lane sees no global channel
+                            # it was not handed (#1626).
+                            "additional_context": list(state.get("additional_context") or []),
                             "effort": state.get("effort"),
                             "models": state.get("models", {}),
                             "topology": state.get("topology"),
@@ -1045,6 +1539,13 @@ def build_council_graph(deps: GraphDeps,
                         # Carried explicitly: a Send lane sees only the
                         # keys in its own dict (see the researcher fanout).
                         "extra_roots": list(state.get("extra_roots") or []),
+                        # The run record (stall thresholds, typed protocol,
+                        # budget / think / sampling layers): read-only here,
+                        # and absent from a lane unless handed over.
+                        "runtime_control": dict(state.get("runtime_control") or {}),
+                        # Injected briefs: a Send lane sees no global channel
+                        # it was not handed (#1626).
+                        "additional_context": list(state.get("additional_context") or []),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
@@ -1054,9 +1555,11 @@ def build_council_graph(deps: GraphDeps,
                         "research_rounds_used": int(
                             state.get("research_rounds_used") or 0
                         ),
-                        # lane_idx flags this critic as part of a
+                        # critic_fanout flags this critic as part of a
                         # fanout (critic_node suppresses its
-                        # decision/reroute deltas in that mode).
+                        # decision/reroute deltas in that mode);
+                        # lane_idx names the instance in the record.
+                        "critic_fanout": True,
                         "lane_idx": idx,
                         "model_override": model_tag,
                         # Empty deltas so additive reducers don't
@@ -1102,6 +1605,13 @@ def build_council_graph(deps: GraphDeps,
     # 3. M6: The researcher -> {next} edge when tool_executor is
     #    enabled (replaced by the route_after_researcher conditional
     #    below).
+    # Plan D9: the xauto automatic lane retry sits on the researcher's way
+    # out. Not with tool_executor lanes: there the researcher alternates
+    # PLAN / REPORT through its own router.
+    lane_retry_on = ((bool(getattr(deps, "xauto_lane_retry", False))
+                      or bool(getattr(deps, "escalation_model", "")))
+                     and "researcher" in enabled and not tool_executor_enabled)
+    lane_retry_next: Any = None
     for src, dst in plan_topology(enabled):
         if (fanout_router is not None
                 and src == "planner" and dst == "researcher"):
@@ -1117,6 +1627,10 @@ def build_council_graph(deps: GraphDeps,
         if dst == "synthesizer" and coder_enabled:
             dst = synthesizer_target
         dst_node = END if dst == "END" else dst
+        if lane_retry_on and src == "researcher":
+            lane_retry_next = dst_node
+            sg.add_edge("researcher", "lane_retry")
+            continue
         sg.add_edge(src_node, dst_node)
 
     if fanout_router is not None:
@@ -1150,7 +1664,11 @@ def build_council_graph(deps: GraphDeps,
         # Unconditional edge from the predecessor barriers any
         # upstream Send fan-out (researcher).
         pred_node = START if critic_predecessor == "START" else critic_predecessor
-        sg.add_edge(pred_node, "research_barrier")
+        if lane_retry_on and pred_node == "researcher":
+            lane_retry_next = "research_barrier"
+            sg.add_edge("researcher", "lane_retry")
+        else:
+            sg.add_edge(pred_node, "research_barrier")
 
         # Conditional fan-out from the single-invocation barrier
         # node fires exactly once → exactly C critic Sends.
@@ -1213,6 +1731,9 @@ def build_council_graph(deps: GraphDeps,
             so x-tier sibling researcher lanes don't mask each
             other's unconsumed items.
             """
+            if _stopping(deps):
+                # Plan D9: no new tool lanes once the run stops.
+                return researcher_downstream_natural or synthesizer_target
             plan = list(state.get("tool_plan") or [])
             results = list(state.get("tool_results") or [])
             rounds_used = int(state.get("research_rounds_used") or 0)
@@ -1245,6 +1766,13 @@ def build_council_graph(deps: GraphDeps,
                         # Carried explicitly: a Send lane sees only the
                         # keys in its own dict (see the researcher fanout).
                         "extra_roots": list(state.get("extra_roots") or []),
+                        # The run record (stall thresholds, typed protocol,
+                        # budget / think / sampling layers): read-only here,
+                        # and absent from a lane unless handed over.
+                        "runtime_control": dict(state.get("runtime_control") or {}),
+                        # Injected briefs: a Send lane sees no global channel
+                        # it was not handed (#1626).
+                        "additional_context": list(state.get("additional_context") or []),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
@@ -1401,6 +1929,13 @@ def build_council_graph(deps: GraphDeps,
                         # Carried explicitly: a Send lane sees only the
                         # keys in its own dict (see the researcher fanout).
                         "extra_roots": list(state.get("extra_roots") or []),
+                        # The run record (stall thresholds, typed protocol,
+                        # budget / think / sampling layers): read-only here,
+                        # and absent from a lane unless handed over.
+                        "runtime_control": dict(state.get("runtime_control") or {}),
+                        # Injected briefs: a Send lane sees no global channel
+                        # it was not handed (#1626).
+                        "additional_context": list(state.get("additional_context") or []),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
@@ -1458,6 +1993,12 @@ def build_council_graph(deps: GraphDeps,
             ["researcher"],
         )
 
+    if lane_retry_on and lane_retry_next is not None:
+        _lr_node, _lr_router = _wrap_lane_retry(deps, next_node=lane_retry_next)
+        sg.add_node("lane_retry", _lr_node)
+        sg.add_conditional_edges("lane_retry", _lr_router,
+                                 ["researcher", lane_retry_next])
+
     # M7: xauto escalator wiring.
     #
     # Inserts a pass-through node BEFORE the critic's conditional
@@ -1513,14 +2054,12 @@ def build_council_graph(deps: GraphDeps,
         else:
             conditional_source = decider
         if "researcher" in enabled:
-            sg.add_conditional_edges(
-                conditional_source,
-                council.route_after_critic,
-                {
-                    council.ROUTE_RESEARCHER: "researcher",
-                    council.ROUTE_SYNTHESIZER: synthesizer_target,
-                },
-            )
+            critic_route, routes = _with_cross_exam(
+                sg, deps, _wrap,
+                _route_unless_wrapping(deps, council.route_after_critic),
+                {council.ROUTE_RESEARCHER: "researcher",
+                 council.ROUTE_SYNTHESIZER: synthesizer_target})
+            sg.add_conditional_edges(conditional_source, critic_route, routes)
         else:
             # No researcher to loop back to; the critic-side is
             # effectively advisory — straight to synthesizer (or
@@ -1542,6 +2081,8 @@ def build_council_graph(deps: GraphDeps,
     # ``coder_artifacts`` read sees every lane's output merged.
     if coder_enabled:
         def _route_after_coder_gate(state: dict) -> Any:
+            if _stopping(deps):
+                return "synthesizer"
             wants = bool(state.get("requires_code_generation"))
             tasks = list(state.get("coder_tasks") or [])
             if not wants or not tasks:
@@ -1578,6 +2119,13 @@ def build_council_graph(deps: GraphDeps,
                         # Carried explicitly: a Send lane sees only the
                         # keys in its own dict (see the researcher fanout).
                         "extra_roots": list(state.get("extra_roots") or []),
+                        # The run record (stall thresholds, typed protocol,
+                        # budget / think / sampling layers): read-only here,
+                        # and absent from a lane unless handed over.
+                        "runtime_control": dict(state.get("runtime_control") or {}),
+                        # Injected briefs: a Send lane sees no global channel
+                        # it was not handed (#1626).
+                        "additional_context": list(state.get("additional_context") or []),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
@@ -1652,7 +2200,8 @@ def build_council_graph(deps: GraphDeps,
 def build_follow_up_graph(deps: GraphDeps,
                           *, checkpointer: Optional[Any] = None,
                           interrupt_before: Optional[list[str]] = None,
-                          tracer: Optional[Any] = None):
+                          tracer: Optional[Any] = None,
+                          retry_lanes: Optional[list[dict]] = None):
     """Compile the SHORTENED follow-up graph.
 
     Topology (same conventions as ``build_council_graph``):
@@ -1668,6 +2217,11 @@ def build_follow_up_graph(deps: GraphDeps,
     with the parent's plan + research as ``prior_rounds`` and the
     follow-up question as ``plan_item``. Synthesizer produces a
     fresh ``final_answer`` based on the merged evidence.
+
+    ``retry_lanes`` (plan D9, ``retry-lanes``): START fans out one
+    researcher Send per ``{"lane_idx", "plan_item", "model"}`` — the
+    parent's failed lanes, asked what they were asked — instead of the
+    single follow-up lane.
     """
     try:
         from langgraph.graph import StateGraph, START, END
@@ -1704,6 +2258,9 @@ def build_follow_up_graph(deps: GraphDeps,
 
     sg = StateGraph(CouncilState)
     sg.add_node("researcher", _wrap("researcher", _wrap_researcher(deps)))
+    sg.add_node(REWIND_NODE, _pass_through)
+    sg.add_conditional_edges(REWIND_NODE, _rewind_router(deps, "synthesizer"),
+                             ["researcher", "synthesizer"])
     if "critic" in enabled:
         sg.add_node("critic", _wrap("critic", _wrap_critic(deps)))
     sg.add_node("synthesizer", _wrap("synthesizer", _wrap_synthesizer(deps)))
@@ -1713,17 +2270,41 @@ def build_follow_up_graph(deps: GraphDeps,
     if adversary_on:
         sg.add_node("adversary", _wrap("adversary", _wrap_adversary(deps)))
 
-    sg.add_edge(START, "researcher")
+    if retry_lanes:
+        lanes = [dict(spec) for spec in retry_lanes]
+
+        def _fanout_retried_lanes(state: dict) -> Any:
+            return [_retry_lane_send(state, spec) for spec in lanes]
+        sg.add_conditional_edges(START, _fanout_retried_lanes, ["researcher"])
+    elif deps.follow_up_route:
+        def _route_node(state: dict) -> dict:
+            return council.follow_up_route_node(
+                state, chat_client=deps.chat_clients["synthesizer"],
+                model=deps.models["synthesizer"],
+                prior_messages=deps.prior_messages_by_role.get("synthesizer"),
+                recorder=deps.recorder)
+        sg.add_node(FOLLOW_UP_ROUTE_NODE, _wrap("synthesizer", _route_node))
+        sg.add_edge(START, FOLLOW_UP_ROUTE_NODE)
+        sg.add_conditional_edges(
+            FOLLOW_UP_ROUTE_NODE,
+            lambda s: ("synthesizer" if _stopping(deps)
+                       or s.get("follow_up_route") == "synthesize"
+                       else "researcher"),
+            ["researcher", "synthesizer"])
+    else:
+        sg.add_edge(START, "researcher")
     if "critic" in enabled:
         sg.add_edge("researcher", "critic")
-        sg.add_conditional_edges(
-            "critic",
-            council.route_after_critic,
-            {
-                council.ROUTE_RESEARCHER: "researcher",
-                council.ROUTE_SYNTHESIZER: "synthesizer",
-            },
-        )
+        # The follow-up's own lanes answer a challenge; a report it
+        # inherited from the parent cannot (its conversation is in the
+        # parent's transcript and its view was frozen at the parent's
+        # end), so cross_exam.plan() skips those and they reroute.
+        critic_route, routes = _with_cross_exam(
+            sg, deps, _wrap,
+            _route_unless_wrapping(deps, council.route_after_critic),
+            {council.ROUTE_RESEARCHER: "researcher",
+             council.ROUTE_SYNTHESIZER: "synthesizer"})
+        sg.add_conditional_edges("critic", critic_route, routes)
     else:
         sg.add_edge("researcher", "synthesizer")
     if adversary_on:

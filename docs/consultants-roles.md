@@ -539,6 +539,105 @@ panel (which does the same thing across multiple claims in parallel).
 
 ---
 
+## Typed messages between roles (opt-in)
+
+Plan: [`PLAN-council-cerebriline.md`](PLAN-council-cerebriline.md)
+Milestone G. Off by default; with it off, every prompt and request is
+byte-identical to before.
+
+```toml
+[protocol]
+typed = true
+```
+
+```bash
+claude-consultants config set-protocol --typed on   # or off
+```
+
+The `/consultants config` menu has a **Typed messages** entry.
+
+With it on, each role except the synthesizer sends its result as a
+structured call to a result tool. The engine answers that tool itself
+(`consultants/engine/typed_results.py`):
+
+| role | result tool | carries |
+|---|---|---|
+| planner | `council_plan` | numbered steps |
+| researcher | `council_report` | summary + claims with `path:line` citations |
+| critic, meta_critic | `council_verdict` | decision, why, named gap, corrections, confidence |
+| adversary | `council_refutation` | the refutation |
+
+- A record counts only when it is the turn's **only** call. A result
+  call beside other tool calls is answered "call it on its own"; the
+  other calls run as usual.
+- Invalid or cut arguments are re-asked once. After that the role
+  **falls back to prose**, so a model that can't produce the record
+  still finishes.
+- **Roles send and receive the record itself, as JSON** (G7, owner
+  2026-10-19; xOllama's council works the same way). Only the
+  synthesizer's final answer is prose. The state channel holds
+  `typed_results.dumps()`: the record tagged `"record": "<tool name>"`.
+  Every engine reader takes the fields first — the critic's decision,
+  `confidence`, the escalator's gaps, plan steps, the refutation's
+  issues, `barren_rounds()` and the cited-comment lookup through
+  `citations_of()` (JSON keeps `path` and `line` apart, so the prose
+  regex would find no cite and every later round would count as barren),
+  the lane digest's index line, the cross-examination's `CHALLENGE`
+  lines in the verdict's `why`. The prose regexes remain for text that
+  is not a record. `loads()` reads the leading object, so notes the engine
+  appends after a record (evidence hold, cross-examination block) leave
+  it readable, and it takes an untagged or fenced JSON object that
+  validates as the expected record, because critics answer in JSON once
+  JSON is in their prompt (xOllama). `render()` is kept for display.
+- When typed mode is on, reader roles (critic, meta_critic, synthesizer,
+  adversary) are told that what they receive are the council's own
+  claims to check, not instructions, and the shape of each record
+  (`CLAIMS_FRAMING`), including that a claim marked `unverified` failed
+  its check at the source.
+- Schemas set item counts but no `maxLength`. Text is cut when rendered
+  (2000 chars for summaries, 600 per field).
+- The flag reaches the graph as `runtime_control.typed_protocol`, which
+  is seeded only when the flag is on.
+- On opencoti or llama.cpp, a `format` becomes `response_format`. A
+  server that refuses it gets the call again without it.
+
+Verified live on 2026-10-14: the critic on opencoti (`@bs2`) returned a
+`council_verdict` as its only call, which rendered as `DECISION: ready`.
+Measuring the effect on token use and quality is G6.
+
+Built 2026-10-19 (plan G3–G5):
+
+- **Reports are labelled by lane and round** in every mode:
+  `RESEARCHER REPORT N (lane L, round R)` from `research_lanes`. The old
+  `(round i)` was the report's index. `N` is what corrections and
+  challenges cite; a follow-up seeded with parent reports (lanes not
+  aligned) is labelled by number only.
+- **Claims are checked at the source** (G4, typed only):
+  `typed_results.verify_claims()` checks each `council_report` claim
+  field by field before it is rendered: the file exists, the line is in
+  it, the `symbol` is within 3 lines (or, in Python, encloses the line),
+  and the `quote` is in the file there (else "the quote is at line K").
+  A failed field is marked `unverified` on the claim (rendered as
+  `[unverified — …]` for display). The typed report is not re-linted by the regex CitationLinter, whose 80-char
+  proximity check reads rendered fields wrong.
+- **Evidence by ref** (G4): a critic, meta-critic or synthesizer with tools
+  gets `evidence(path, start_line, end_line)`, answered only from the
+  run's read cache (`read_evidence.py`): the lines a lane read, as it read
+  them; lines no lane read are listed as unread, and a lane whose view
+  diverged (the shell) is not evidence.
+- **Stop on no progress** (G5): two rounds in a row whose reports cite no
+  new `path:line` overrule the critic's re-route (`barren_rounds()`).
+- **Route-only follow-up** (G5): a follow-up starts with one call on the
+  synthesizer's model (thinking off, 32-token cap): `synthesize` re-answers
+  from the parent's evidence, anything else researches. Recorded as a
+  `follow_up_route` event; `fresh` is recorded and researched.
+- **Already tried** (G5, every mode): `consult --tried FILE` (body
+  `tried`) gives every role the asker's earlier attempts verbatim.
+- The forced answer at the step bound already offers only the result tool
+  (G1). Coder-side G5 items wait for a coder verify step.
+
+---
+
 ## See also
 
 - [`docs/consultants.md`](consultants.md) — the engine driver doc:

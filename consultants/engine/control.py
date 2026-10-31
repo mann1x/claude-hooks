@@ -27,6 +27,8 @@ Pure-Python; imports cleanly without langgraph.
 
 from __future__ import annotations
 
+import uuid
+
 import time
 from typing import Any, Optional
 
@@ -198,7 +200,135 @@ def runtime_control_defaults(
         "xauto_tier": starting_tier,  # type: ignore[typeddict-item]
         "xauto_escalations": 0,
     }
+    # Plan G: present only when on, so a default run's record is
+    # byte-identical to before (M12 parity); readers treat absent as off.
+    protocol = getattr(cfg, "protocol", None)
+    if protocol is not None and getattr(protocol, "typed", False):
+        rc["typed_protocol"] = True
+    # Plan council-memory M5: present only when on (readers: absent = off).
+    # ``"shell"`` depends on the run, so the runner seeds it
+    # (``runner._seed_runtime_control(cross_exam=)``); only a forced
+    # ``True`` is decided here.
+    critic = getattr(cfg, "critic", None)
+    if critic is not None and getattr(critic, "cross_examination", False) is True:
+        rc["cross_examination"] = True
+    # Plan §0.7: the nudge profile, present only when not all standard.
+    guards = getattr(cfg, "guards", None)
+    if guards is not None and not guards.is_default():
+        rc["guards"] = {"profile": guards.profile,  # type: ignore[typeddict-item]
+                        "roles": dict(guards.roles)}
+    layers = budget_layers(cfg)
+    if layers:
+        rc["budget"] = layers  # type: ignore[typeddict-item]
+    think_by_model = {
+        f"{role}@{m}": vals["think"]
+        for role, r in (getattr(cfg, "roles", None) or {}).items()
+        for m, vals in (getattr(r, "model_overrides", None) or {}).items()
+        if "think" in (vals or {})}
+    # An explicit role setting, so a model template's ``think`` can sit
+    # between it and the role default (plan B3).
+    think_by_model.update({
+        role: r.think for role, r in (getattr(cfg, "roles", None) or {}).items()
+        if getattr(r, "think", None) is not None})
+    if think_by_model:
+        rc["think"] = think_by_model  # type: ignore[typeddict-item]
+    # Plan B4: scopes seed uniqueness to this run (rides the checkpoint,
+    # so a resumed council keeps it); layers only when something is set.
+    rc["sampling_run"] = uuid.uuid4().hex  # type: ignore[typeddict-item]
+    sampling = sampling_layers(cfg)
+    if sampling:
+        rc["sampling"] = sampling  # type: ignore[typeddict-item]
+    # Plan H: only when on. The key file's path, never the key: this
+    # record rides the checkpoint to disk.
+    decision = decision_settings(cfg)
+    if decision:
+        rc["decision"] = decision  # type: ignore[typeddict-item]
+    # Plan C: layers only when something is set (M12 parity).
+    compaction = compaction_layers(cfg)
+    if compaction:
+        rc["compaction"] = compaction  # type: ignore[typeddict-item]
     return rc
+
+
+def decision_settings(cfg: cc.ConsultantsConfig) -> dict:
+    """``[decision]`` for the run record; empty unless enabled with at
+    least one seam, acting or shadow. ``shadow`` only when set (M12
+    parity: a record without it reads as before)."""
+    d = getattr(cfg, "decision", None)
+    shadow = list(getattr(d, "shadow", None) or ())
+    if d is None or not d.enabled or not (d.seams or shadow):
+        return {}
+    out = {"url": d.url, "model": d.model, "key_file": d.key_file,
+           "floor": d.floor, "high_stakes_floor": d.high_stakes_floor,
+           "timeout_s": d.timeout_s, "seams": list(d.seams)}
+    if shadow:
+        out["shadow"] = shadow
+    return out
+
+
+def compaction_layers(cfg: cc.ConsultantsConfig) -> dict:
+    """``[compaction]`` / ``[role.X.compaction]`` / per-model compaction
+    keys as ``"*"`` / ``"<role>"`` / ``"<role>@<model>"`` layers for
+    :func:`consultants.engine.compaction.settings_from`; empty when
+    nothing is set."""
+    out: dict = {}
+    if getattr(cfg, "compaction", None):
+        out["*"] = dict(cfg.compaction)
+    for role, rc in (getattr(cfg, "roles", None) or {}).items():
+        if getattr(rc, "compaction", None):
+            out[role] = dict(rc.compaction)
+        for model, vals in (getattr(rc, "model_overrides", None) or {}).items():
+            picked = {k: v for k, v in (vals or {}).items()
+                      if k in cc.COMPACTION_KEYS}
+            if picked:
+                out[f"{role}@{model}"] = picked
+    return out
+
+
+def sampling_layers(cfg: cc.ConsultantsConfig) -> dict:
+    """``[sampling]`` / ``[role.X.sampling]`` / per-model sampling keys as
+    ``"*"`` / ``"<role>"`` / ``"<role>@<model>"`` layers; empty when
+    nothing is set (the defaults then apply)."""
+    out: dict = {}
+    if getattr(cfg, "sampling", None):
+        out["*"] = dict(cfg.sampling)
+    for role, rc in (getattr(cfg, "roles", None) or {}).items():
+        if getattr(rc, "sampling", None):
+            out[role] = dict(rc.sampling)
+        for model, vals in (getattr(rc, "model_overrides", None) or {}).items():
+            picked = {k: v for k, v in (vals or {}).items()
+                      if k in cc.SAMPLING_KEYS}
+            if picked:
+                out[f"{role}@{model}"] = picked
+    return out
+
+
+def budget_layers(cfg: cc.ConsultantsConfig) -> dict:
+    """The run's budget knobs (plan B1/B2) as merge layers for
+    :func:`consultants.engine.council._budget_knobs`: ``"*"`` from
+    ``[budget]``, ``"<role>"`` from ``[role.X.budget]`` (an explicit
+    ``ctx_max`` is that role's pinned ``num_ctx`` unless the table sets
+    one), ``"<role>@<model>"`` from ``[role.X.models."<model>"]``. Only
+    set keys are carried, and the record is empty when none are, so a
+    default run seeds nothing."""
+    out: dict = {}
+    glob = dict(getattr(cfg, "budget", None) or {})
+    if glob:
+        out["*"] = glob
+    for role, rc in (getattr(cfg, "roles", None) or {}).items():
+        layer = dict(getattr(rc, "budget", None) or {})
+        ctx_max = getattr(rc, "ctx_max", None)
+        if (getattr(rc, "ctx_max_explicit", False) and ctx_max
+                and "num_ctx" not in layer):
+            layer["num_ctx"] = int(ctx_max)
+        if layer:
+            out[role] = layer
+        for model, vals in (getattr(rc, "model_overrides", None) or {}).items():
+            picked = {k: v for k, v in (vals or {}).items()
+                      if k in cc.BUDGET_KEYS}
+            if picked:
+                out[f"{role}@{model}"] = picked
+    return out
 
 
 # ---------- accessor helpers (node-side) ------------------------- #

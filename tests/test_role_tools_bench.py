@@ -249,6 +249,21 @@ class TestFlagged(unittest.TestCase):
                + "Something else here does not exist.")
         self.assertFalse(flagged(far, "retry_state.py"))
 
+    def test_the_false_literal_is_not_doubt(self):
+        """medium-02's true report says the check "returns False"; a
+        critic confirming it was scored as doubting its neighbours."""
+        self.assertFalse(flagged(
+            "Confirmed: should_retry returns False once elapsed passes.",
+            "should_retry"))
+        self.assertFalse(flagged(
+            "Confirmed: `should_retry` gives `return false` there.",
+            "should_retry"))
+        self.assertTrue(flagged(
+            "The claim about should_retry is false.", "should_retry"))
+        self.assertTrue(flagged(
+            "`should_retry` is cited, but that claim is false.",
+            "should_retry"))
+
     def test_absent_token_is_not_flagged(self):
         self.assertFalse(flagged("Everything checks out.", "retry_state.py"))
 
@@ -873,3 +888,123 @@ class TestCostReport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTypedArm(unittest.TestCase):
+    """Plan G6: the same critic on the typed protocol, and the cost knob."""
+
+    def test_the_typed_critic_reads_the_report_as_a_record(self):
+        # Plan G7: a typed researcher hands on JSON, so the typed arm's
+        # critic gets the same words as a council_report.
+        from benchmarks.consultants.role_tools_bench import (
+            report_record, run_detect_trial)
+        from consultants.engine import typed_results as tr
+        q = load_detect_questions()[0]
+        rec = tr.loads(report_record(q.research), tr.REPORT)
+        words = sorted(" ".join(q.research.split()).split())
+        said = " ".join([rec["summary"]] + [c["claim"] for c in rec["claims"]])
+        self.assertEqual(words, sorted(said.split()))
+        self.assertIn(("retry.py", 3), [(c["path"], c["line"]) for c in rec["claims"]])
+        sent = []
+
+        class Chat:
+            def chat(self, payload):
+                sent.append(payload["messages"])
+                return {"choices": [{"message": {"role": "assistant",
+                        "content": "DECISION: ready\nok"}}],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+        run_detect_trial(q, arm="tooled-typed", trial_idx=0,
+                         chat_client=Chat(), model="m")
+        user = "\n".join(m["content"] for m in sent[0] if m["role"] == "user")
+        self.assertIn('"record": "council_report"', user)
+        run_detect_trial(q, arm="tooled", trial_idx=0, chat_client=Chat(),
+                         model="m")
+        user = "\n".join(m["content"] for m in sent[-1] if m["role"] == "user")
+        self.assertNotIn('"record"', user)
+
+    def test_a_typed_correction_is_caught_through_the_record(self):
+        # Plan G7: the verdict is JSON, which has no CORRECTIONS: header.
+        from benchmarks.consultants.role_tools_bench import run_detect_trial
+        q = load_detect_questions()[0]
+        tok = q.planted_false[0]
+
+        class Chat:
+            def chat(self, payload):
+                return {"choices": [{"message": {
+                    "role": "assistant", "content": "", "tool_calls": [{
+                        "id": "c1", "type": "function", "function": {
+                            "name": "council_verdict", "arguments": json.dumps({
+                                "decision": "ready", "why": "one value is off",
+                                "corrections": [{"report": 1, "claimed": tok,
+                                                 "actual": "something else"}],
+                                "confidence": 0.8})}}]},
+                    "finish_reason": "tool_calls"}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 3}}
+
+        t = run_detect_trial(q, arm="tooled-typed", trial_idx=0,
+                             chat_client=Chat(), model="m")
+        self.assertIn(tok, t.caught)
+        self.assertTrue(t.corrections_reported)
+
+    def test_typed_arm_hands_the_critic_its_verdict_tool(self):
+        from benchmarks.consultants.role_tools_bench import run_detect_trial
+        seen = []
+
+        class Chat:
+            def chat(self, payload):
+                seen.append([t["function"]["name"]
+                             for t in payload.get("tools") or []])
+                return {"choices": [{"message": {
+                    "role": "assistant", "content": "", "tool_calls": [{
+                        "id": "c1", "type": "function", "function": {
+                            "name": "council_verdict", "arguments": json.dumps({
+                                "decision": "ready", "why": "ok",
+                                "confidence": 0.9})}}]},
+                    "finish_reason": "tool_calls"}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 3}}
+
+        q = load_detect_questions()[0]
+        t = run_detect_trial(q, arm="tooled-typed", trial_idx=0,
+                             chat_client=Chat(), model="m")
+        self.assertFalse(t.error)
+        self.assertIn("council_verdict", seen[0])
+        # Plan G7: the verdict is the record itself, graded through render().
+        self.assertIn('"decision": "ready"', t.verdict)
+        t = run_detect_trial(q, arm="tooled", trial_idx=0,
+                             chat_client=Chat(), model="m")
+        self.assertNotIn("council_verdict", seen[-1])
+
+    def test_typed_knob_writes_the_protocol_block(self):
+        import tempfile
+        from benchmarks.consultants.role_tools_bench import write_arm_config
+        with tempfile.TemporaryDirectory() as d:
+            on = write_arm_config(Path(d), all_roles=True, effort="high",
+                                  typed=True).read_text()
+            self.assertIn("[protocol]\ntyped = true", on)
+            off = write_arm_config(Path(d), all_roles=True,
+                                   effort="high").read_text()
+            self.assertNotIn("[protocol]", off)
+
+
+class TestRegrade(unittest.TestCase):
+    """A saved run is re-scored by the current oracle, with no model."""
+
+    def test_saved_score_is_replaced_and_errors_kept(self):
+        import tempfile
+        from benchmarks.consultants.role_tools_bench import regrade
+        q = next(x for x in load_detect_questions()
+                 if x.id.startswith("medium-02"))
+        tok = q.planted_true[0]
+        ok = DetectTrial(question_id=q.id, tier=q.tier, arm="tooled",
+                         trial_idx=0, false_positives=["stale"],
+                         verdict=f"Confirmed: {tok} returns False there.")
+        bad = DetectTrial(question_id=q.id, tier=q.tier, arm="tooled",
+                          trial_idx=1, error="boom", false_positives=["kept"])
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "trials.jsonl"
+            p.write_text("".join(json.dumps(t.to_dict()) + "\n"
+                                 for t in (ok, bad)))
+            out = regrade(p, load_detect_questions())
+        self.assertEqual(out[0].false_positives, [])
+        self.assertEqual(out[1].false_positives, ["kept"])

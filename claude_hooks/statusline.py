@@ -32,9 +32,12 @@ from typing import Callable, Optional
 log = logging.getLogger("claude_hooks.statusline")
 
 #: How long an unread count is reused. Short enough that mail shows up
-#: within one idle refresh or two, long enough that a burst of assistant
-#: messages costs one query.
-MAIL_CACHE_SECONDS = 20
+#: at the next idle refresh, long enough that a burst of assistant
+#: messages costs one query. Was 20 s with a 30 s refresh: new mail took
+#: up to ~50 s to appear, and a busy session had usually read it by then
+#: (opencoti read #763 66 s after it arrived). The lookup measures
+#: ~120 ms against a 5 GB transcript, so 5 s costs nothing that matters.
+MAIL_CACHE_SECONDS = 5
 
 #: Sessions end without telling the status line; drop their caches.
 MAIL_CACHE_MAX_AGE_SECONDS = 86400

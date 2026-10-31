@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 import time
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -71,6 +72,7 @@ from consultants.server.control import (
     ROUTED_BEST_EFFORT_CAP_REACHED,
     ROUTED_IN_PLACE,
     ROUTED_QUEUED,
+    ROUTED_REWOUND_EXTRA_ROUND,
     ROUTED_REWOUND_TO_RESEARCHER,
     build_cancel_request,
     build_inject_delta,
@@ -253,6 +255,47 @@ def _classify_phase_from_live(s) -> tuple[str, dict]:
     return phase, values
 
 
+def _with_synthesizer_copy(delta: dict, inj, target: str) -> dict:
+    """``delta`` plus a copy of the inject's Doc addressed to the
+    synthesizer, saying who the brief was for."""
+    from consultants.engine.evidence import BRIEF_ATTRIBUTION
+    from consultants.engine.state_v2 import Doc
+    docs = list(delta.get("additional_context") or [])
+    if not docs:
+        return delta
+    d = docs[0]
+    copy = Doc(role="synthesizer",
+               text=(f"[A brief addressed to the {target} at the review "
+                     f"checkpoint. Its instructions bind the answer. "
+                     f"{BRIEF_ATTRIBUTION}]\n\n{d.text}"),
+               ts=d.ts, source=d.source)
+    return {**delta, "additional_context": docs + [copy]}
+
+
+def _with_critic_copy(delta: dict, target: str) -> dict:
+    """A researcher brief also goes to the critic, labelled: the critic
+    judges whether the rewound round checked it, and can only do that
+    if it has read it (#1626)."""
+    from consultants.engine.state_v2 import Doc
+    docs = list(delta.get("additional_context") or [])
+    if target != "researcher" or not docs:
+        return delta
+    d = docs[0]
+    copy = Doc(role="critic",
+               text=(f"[A brief given to the researchers at the review "
+                     f"checkpoint. Judge whether this round's reports "
+                     f"verified each of its claims (a command whose output "
+                     f"shows it, or a cited read) or only repeated them.]"
+                     f"\n\n{d.text}"),
+               ts=d.ts, source=d.source)
+    return {**delta, "additional_context": docs + [copy]}
+
+
+def _one_more_round(values: dict) -> int:
+    """The research-round cap that allows exactly one more round."""
+    return int((values or {}).get("research_rounds_used") or 0) + 1
+
+
 def _make_inject_apply_fn(s):
     """Build the ``apply_fn(inj)`` the synchronous inject path AND the
     drain share. Mutates ``inj`` in place to a terminal status,
@@ -321,20 +364,49 @@ def _make_inject_apply_fn(s):
             # re-runs a researcher pass that picks up this Doc before
             # re-synthesizing. Otherwise the Doc still reaches the
             # synthesizer as text (in place / best-effort).
+            # The synthesizer is the only node certain to run from here,
+            # so a brief named for another role is also handed to it,
+            # labelled — an "applied" inject must reach someone
+            # (csl-2026-10-18-1033-5a67: a critic brief and a
+            # researcher brief at the checkpoint both said applied and
+            # neither reached any prompt).
+            if effective_target not in ("synthesizer", "any"):
+                delta = _with_synthesizer_copy(delta, inj, effective_target)
+            grant = None
+            if (effective_target in ("researcher", "critic")
+                    and not rewind_budget_ok(values)
+                    and getattr(s, "_adversary_checkpoint_active", False)
+                    and not getattr(s, "_checkpoint_round_granted", False)):
+                # The checkpoint's usual verdict is "not ready, go look
+                # at X"; with the round cap spent it could never act on
+                # it. One bounded extra round per council, at the
+                # checkpoint only.
+                grant = _one_more_round(values)
+                delta = {**delta, "runtime_control": {"max_rounds": grant}}
+            if grant is not None or rewind_budget_ok(values):
+                # A rewind runs the critic after the new round.
+                delta = _with_critic_copy(delta, effective_target)
             ok, err = _apply_state_delta_core(s, delta)
             if not ok:
                 inj.status = INJECT_STATUS_FAILED
                 inj.error = err
                 return
-            if effective_target == "researcher":
-                if rewind_budget_ok(values):
+            if effective_target in ("researcher", "critic"):
+                # A rewind re-runs the research pass and, where the run
+                # has a critic, the critic after it — so a critic brief
+                # is honoured the same way.
+                if grant is not None:
+                    s._checkpoint_round_granted = True
+                    s.request_revalidation()
+                    inj.routed = ROUTED_REWOUND_EXTRA_ROUND
+                elif rewind_budget_ok(values):
                     s.request_revalidation()
                     inj.routed = ROUTED_REWOUND_TO_RESEARCHER
                 else:
                     inj.routed = ROUTED_BEST_EFFORT_CAP_REACHED
             else:
-                # Explicit non-researcher target (e.g. synthesizer): the
-                # synthesizer reads it in place on resume, no rewind.
+                # Synthesizer / any: the synthesizer reads it in place
+                # on resume, no rewind.
                 inj.routed = ROUTED_IN_PLACE
             inj.status = INJECT_STATUS_APPLIED
             inj.applied_at = time.time()
@@ -564,6 +636,11 @@ def register_control_routes(app: "FastAPI") -> None:
         except ControlInputError as e:
             raise HTTPException(_HTTP_BAD_REQUEST, str(e))
         _safe_apply_state_delta(s, delta)
+        # The channel write above is the record; a running graph never
+        # re-reads it. The tool gate reads the live copy on run_control.
+        perms = delta["runtime_control"].get("tool_permissions")
+        if perms:
+            s.run_control.set_tool_permissions(perms)
         s.bump_activity()
         return {"ok": True, "applied": _serialize_for_json(delta)}
 
@@ -675,11 +752,10 @@ def register_control_routes(app: "FastAPI") -> None:
         decision = str(body.get("decision") or "")
         resume_cmd = build_resume_command(value, decision=decision)
 
-        # Clear the interrupt_state channel BEFORE re-entry so the
-        # next-node guard in interrupt_policy doesn't immediately
-        # re-trigger the pause. update_state respects the reducer
+        # Clear the interrupt_state channel and the recorded pause
+        # request BEFORE re-entry. update_state respects the reducer
         # for runtime_control (merge); pause_requested goes false.
-        from consultants.engine.interrupt_policy import clear_interrupt
+        from consultants.server.control import clear_interrupt
         clear_delta = clear_interrupt({})
         _safe_apply_state_delta(s, clear_delta)
 
@@ -739,17 +815,20 @@ def register_control_routes(app: "FastAPI") -> None:
         (a consumer that pre-decides "proceed, no challenge") is honored:
         the first poll of the wait loop consumes it and releases
         immediately — the runner does NOT clear it on entry. A duplicate
-        ack after release is a harmless no-op. ``checkpoint_open`` echoes
-        whether a wait is currently blocking so the caller can tell
-        whether the ack landed on an active pause."""
+        ack after release is a harmless no-op. The reply describes the
+        state the ack leaves (mail #1625: it said ``checkpoint_open: true``
+        after an ack that released the pause): ``released`` is whether it
+        landed on an open pause, which it ends; ``checkpoint_open`` is
+        false after any ack; ``deadline_ts`` is the released pause's."""
         s = _require_live_session(app, sid)
+        deadline = getattr(s, "_checkpoint_deadline_ts", None)
         s.ack_adversary()
         s.bump_activity()
-        deadline = getattr(s, "_checkpoint_deadline_ts", None)
         return {
             "ok": True,
             "acked": True,
-            "checkpoint_open": deadline is not None,
+            "released": deadline is not None,
+            "checkpoint_open": False,
             "deadline_ts": deadline,
         }
 
@@ -863,6 +942,12 @@ def register_control_routes(app: "FastAPI") -> None:
             _safe_apply_state_delta(s, req.state_delta)
         running = getattr(s, "status", "") == "running"
         cancelled_now = s.run_control.request_cancel(reason)
+        if cancelled_now and running:
+            # Carried across an engine restart, like a wrap-up: the next
+            # engine settles the run cancelled instead of resuming it.
+            from consultants.server import inflight
+            inflight.update(s.sid, cancel={"reason": reason,
+                                           "requested_at": time.time()})
         # M2: release the adversary checkpoint so the runner thread isn't
         # blocked for up to the full timeout on a session being
         # cancelled. The wait loop breaks on this ack (and on ``closed``
@@ -902,6 +987,46 @@ def register_control_routes(app: "FastAPI") -> None:
             "final_answer_expected": False if running else None,
         }
 
+    # -------------------- POST /wrap-up ------------------------ #
+    @app.post("/v1/consult/{sid}/wrap-up")
+    def wrap_up(sid: str, body: Optional[dict] = None) -> dict:
+        """Plan D9: stop and synthesize what the run has. Running lanes
+        end on one report, work not yet started is skipped, the critic
+        and coder are passed by, and the synthesizer answers from the
+        partial research; the result carries ``partial``. Unlike cancel
+        it gives an answer, so it is refused on a cancelled run and a
+        no-op on one that is not running."""
+        body = body or {}
+        s = _require_session(app, sid)
+        if getattr(s, "closed", False):
+            raise HTTPException(_HTTP_GONE, f"session closed: {sid}")
+        running = getattr(s, "status", "") == "running"
+        if s.run_control.cancelled:
+            raise HTTPException(
+                409, "run is cancelled: a cancelled run has no answer to "
+                     "wrap up")
+        accepted = False
+        if running:
+            reason = str(body.get("reason") or "user-wrap-up")
+            accepted = s.run_control.request_wrap_up(reason)
+            if accepted:
+                # Plan D9: carried across an engine restart — the next
+                # engine resumes the run already wrapping up.
+                from consultants.server import inflight
+                inflight.update(sid, wrap_up={"reason": reason,
+                                              "requested_at": time.time()})
+            # The adversary checkpoint would hold the runner until its
+            # deadline; a wrap-up wants the answer now.
+            if hasattr(s, "ack_adversary"):
+                s.ack_adversary()
+        s.bump_activity()
+        return {
+            "ok": True,
+            "wrap_up_accepted": bool(accepted),
+            "stops_the_run": running,
+            "final_answer_expected": True if running else None,
+        }
+
     # -------------------- GET /events (SSE) -------------------- #
     @app.get("/v1/consult/{sid}/events")
     async def events(sid: str, request: Request):
@@ -934,6 +1059,59 @@ def register_control_routes(app: "FastAPI") -> None:
 # ============================================================== #
 # SSE stream loop
 # ============================================================== #
+
+def _row_data(row: dict) -> dict:
+    """An event's SSE data: its payload, plus the role / round / lane the
+    recorder keeps in columns — without them a milestone line could not
+    say whose node started."""
+    data = dict(row.get("payload") or {})
+    for k in ("role", "round", "lane_idx"):
+        if row.get(k) is not None:
+            data.setdefault(k, row[k])
+    return data
+
+
+def _replay_rows(session, recorder, since: int) -> list[dict]:
+    """Recorded runtime events after ``since``: from the live recorder,
+    or — once the run is over and its recorder closed — from the
+    session's ``transcript.db``, so ``events`` on a finished council
+    replays it rather than printing only ``complete``."""
+    rows: list[dict] = []
+    if recorder is not None and hasattr(recorder, "list_runtime_events"):
+        try:
+            rows = recorder.list_runtime_events(since_event_id=since)
+        except Exception:  # pragma: no cover — defensive
+            rows = []
+        if rows or not getattr(recorder, "_closed", False):
+            return rows
+    import json as _json
+    import sqlite3
+    db = (Path(getattr(session, "cwd", "") or ".") / ".claude-hooks"
+          / "consultants" / str(getattr(session, "sid", "")) / "transcript.db")
+    if not db.is_file():
+        return []
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        try:
+            cur = con.execute(
+                "SELECT event_id, ts, kind, role, round, lane_idx, payload "
+                "FROM runtime_events WHERE event_id > ? ORDER BY event_id "
+                "LIMIT 5000", (int(since),))
+            for eid, ts, kind, role, rnd, lane, payload in cur:
+                try:
+                    body = _json.loads(payload or "{}")
+                except ValueError:
+                    body = {}
+                rows.append({"event_id": eid, "ts": ts, "kind": kind,
+                             "role": role, "round": rnd, "lane_idx": lane,
+                             "payload": body})
+        finally:
+            con.close()
+    except sqlite3.Error:
+        log.exception("replaying %s failed", db)
+        return []
+    return rows
+
 
 async def _sse_stream_for_session(
     session,
@@ -968,11 +1146,8 @@ async def _sse_stream_for_session(
     last_emit_ts = time.monotonic()
 
     # Phase 1: replay
-    if recorder is not None and hasattr(recorder, "list_runtime_events"):
-        try:
-            rows = recorder.list_runtime_events(since_event_id=last_id)
-        except Exception:  # pragma: no cover — defensive
-            rows = []
+    rows = _replay_rows(session, recorder, last_id)
+    if rows:
         for row in rows:
             eid = int(row.get("event_id") or 0)
             if eid <= last_id:
@@ -980,7 +1155,7 @@ async def _sse_stream_for_session(
             yield format_sse_event(
                 event_id=eid,
                 event_type=str(row.get("kind") or "custom"),
-                data=dict(row.get("payload") or {}),
+                data=_row_data(row),
             )
             last_id = eid
             last_emit_ts = time.monotonic()
@@ -1011,7 +1186,7 @@ async def _sse_stream_for_session(
             yield format_sse_event(
                 event_id=eid,
                 event_type=str(row.get("kind") or "custom"),
-                data=dict(row.get("payload") or {}),
+                data=_row_data(row),
             )
             last_id = eid
             last_emit_ts = time.monotonic()

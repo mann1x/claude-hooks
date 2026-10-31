@@ -9,7 +9,6 @@ requiring LangChain in the test env. Production code calls
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from pathlib import Path
@@ -17,6 +16,8 @@ from typing import Any, Optional
 
 from consultants import config as cc
 from consultants.engine import council as council_mod
+from consultants.engine import grounding as grounding_mod
+from consultants.engine import polykv as polykv_mod
 from consultants.engine import storage
 from consultants.engine.run_control import RunSuspended
 
@@ -35,7 +36,7 @@ def make_runner(*, ollama_base_url: str):
         render_for_log,
     )
     from claude_hooks.get_advice.chat_client import make_agent_chat_client
-    from claude_hooks.caliber_proxy.prompt import build_grounding_messages
+    from consultants.server.shell_enable import answer_with_shell
     from consultants.server.tool_surface import build_tool_surface
     from consultants.engine.graph import (
         TOOLABLE_ROLES, GraphDeps, build_council_graph,
@@ -150,10 +151,12 @@ def make_runner(*, ollama_base_url: str):
         # existing native ``/api/chat`` ChatClient. Both expose the
         # same ``chat(payload) -> dict`` + ``last_usage`` so the
         # TracedChat wrapper and agent loop are unchanged.
+        pk = _polykv_manager(cfg, state, cwd, runner_input)
         chat_clients = {
             r: TracedChat(
-                make_agent_chat_client(cfg.roles[r].model, ollama_base_url),
-                role=r, tracer=tracer,
+                polykv_mod.placed(_role_client(cfg, r, ollama_base_url),
+                                  pk, r),
+                role=r, tracer=tracer, stop=_run_stop(state),
             )
             for r in enabled
         }
@@ -183,12 +186,17 @@ def make_runner(*, ollama_base_url: str):
                         coder_clients_by_model[m] = chat_clients["coder"]
                         continue
                     coder_clients_by_model[m] = TracedChat(
-                        make_agent_chat_client(m, ollama_base_url),
-                        role="coder", tracer=tracer,
+                        polykv_mod.placed(
+                            make_agent_chat_client(
+                                m, ollama_base_url,
+                                endpoints=cc.client_endpoints(cfg)),
+                            pk, "coder"),
+                        role="coder", tracer=tracer, stop=_run_stop(state),
                     )
 
-        grounding_msgs = build_grounding_messages(
-            cwd, tools_available=True,
+        # Sized by the smallest window of the run's roles (ch-24).
+        grounding_msgs = grounding_mod.council_grounding(
+            cwd, cfg, chat_clients, enabled,
         ) if "researcher" in enabled else []
 
         # Per-role think values: cfg.roles[role].think wins when set,
@@ -301,6 +309,8 @@ def make_runner(*, ollama_base_url: str):
             cfg, extra_roots=extra_roots,
             approval_fn=_make_tool_approval_fn(
                 state, recorder, cfg, cwd, log_label="council"),
+            runtime_permissions=_live_tool_permissions(state),
+            shell=runner_input.get("shell"), sid=state.sid,
         )
         # M-B: which roles get those tools. Empty unless [tools]
         # all_roles is on, which keeps the default graph pre-M-B.
@@ -315,6 +325,7 @@ def make_runner(*, ollama_base_url: str):
             models=models,
             enabled_roles=enabled,
             cwd=cwd,
+            lane_workspace=_lane_workspace(_tool_registry, cwd),
             tool_executor=traced_tool(
                 _tool_executor, tracer=tracer,
             ),
@@ -329,6 +340,20 @@ def make_runner(*, ollama_base_url: str):
             synthesizer_fallback_models=synthesizer_fallback,
             store=consultants_store,
             sid=state.sid,
+            # Plan D9: xauto reruns its infra-failed first-round lanes
+            # once, before the critic. Never wired on another tier.
+            xauto_lane_retry=(cfg.effort == "xauto" and bool(getattr(
+                cfg.runtime, "xauto_retry_infra_lanes", True))),
+            # Plan council-memory M5: challenged lanes answer before the
+            # critic's verdict routes. Off: the graph is unchanged.
+            cross_examination=cc.cross_examination_on(
+                cfg, runner_input.get("shell")),
+            # Per-lane model escalation (plan D): off unless an expert
+            # model is configured.
+            escalation_model=getattr(getattr(cfg, "escalation", None),
+                                     "expert_model", "") or "",
+            escalation_max=int(getattr(getattr(cfg, "escalation", None),
+                                       "max_per_council", 2)),
             # M10: coder sandbox caps. Consulted only when ``coder``
             # is in ``enabled`` (otherwise the coder node is never
             # registered, so these values are irrelevant).
@@ -412,9 +437,12 @@ def make_runner(*, ollama_base_url: str):
             initial["extra_roots"] = list(extra_roots)
         initial["runtime_control"] = _seed_runtime_control(
             cfg, enabled,
-            n_fanout_extras=len(extra_models_by_role.get("researcher", [])))
-        if enabled:
-            state.progress[enabled[0]] = "in_progress"
+            n_fanout_extras=len(extra_models_by_role.get("researcher", [])),
+            cross_exam=cc.cross_examination_on(cfg, runner_input.get("shell")))
+        _tried = _tried_docs(runner_input)
+        if _tried:
+            initial["additional_context"] = _tried
+        _start_progress(state, enabled, runner_input)
 
         # Run the graph in streaming mode so per-role progress flips
         # in real time. We use BOTH stream modes:
@@ -500,7 +528,9 @@ def make_runner(*, ollama_base_url: str):
             models=models,
             topology=cfg.topology,
             effort=cfg.effort,
-            final_answer=final_state.get("final_answer", ""),
+            final_answer=answer_with_shell(
+                final_state.get("final_answer", ""), runner_input.get("shell"),
+                cwd=cwd, sid=state.sid),
             turns=list(final_state.get("turns") or []),
             duration_seconds=time.time() - state.started_at,
             status=terminal_status,
@@ -517,6 +547,9 @@ def make_runner(*, ollama_base_url: str):
             extra_roots=list(extra_roots),
             cwd_display=cwd_display,
             extra_roots_display=list(extra_roots_display),
+            decision=final_state.get("decision_review") or None,
+            partial=(state.run_control.partial()
+                     if state.run_control is not None else None),
         )
         storage.write_consultation(result, cwd=Path(cwd))
 
@@ -535,7 +568,9 @@ def make_runner(*, ollama_base_url: str):
         state.plan_items = list(final_state.get("plan_items") or [])
         state.research = list(final_state.get("research") or [])
         state.critique = final_state.get("critique")
-        state.final_answer = final_state.get("final_answer") or ""
+        state.final_answer = answer_with_shell(
+            final_state.get("final_answer") or "", runner_input.get("shell"),
+            cwd=cwd, sid=state.sid)
         state.models = dict(models)
         state._chat_clients = {
             r: getattr(c, "_client", c) for r, c in chat_clients.items()
@@ -588,7 +623,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
         render_for_log,
     )
     from claude_hooks.get_advice.chat_client import make_agent_chat_client
-    from claude_hooks.caliber_proxy.prompt import build_grounding_messages
+    from consultants.server.shell_enable import answer_with_shell
     from consultants.server.tool_surface import build_tool_surface
     from consultants.engine.graph import (
         TOOLABLE_ROLES, GraphDeps, build_follow_up_graph,
@@ -660,9 +695,13 @@ def make_follow_up_runner(*, ollama_base_url: str):
             and parent_state._chat_clients is not None
             else {}
         )
+        pk_fu = _polykv_manager(cfg, state, cwd, runner_input, adopt=True)
         chat_clients = {}
         for role in enabled_t:
             raw = warm_clients.get(role)
+            # A warm client the parent's run placed is taken bare: this run
+            # has its own manager (or none).
+            raw = getattr(raw, "_placed_inner", raw)
             if raw is None:
                 # Parent's clients went away (closed, reaped, or
                 # the parent didn't run that role). Cold-start —
@@ -671,13 +710,15 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 # v1.5+: dispatch based on the role's model_ref so
                 # cold-start follow-ups land on the right backend.
                 role_model = cfg.roles[role].model
-                raw = make_agent_chat_client(role_model, ollama_base_url)
+                raw = _role_client(cfg, role, ollama_base_url)
                 log.info(
                     "follow-up %s: cold ChatClient for role=%s "
                     "(no warm parent client; model=%s)",
                     state.sid, role, role_model,
                 )
-            chat_clients[role] = TracedChat(raw, role=role, tracer=tracer)
+            chat_clients[role] = TracedChat(polykv_mod.placed(raw, pk_fu, role),
+                                            role=role, tracer=tracer,
+                                            stop=_run_stop(state))
 
         # Task #111: per-model coder clients (mirrors the primary
         # runner's logic). Re-use warm parent clients when present;
@@ -707,9 +748,12 @@ def make_follow_up_runner(*, ollama_base_url: str):
                         continue
                     raw = warm_coder_clients.get(m)
                     if raw is None:
-                        raw = make_agent_chat_client(m, ollama_base_url)
+                        raw = make_agent_chat_client(
+                            m, ollama_base_url,
+                            endpoints=cc.client_endpoints(cfg))
                     coder_clients_by_model_fu[m] = TracedChat(
-                        raw, role="coder", tracer=tracer,
+                        polykv_mod.placed(raw, pk_fu, "coder"),
+                        role="coder", tracer=tracer, stop=_run_stop(state),
                     )
 
         # Models: prefer parent's recorded models so the follow-up
@@ -722,8 +766,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
             for r in enabled_t
         }
 
-        grounding_msgs = build_grounding_messages(
-            cwd, tools_available=True,
+        grounding_msgs = grounding_mod.council_grounding(
+            cwd, cfg, chat_clients, enabled_t,
         )
 
         # Per-role think values from current cfg (parent_state
@@ -746,7 +790,11 @@ def make_follow_up_runner(*, ollama_base_url: str):
         # ``_role_messages`` is None for v1.0 parents — fall back to
         # today's behavior cleanly in that case.
         prior_messages_by_role: dict[str, list[dict]] = {}
-        if (parent_state is not None
+        # Plan D9: a retry-lanes run re-answers the parent's question from
+        # all of its research, so the synthesizer starts fresh rather than
+        # continuing the parent's thread as a follow-up would.
+        retry_lanes = list(runner_input.get("retry_lanes") or [])
+        if (not retry_lanes and parent_state is not None
                 and parent_state._role_messages is not None):
             for role in ("researcher", "synthesizer"):
                 thread = parent_state._role_messages.get(role)
@@ -826,6 +874,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
             cfg, extra_roots=extra_roots,
             approval_fn=_make_tool_approval_fn(
                 state, recorder, cfg, cwd, log_label="council follow-up"),
+            runtime_permissions=_live_tool_permissions(state),
+            shell=runner_input.get("shell"), sid=state.sid,
         )
         # M-B: which roles get those tools. Empty unless [tools]
         # all_roles is on, which keeps the default graph pre-M-B.
@@ -840,6 +890,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
             models=models,
             enabled_roles=enabled_t,
             cwd=cwd,
+            lane_workspace=_lane_workspace(_tool_registry, cwd),
             tool_executor=traced_tool(
                 _tool_executor, tracer=tracer,
             ),
@@ -854,6 +905,10 @@ def make_follow_up_runner(*, ollama_base_url: str):
             synthesizer_fallback_models=synthesizer_fallback_followup,
             store=consultants_store_followup,
             sid=state.sid,
+            # Plan council-memory M5: the follow-up's own lanes answer
+            # challenges; inherited reports reroute (cross_exam.plan()).
+            cross_examination=cc.cross_examination_on(
+                cfg, runner_input.get("shell")),
             # M10: coder sandbox caps. Follow-ups inherit the
             # parent's effective limits via cfg (which may have
             # been mutated by a per-session control update).
@@ -899,9 +954,14 @@ def make_follow_up_runner(*, ollama_base_url: str):
             state, cfg, cwd, memory_saver_cls=_MemSaver)
         # #314: same always-on synthesizer interrupt as the council so
         # a mid-flight follow-up inject can rewind to a researcher round.
+        # Plan G5: on the typed protocol one tiny call routes the
+        # follow-up (a retry-lanes child has its route already).
+        deps.follow_up_route = bool(getattr(getattr(cfg, "protocol", None),
+                                            "typed", False)) and not retry_lanes
         compiled = build_follow_up_graph(
             deps, tracer=tracer, checkpointer=fu_checkpointer,
             interrupt_before=["synthesizer"],
+            **({"retry_lanes": retry_lanes} if retry_lanes else {}),
         )
         fu_review_before_synthesis = False
         try:
@@ -941,7 +1001,9 @@ def make_follow_up_runner(*, ollama_base_url: str):
         # merged parent+followup allowed-roots set.
         if extra_roots:
             initial["extra_roots"] = list(extra_roots)
-        initial["runtime_control"] = _seed_runtime_control(cfg, enabled_t)
+        initial["runtime_control"] = _seed_runtime_control(
+            cfg, enabled_t,
+            cross_exam=cc.cross_examination_on(cfg, runner_input.get("shell")))
         initial["plan"] = (
             parent_state.plan
             if parent_state is not None and parent_state.plan
@@ -949,7 +1011,17 @@ def make_follow_up_runner(*, ollama_base_url: str):
         )
         initial["plan_item"] = question
         initial["lane_idx"] = 0
-        if prior_messages_by_role:
+        if retry_lanes:
+            # The parent's reports that stand; its tombstones are replaced
+            # by the retried lanes' reports.
+            from consultants.engine.retry_lanes import surviving_reports
+            initial.pop("plan_item", None)
+            initial.pop("lane_idx", None)
+            initial["plan_items"] = list(
+                getattr(parent_state, "plan_items", None) or [])
+            initial["research"] = surviving_reports(
+                getattr(parent_state, "research", None) or [])
+        elif prior_messages_by_role:
             initial["research"] = []
         else:
             prior_research: list[str] = []
@@ -961,9 +1033,15 @@ def make_follow_up_runner(*, ollama_base_url: str):
                         + parent_state.final_answer.strip()
                     )
             initial["research"] = prior_research
+        # Reports carried over from the parent are tagged as such, so the
+        # follow-up's own lanes' tags line up after them (report N → lane,
+        # for cross-examination and the labels), and a challenge to an
+        # inherited report is never sent to a lane of this run.
+        if initial.get("research"):
+            from consultants.engine.cross_exam import inherited_tags
+            initial["research_lanes"] = inherited_tags(len(initial["research"]))
 
-        if enabled:
-            state.progress[enabled[0]] = "in_progress"
+        _start_progress(state, enabled, runner_input)
 
         # Same dual-mode streaming + always-on synthesizer interrupt as
         # run_council, via the shared driver (auto-resume / rewind / HITL).
@@ -1033,7 +1111,9 @@ def make_follow_up_runner(*, ollama_base_url: str):
             models=models,
             topology=cfg.topology,
             effort=cfg.effort,
-            final_answer=final_state.get("final_answer", ""),
+            final_answer=answer_with_shell(
+                final_state.get("final_answer", ""), runner_input.get("shell"),
+                cwd=cwd, sid=state.sid),
             turns=list(final_state.get("turns") or []),
             duration_seconds=time.time() - state.started_at,
             status=terminal_status,
@@ -1051,6 +1131,9 @@ def make_follow_up_runner(*, ollama_base_url: str):
             extra_roots=list(extra_roots),
             cwd_display=cwd_display_fu,
             extra_roots_display=list(extra_roots_display_fu),
+            decision=final_state.get("decision_review") or None,
+            partial=(state.run_control.partial()
+                     if state.run_control is not None else None),
         )
         storage.write_consultation(result, cwd=Path(cwd))
 
@@ -1061,7 +1144,9 @@ def make_follow_up_runner(*, ollama_base_url: str):
         state.plan_items = list(final_state.get("plan_items") or [])
         state.research = list(final_state.get("research") or [])
         state.critique = final_state.get("critique")
-        state.final_answer = final_state.get("final_answer") or ""
+        state.final_answer = answer_with_shell(
+            final_state.get("final_answer") or "", runner_input.get("shell"),
+            cwd=cwd, sid=state.sid)
         state.models = dict(models)
         state._chat_clients = {
             r: getattr(c, "_client", c) for r, c in chat_clients.items()
@@ -1277,6 +1362,33 @@ def _emit_council_complete(recorder, *, sid: str, status: str,
         )
 
 
+def _lane_workspace(registry, cwd: str):
+    """``lane -> (host view dir, uid)`` from the session's shell provider
+    in write mode (plan E), else None — the coder writes and runs its
+    tests in its own worktree view only when there is one to give."""
+    for p in getattr(registry, "providers", None) or ():
+        fn = getattr(p, "workspace", None)
+        mode = getattr(getattr(p, "settings", None), "mode", "")
+        if callable(fn) and mode == "write":
+            return lambda lane, _fn=fn: _fn(cwd, lane)
+    return None
+
+
+def _track_task(state, running: dict, ev: dict) -> None:
+    """One ``tasks`` stream event: a role is ``in_progress`` while any of
+    its tasks runs and ``done`` when the last one ends."""
+    name = ev.get("name")
+    if not name or name not in state.progress:
+        return
+    if "input" in ev:                       # a task started
+        running[name] = running.get(name, 0) + 1
+        state.progress[name] = "in_progress"
+    else:                                   # a task ended
+        running[name] = max(0, running.get(name, 0) - 1)
+        if not running[name]:
+            state.progress[name] = "done"
+
+
 def _rewind_budget_ok(snap) -> bool:
     """#314: is there room for one more researcher round? Delegates to
     the shared pure check in server.control so the inject handler and
@@ -1307,15 +1419,20 @@ def _rewind_to_researcher(compiled, thread_config, state, recorder,
                           log_label: str) -> None:
     """#314: re-enter the graph at the researcher for one more pass.
 
-    ``update_state(as_node=START)`` is the verified topology-uniform
-    rewind: from a state parked before the synthesizer interrupt it
-    sets ``next`` back to the researcher (low/med) or
-    researcher→critic (high/max), re-runs that pass — picking up the
-    injected Doc already written into ``additional_context`` — and
-    re-parks before the synthesizer. Empty values: we only redirect
+    ``update_state(as_node="rewind")`` runs the graph's rewind router:
+    one more researcher pass on the existing plan and every report so
+    far, carrying the injected brief already written into
+    ``additional_context``, then the researcher's own edges (the critic
+    on high/max) and the synthesizer interrupt again. A graph built
+    before the node existed falls back to ``START`` — which, on a
+    council graph, means the planner (#1626: a re-plan that dropped the
+    brief and the round-1 reports). Empty values: we only redirect
     flow; the inject already wrote the content."""
     from langgraph.graph import START
-    compiled.update_state(thread_config, {}, as_node=START)
+    from consultants.engine.graph import REWIND_NODE
+    nodes = getattr(compiled, "nodes", None) or {}
+    as_node = REWIND_NODE if REWIND_NODE in nodes else START
+    compiled.update_state(thread_config, {}, as_node=as_node)
     try:
         if "researcher" in state.progress:
             state.progress["researcher"] = "in_progress"
@@ -1325,7 +1442,7 @@ def _rewind_to_researcher(compiled, thread_config, state, recorder,
         try:
             recorder.record_event(
                 kind="rewind", role="researcher",
-                payload={"sid": state.sid,
+                payload={"sid": state.sid, "as_node": str(as_node),
                          "reason": "mid-flight inject revalidation"},
             )
         except Exception:  # pragma: no cover
@@ -1411,9 +1528,11 @@ def _await_adversary_checkpoint(*, state, final_state, recorder, timeout_s,
     log.info("%s: adversary checkpoint open (sid=%s deadline=%.0f timeout=%ss)",
              log_label, state.sid, deadline, timeout_s)
     acked = False
+    why = "timeout"
     while now_fn() < deadline:
         if state.take_adversary_ack():
             acked = True
+            why = "ack"
             break
         # Break promptly if the session is cancelled / closed (explicit
         # /cancel sets the ack; discard-cancel and the idle reaper set
@@ -1421,11 +1540,13 @@ def _await_adversary_checkpoint(*, state, final_state, recorder, timeout_s,
         # full timeout on a session that's already gone — the park does
         # not bump activity, so a long pause is itself idle-reapable.
         if getattr(state, "closed", False):
+            why = "closed"
             break
         # An engine shutdown ends the park; the resumed run opens the
         # checkpoint again, so the consumer still gets its window.
         rc = getattr(state, "_run_control", None)
         if rc is not None and rc.suspended:
+            why = "suspended"
             break
         remaining = deadline - now_fn()
         if remaining <= 0:
@@ -1433,8 +1554,19 @@ def _await_adversary_checkpoint(*, state, final_state, recorder, timeout_s,
         sleep_fn(min(poll_interval, remaining))
     with state._inject_lock:
         state._checkpoint_deadline_ts = None
-    log.info("%s: adversary checkpoint closed (sid=%s acked=%s)",
-             log_label, state.sid, acked)
+    # Run 6 (mail #1646): the record had the opening and the inject but
+    # not the close, so a reader of the record saw a checkpoint open for
+    # the rest of the run.
+    if recorder is not None and hasattr(recorder, "record_event"):
+        try:
+            recorder.record_event(kind="adversary_released", payload={
+                "sid": state.sid, "kind": "adversary_released",
+                "reason": why, "acked": acked, "ts": time.time()})
+        except Exception:  # pragma: no cover
+            log.exception("record_event(adversary_released) failed sid=%s",
+                          state.sid)
+    log.info("%s: adversary checkpoint closed (sid=%s acked=%s why=%s)",
+             log_label, state.sid, acked, why)
     return acked
 
 
@@ -1515,7 +1647,19 @@ def _mark_suspended(state, recorder, exc, *, log_label: str) -> None:
             log.exception("recorder.close raised on suspend")
 
 
-def _seed_runtime_control(cfg, enabled, *, n_fanout_extras: int = 0) -> dict:
+def _tried_docs(runner_input: dict) -> list:
+    """Plan G5: what the asking assistant already tried, as one Doc every
+    role reads (``additional_context``); ``[]`` when nothing was sent."""
+    tried = runner_input.get("tried") or []
+    if not tried:
+        return []
+    from consultants.engine import council as council_mod
+    from consultants.engine.state_v2 import Doc
+    return [Doc("any", council_mod.render_tried(tried), source="already_tried")]
+
+
+def _seed_runtime_control(cfg, enabled, *, n_fanout_extras: int = 0,
+                          cross_exam: bool = False) -> dict:
     """The run's boot-time ``runtime_control``.
 
     Until 2026-09-30 nothing seeded it, and every consumer treats an
@@ -1530,7 +1674,40 @@ def _seed_runtime_control(cfg, enabled, *, n_fanout_extras: int = 0) -> dict:
     rc = runtime_control_defaults(cfg, effort=cfg.effort,
                                   n_fanout_extras=n_fanout_extras)
     rc["enabled_roles"] = list(enabled)
+    # Plan council-memory M5: present only when on (readers: absent = off).
+    if cross_exam:
+        rc["cross_examination"] = True
+    else:
+        rc.pop("cross_examination", None)
     return dict(rc)
+
+
+def _live_tool_permissions(state):
+    """The per-call source of ``runtime_control.tool_permissions`` for
+    the tool gate: ``RunControl``'s live copy, which ``POST /control``
+    writes. ``None`` for a session without one (test doubles), which
+    leaves the gate exactly as it was."""
+    rc = getattr(state, "run_control", None)
+    fn = getattr(rc, "tool_permissions", None)
+    return fn if callable(fn) else None
+
+
+def _restore_tool_permissions(compiled, thread_config, state) -> None:
+    """On resume, put the checkpoint's operator permissions back on the
+    new process's ``RunControl``: it starts empty, and the gate reads
+    only the live copy."""
+    rc = getattr(state, "run_control", None)
+    if rc is None or not hasattr(rc, "set_tool_permissions"):
+        return
+    try:
+        values = compiled.get_state(thread_config).values or {}
+        perms = (values.get("runtime_control") or {}).get("tool_permissions")
+    except Exception:
+        log.debug("no checkpoint state to restore tool permissions from",
+                  exc_info=True)
+        return
+    if isinstance(perms, dict) and perms:
+        rc.set_tool_permissions(perms)
 
 
 def _drive_council_stream(compiled, initial, thread_config, *,
@@ -1583,6 +1760,7 @@ def _drive_council_stream(compiled, initial, thread_config, *,
         log.warning("%s: resuming sid=%s from its checkpoint",
                     log_label, state.sid)
         stream_input = None
+        _restore_tool_permissions(compiled, thread_config, state)
     elif resume:
         log.warning("%s: sid=%s has no checkpoint to resume from; "
                     "starting it again", log_label, state.sid)
@@ -1594,16 +1772,28 @@ def _drive_council_stream(compiled, initial, thread_config, *,
 
     checkpoint_fired = False  # M2: fire the adversary checkpoint once
     MAX_RESUMES = 64  # safety bound vs. a pathological rewind loop
+    # A role is done when its last running task ends, not when its first
+    # fanned-out lane reports (mail #1625: researcher "done" while 6 of
+    # 8 lanes were still making calls). LangGraph's ``tasks`` stream
+    # marks every task's start and end; a graph that emits none (a stub)
+    # keeps the per-update rule below.
+    running: dict[str, int] = {}
+    saw_tasks = False
     try:
         for _ in range(MAX_RESUMES):
             _check_suspend()
             for mode, payload in compiled.stream(
                     stream_input, config=thread_config,
-                    stream_mode=["updates", "values"]):
+                    stream_mode=["updates", "values", "tasks"]):
                 if mode == "values" and isinstance(payload, dict):
                     final_state = payload
                     continue
-                if mode != "updates" or not isinstance(payload, dict):
+                if mode == "tasks" and isinstance(payload, dict):
+                    saw_tasks = True
+                    _track_task(state, running, payload)
+                    continue
+                if mode != "updates" or not isinstance(payload, dict) \
+                        or saw_tasks:
                     continue
                 for node, partial in payload.items():
                     if node in state.progress:
@@ -1667,6 +1857,13 @@ def _drive_council_stream(compiled, initial, thread_config, *,
                     # path so the fanned researcher+critics re-run with the
                     # brief (x-tier preserved); else fall through to resume,
                     # where a role=synthesizer brief is read in place.
+                    # Re-read the state: a brief may have raised the round
+                    # cap during the pause (rewound_extra_round), which the
+                    # snapshot taken before it cannot show.
+                    try:
+                        snap = compiled.get_state(thread_config)
+                    except Exception:  # pragma: no cover — defensive
+                        pass
                     if state.take_revalidation() and _rewind_budget_ok(snap):
                         _rewind_to_researcher(
                             compiled, thread_config, state, recorder,
@@ -1872,23 +2069,92 @@ def _write_failed_artifacts(state, cwd: str, question: str,
         log.warning("failed-artifact write failed: %s", e)
 
 
-def default_ollama_url() -> str:
-    """Pick the Ollama base URL the consultants service should use.
+def _start_progress(state, enabled, runner_input: dict) -> None:
+    """Mark where the run starts. A resumed run starts after the roles it
+    already finished: they are ``done`` from its own transcript.db, never
+    the first role re-marked ``in_progress`` (the graph does not re-enter
+    a finished planner, so nothing flipped it back —
+    csl-2026-10-25-0559-4d81 showed the planner running to the end)."""
+    if not enabled:
+        return
+    if not runner_input.get("resume"):
+        state.progress[enabled[0]] = "in_progress"
+        return
+    for role in _exited_roles(state.cwd, state.sid):
+        if role in state.progress:
+            state.progress[role] = "done"
 
-    Precedence:
-      1. ``CALIBER_GROUNDING_UPSTREAM`` — canonical proxy URL across
-         claude-hooks. If set, we trust it verbatim.
-      2. ``OLLAMA_HOST`` — only when it looks like a real URL
-         (``http://`` / ``https://`` prefix). It's frequently set to a
-         bare bind address (``0.0.0.0`` on pandorum) for the local
-         Ollama daemon, which is not a valid base URL — silently
-         ignore those.
-      3. The cluster-default proxy at 192.168.178.2:11433.
-    """
-    upstream = os.environ.get("CALIBER_GROUNDING_UPSTREAM")
-    if upstream:
-        return upstream
-    ollama_host = os.environ.get("OLLAMA_HOST")
-    if ollama_host and ollama_host.startswith(("http://", "https://")):
-        return ollama_host
-    return "http://192.168.178.2:11433"
+
+def _exited_roles(cwd: str, sid: str) -> set:
+    """Roles with a ``node_exit`` row in the run's transcript.db; empty
+    when it cannot be read."""
+    import sqlite3
+    from consultants.engine import storage as _storage
+    db = (Path(cwd) / ".claude-hooks" / "consultants" / sid
+          / _storage.TRANSCRIPT_DB_FILENAME)
+    if not db.exists():
+        return set()
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            rows = con.execute("SELECT DISTINCT role FROM runtime_events "
+                               "WHERE kind = 'node_exit'").fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return set()
+    return {r for (r,) in rows if r}
+
+
+def _polykv_manager(cfg, state, cwd: str, runner_input: dict, *,
+                    adopt: bool = False):
+    """The run's PolyKV manager (plan F3), or ``None`` when ``[polykv]`` is
+    off, which leaves every role client unwrapped and every request as it
+    was. A follow-up (``adopt``) takes the manager its consultancy holds."""
+    pk = getattr(cfg, "polykv", None)
+    if pk is None or not pk.enabled or pk.mode == "off":
+        return None
+    mgr = polykv_mod.start_run(
+        state.sid, mode=pk.mode, cwd=cwd,
+        layout=getattr(pk, "layout", "shared"),
+        resume=bool(runner_input.get("resume")),
+        adopt_root=getattr(state, "root_sid", None) if adopt else None)
+    state._polykv = mgr
+    return mgr
+
+
+def _run_stop(state):
+    """The run's cancel as each call's ``cancel_check``: the node gate
+    only skips nodes not yet started, so a call already retrying a dead
+    server kept loading the model there for the whole retry budget
+    after the council was cancelled (arm B, 2026-10-24)."""
+    def stop() -> bool:
+        rc = getattr(state, "run_control", None)
+        return bool(rc is not None and rc.cancelled)
+    return stop
+
+
+def _role_client(cfg, role: str, ollama_base_url: str):
+    """The chat client for ``role``. Its fan-out lanes and fallbacks
+    reuse it with another ``model``, so when those models live on other
+    backends (an ``@endpoint``, a ``llamafile://`` label) the client
+    routes each call by its model; otherwise it is the plain client."""
+    from claude_hooks.get_advice.chat_client import make_role_chat_client
+    rc = cfg.roles[role]
+    models = [rc.model, *(rc.extra_models or [])]
+    expert = getattr(getattr(cfg, "escalation", None), "expert_model", "")
+    if role == "researcher" and expert and expert not in models:
+        # Per-lane escalation reruns a researcher lane on the expert model
+        # through this client, so it must route there too.
+        models.append(expert)
+    return make_role_chat_client(
+        models, ollama_base_url,
+        endpoints=cc.client_endpoints(cfg))
+
+
+def default_ollama_url() -> str:
+    """The Ollama base URL the consultants service uses:
+    :func:`claude_hooks.ollama_upstream.url` (env override, then the
+    host's ``ollama.url``, then Ollama's default)."""
+    from claude_hooks import ollama_upstream
+    return ollama_upstream.url()

@@ -12,7 +12,9 @@ approval, denial and audit without knowing the gate exists.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from typing import Callable, Optional
 
 from claude_hooks.tool_registry.base import ToolProvider
@@ -70,6 +72,9 @@ class ToolRegistry:
                 bare = p.strip_prefix(name)
                 self.gate.provider_defaults.setdefault(
                     name, p.default_level(bare))
+                if type(p).call_level is not ToolProvider.call_level:
+                    self.gate.call_levels.setdefault(
+                        name, lambda raw, p=p, bare=bare: p.call_level(bare, raw))
                 if p.is_read_only(bare):
                     self.gate.read_only_tools = (
                         self.gate.read_only_tools | {name})
@@ -121,7 +126,8 @@ class ToolRegistry:
 
     # ------------------------------------------------------------------ #
     def dispatch(self, tool: str, raw_args: str, cwd: str, *,
-                 runtime_permissions: Optional[dict] = None) -> str:
+                 runtime_permissions: Optional[dict] = None,
+                 lane: Optional[str] = None) -> str:
         """Gate, then run. Returns the tool result string.
 
         Every refusal is returned as an ``error: ...`` string rather
@@ -149,11 +155,34 @@ class ToolRegistry:
                         f"{decision.reason}. Try a different approach.")
 
         try:
+            if getattr(owner, "accepts_lane", False):
+                return owner.execute(tool, raw_args, cwd, lane=lane)
+            view = self._lane_view(owner, cwd, lane)
+            if view:
+                return _in_view(owner, tool, raw_args, cwd, view)
             return owner.execute(tool, raw_args, cwd)
         except Exception as e:  # pragma: no cover - providers shouldn't raise
             log.exception("provider %s raised executing %s",
                           getattr(owner, "name", "?"), tool)
             return f"error: tool raised: {e}"
+
+    def _lane_view(self, owner, cwd: str, lane: Optional[str]):
+        """``[(real path, view dir), …]`` when ``lane`` has a private
+        writable view (plan E): the file tools must read what its commands
+        see."""
+        if lane is None:
+            return None
+        for p in self.providers:
+            if p is owner or not hasattr(p, "view_root"):
+                continue
+            try:
+                got = p.view_root(cwd, lane)
+            except Exception:
+                log.exception("view_root of %s raised", getattr(p, "name", "?"))
+                continue
+            if got:
+                return got
+        return None
 
     # ------------------------------------------------------------------ #
     def _seek_approval(self, decision: GateDecision) -> bool:
@@ -178,16 +207,36 @@ class ToolRegistry:
             return False
 
     # ------------------------------------------------------------------ #
-    def as_executor(self, *, runtime_permissions: Optional[dict] = None):
+    def as_executor(self, *, runtime_permissions=None):
         """Adapt to the ``(name, args, cwd) -> str`` executor signature
         that ``agent_loop.runner`` and every existing call site expect.
 
         This is what keeps M-A a drop-in: callers keep passing an
         executor callable and never learn the registry exists.
+
+        ``runtime_permissions`` is a dict, or a zero-argument callable
+        returning one. A callable is read on every call, which is what
+        lets ``POST /control`` tighten a council that is already
+        running; a dict is fixed when the executor is built.
         """
-        def _executor(name: str, raw_args: str, cwd: str) -> str:
+        def _executor(name: str, raw_args: str, cwd: str, *,
+                      lane: Optional[str] = None) -> str:
+            perms = runtime_permissions
+            if callable(perms):
+                try:
+                    perms = perms()
+                except Exception:
+                    # A broken source must not silently drop an
+                    # operator's deny: refuse instead.
+                    log.exception("runtime permission source raised; "
+                                  "refusing %s", name)
+                    return (f"error: tool {name!r} refused: the live "
+                            f"permission source failed")
             return self.dispatch(name, raw_args, cwd,
-                                 runtime_permissions=runtime_permissions)
+                                 runtime_permissions=perms, lane=lane)
+        # ``LaneBoundExecutor`` / ``SharedReadCache`` pass ``lane=`` only
+        # to an executor that says it takes one.
+        _executor.accepts_lane = True
         return _executor
 
     def close(self) -> None:
@@ -197,6 +246,62 @@ class ToolRegistry:
             except Exception:  # pragma: no cover - defensive
                 log.exception("provider %s close() raised",
                               getattr(p, "name", "?"))
+
+
+#: Argument keys that name a path, for a view that does not cover the
+#: cwd: there a relative path is resolved first, so one under a write
+#: scope reads the lane's copy.
+PATH_KEYS = ("path", "file_path", "paths", "cwd", "dir", "directory", "root")
+
+
+def _in_view(owner, tool: str, raw_args: str, cwd: str, maps) -> str:
+    """Run ``tool`` with real paths moved into the lane's view (``maps``:
+    ``[(real, view), …]``, or one such pair), and the view's paths moved
+    back in the answer, so the model keeps citing the real path it will
+    later find the change at."""
+    if maps and isinstance(maps[0], str):
+        maps = [tuple(maps)]
+    maps = sorted(maps, key=lambda m: -len(m[0]))
+
+    def move_str(v):
+        for a, b in maps:
+            if v == a or v.startswith(a + "/"):
+                return b + v[len(a):]
+        return v
+
+    def move(v):
+        if isinstance(v, str):
+            return move_str(v)
+        if isinstance(v, list):
+            return [move(x) for x in v]
+        if isinstance(v, dict):
+            return {k: move(x) for k, x in v.items()}
+        return v
+
+    real = os.path.realpath(cwd)
+    run_cwd = move_str(real)
+
+    def absolute(v):
+        if isinstance(v, str) and v and not os.path.isabs(v):
+            p = os.path.normpath(os.path.join(real, v))
+            return p if move_str(p) != p else v
+        if isinstance(v, list):
+            return [absolute(x) for x in v]
+        return v
+
+    try:
+        args = json.loads(raw_args or "{}")
+        if run_cwd == real and isinstance(args, dict):
+            args = {k: absolute(x) if k in PATH_KEYS else x
+                    for k, x in args.items()}
+        raw_args = json.dumps(move(args))
+    except (ValueError, TypeError):
+        pass
+    out = owner.execute(tool, raw_args, run_cwd)
+    if isinstance(out, str):
+        for a, b in maps:
+            out = out.replace(b, a)
+    return out
 
 
 __all__ = ["ToolRegistry", "ApprovalFn"]

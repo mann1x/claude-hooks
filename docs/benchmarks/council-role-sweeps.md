@@ -443,3 +443,90 @@ protocol 1.4). Q1/Q2 grades from before 2026-09-23 carry that caveat.
 - **Nothing on the council changed.** The researcher/critic extra lane
   moved from the retiring deepseek-v4-flash to deepseek-v4.1-flash, its
   direct replacement.
+
+## 2026-10-22 — minimax-m3.1-flash, and gemma4 with reasoning restored
+
+minimax-m3.1-flash (free on Ollama that day) ran as a whole-council label,
+N=3, then gemma4 was re-run on the same engine (`6df99ad` / `8f69cee`,
+identical engine code), eleven2go, ≤ 2 concurrent cloud connections.
+
+**The 2026-09-23 gemma4 label ran without reasoning.** gemma4:31b-cloud
+declares thinking only as on/off, and since 2026-09 the service ignores a
+level (`think: "high"`) silently: 0 of 43 audit-high calls on 09-23 carried
+reasoning. `c148363` sends `think: true`; in the re-run the planner reasoned
+on 22 of 24 calls and the synthesizer on 6 of 6.
+
+| Label | Runs | Smoke | Audit-med | Audit-hi | Roles | $ / run | Verdict |
+|---|---|---|---|---|---|---|---|
+| [`gemma4-31b-cloud-2026-10-22`](gemma4-31b-cloud-2026-10-22/results.md) | 3/3 | PASS | B | C | `P:A R:B C:B S:A` | $0.041 | EVALUATED-ONLY — Q3 C,B,C; median wall 16 / 30 / 46 s |
+| [`minimax-m3-1-flash-cloud-2026-10-22`](minimax-m3-1-flash-cloud-2026-10-22/results.md) | 3/3 | PASS | A | C | `P:A R:A C:B S:B` | unpriced | EVALUATED-ONLY — all four Q3 claims every run; median wall 45 / 136 / 424 s |
+
+- **Reasoning did not lift gemma4.** Q1 and Q2 are unchanged from 09-23
+  (the same four Q2 sites, both test sites missed); Q3 fell from B to C:
+  two of three reasoning runs choose the status relabel that glm-5.3-flash
+  chose on 09-23 and minimax-m3.1-flash chose in all three runs.
+- **minimax-m3.1-flash is the stronger auditor and the weaker fixer** —
+  Q2 A, every Q3 claim including the one gemma4 never states (`error` /
+  `_role_failed` are last-value channels), but the capped fix every time,
+  at 3–9× gemma4's wall.
+- **A capped role was asked for the wrong thing.** Planner, critic and
+  synthesizer get 4 tool turns; at the cap the forced final call asked for
+  a findings report ("what you found … what is still open", thinking off)
+  instead of the role's plan, verdict or answer. minimax hit it in the
+  planner, critic and synthesizer of every Q2 / Q3 run, gemma4 in the
+  planner of 2 of 3 Q3 runs. Fixed with `LoopConfig.deliverable` (task
+  ch-17); minimax's S and C grades want a re-run on the fixed engine.
+- **No change to the council default yet**: no label measured on the
+  current engine clears Q3 ≥ B.
+- **Re-run and arms on the fixed engine (2026-10-22 evening):** minimax
+  re-run [`minimax-m3-1-flash-cloud-2026-10-22b`](minimax-m3-1-flash-cloud-2026-10-22b/results.md)
+  PASS / B / C, `P:A R:A C:B S:A` (S:B → A from the fix; Q3 unchanged).
+  Tool-turn and forced-call-thinking arms in
+  [`council-turns-and-forced-think-2026-10-22.md`](council-turns-and-forced-think-2026-10-22.md):
+  keep 3 tool turns and thinking off on the forced call.
+
+## 2026-10-27 — gemma4 vs glm-5.3-flash, every role, direct to ollama.com
+
+The ch-13 all-roles comparison, N=3 each, interleaved 10 min apart on
+engine HEAD `e9fe819` (council memory M1–M5, the run-10 fixes and the
+follow-up critic fix are all in). First sweep on the **direct cloud
+route**: every call went to ollama.com itself (`[cloud] route = "direct"`,
+`d175b7e`), so no host's Ollama or xOllama served any of it. Bench engine
+on :38195 with its own HOME, every role pinned, no extra lanes.
+
+| Label | Runs | Smoke | Audit-med | Audit-hi | Roles | $ / run | Verdict |
+|---|---|---|---|---|---|---|---|
+| [`gemma4-31b-cloud-2026-10-27`](gemma4-31b-cloud-2026-10-27/results.md) | 3/3 | PASS | A | C | `P:A R:B C:B S:A` | $0.039 | EVALUATED-ONLY — Q3 C,B,C; median wall 15 / 45 / 46 s |
+| [`glm-5-3-flash-cloud-2026-10-27`](glm-5-3-flash-cloud-2026-10-27/results.md) | 3/3 | PASS | B | C+ | `P:B R:A C:B S:A` | $0.059 | EVALUATED-ONLY — all four Q3 claims every run, status flip every run; median wall 30 / 91 / 197 s |
+
+- **No change to the council default.** Neither label clears Q3 ≥ B;
+  gemma4 stays the fastest and cheapest, and its Q2 rose to A (r1 found
+  all six sites).
+- **glm-5.3-flash is the better researcher, gemma4 the better planner.**
+  glm states claim 1 (`error` / `_role_failed` are last-value channels)
+  in every run, as minimax-m3.1-flash did on 10-22; gemma4 never has.
+  Both still pick the status relabel on most Q3 runs.
+- **glm-5.3-flash leaks its reasoning on forced calls.** With
+  `think: false` it keeps reasoning and writes it into the answer, ending
+  in `</think>` — 8 of 9 forced planner / critic / synthesizer calls,
+  through the local relay as well as direct. The 10-22 arm that kept
+  thinking off on the forced call was measured on gemma4 and minimax,
+  which don't do this. A client-side split of a leading `</think>` block
+  is the fix candidate, to be measured on its own.
+
+**Mix, same day** — glm-5.3-flash researcher with gemma4 planner / critic /
+synthesizer, engine `2dbbe40` (the sweep's engine plus the reasoning-leak
+split):
+
+| Label | Runs | Smoke | Audit-med | Audit-hi | Roles | $ / run | Verdict |
+|---|---|---|---|---|---|---|---|
+| [`mix-glm-R-gemma4-PCS-2026-10-27`](mix-glm-R-gemma4-PCS-2026-10-27/results.md) | 3/3 | PASS | B | C+ | `P:A R:A C:B S:A` | $0.046 | EVALUATED-ONLY — all four Q3 claims every run, status flip every run |
+
+- **Better evidence does not change the fix.** With glm researching,
+  gemma4's answers carry claim 1 every time, then all three pick the
+  status relabel. Every model that explains the false `failed` stamp
+  proposes changing the stamp; the Q3 ceiling here is the question's
+  framing, not the evidence.
+- **r2's audit-high was a FLAP** (both glm lanes `startup_stall`, no token
+  120 s after admission) while a giano xhigh council shared the cloud
+  account; re-run alone as `r2b`.

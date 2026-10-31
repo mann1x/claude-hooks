@@ -1,0 +1,19 @@
+[package]
+name = "council-sandbox"
+version = "0.1.0"
+edition = "2021"
+description = "The /consultants shell sandbox launcher (plan E2): a static, dependency-free jail for one command"
+license = "MIT"
+publish = false
+
+# No dependencies, on purpose: the engine runs this binary as root, so
+# everything it is made of is in this directory.
+[dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false

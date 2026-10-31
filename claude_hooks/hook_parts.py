@@ -37,7 +37,9 @@ log = logging.getLogger("claude_hooks.hook_parts")
 #: ``guards`` is the PreToolUse process guard (self-kill / blind waiters).
 #: ``tasks`` is the persistent task list: the SessionStart block, prompt
 #: mentions and recall, the Stop nudge and the built-in task mirror.
-PARTS = frozenset({"memory", "mailbox", "guards", "tasks"})
+#: ``resources`` is resource claims: the SessionStart block, lease renewal,
+#: the SessionEnd release and the PreToolUse note.
+PARTS = frozenset({"memory", "mailbox", "guards", "tasks", "resources"})
 
 _KEEP_WORD = re.compile(r"^\s*keep\s*[:=]?\s*", re.IGNORECASE)
 
@@ -147,6 +149,9 @@ def _session_start(event, config, providers, keep):
         from claude_hooks.tasks import hook as tasks
         parts.append(tasks.session_block(
             event=event, config=config, providers=providers))
+    if "resources" in keep:
+        from claude_hooks.resources import hook as resources
+        parts.append(resources.session_block(event=event, config=config))
     return _context("SessionStart", parts)
 
 
@@ -157,6 +162,9 @@ def _user_prompt_submit(event, config, providers, keep):
         from claude_hooks.tasks.hook import PromptRecall
         task_recall = PromptRecall(event=event, config=config,
                                    providers=providers).start()
+    if "resources" in keep:
+        from claude_hooks.resources.hook import touch
+        touch(event=event, config=config)
     if "memory" in keep:
         # The same decision the full handler makes, notifications and
         # scheduled prompts included — not a copy of it.
@@ -190,6 +198,9 @@ def _stop(event, config, providers, keep):
         result = stop._with_mailbox_nudge(result, event, config, providers)
     if "tasks" in keep:
         result = stop._with_task_nudge(result, event, config, providers)
+    if "resources" in keep:
+        from claude_hooks.resources.hook import touch
+        touch(event=event, config=config)
     return result
 
 
@@ -198,14 +209,21 @@ def _session_end(event, config, providers, keep):
         from claude_hooks.mailbox import hook as mailbox
         mailbox.unregister_session(event=event, config=config,
                                    providers=providers)
+    if "resources" in keep:
+        from claude_hooks.resources.hook import session_end
+        session_end(event=event, config=config)
     return None
 
 
 def _pre_tool_use(event, config, providers, keep):
-    if "guards" not in keep:
-        return None
-    from claude_hooks.hooks.pre_tool_use import process_guard_response
-    return process_guard_response(event, config)
+    from claude_hooks.hooks.pre_tool_use import (
+        process_guard_response, with_resource_note,
+    )
+    result = (process_guard_response(event, config) if "guards" in keep
+              else None)
+    if "resources" in keep:
+        result = with_resource_note(result, event, config)
+    return result
 
 
 def _post_tool_use(event, config, providers, keep):

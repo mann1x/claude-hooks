@@ -351,6 +351,26 @@ class RoundTripTests(RelayHarness):
         self.assertIsNone(still["cancelled_at"])
 
 
+class DurableThroughTheRelayTests(RoundTripTests):
+    """ch-18: a relay alias lapsed with the 24 h eviction. The session can
+    make its own address last with `mailbox-durable`; `mailbox-alias`
+    keeps meaning "take an alias"."""
+
+    def test_the_relay_session_keeps_its_alias(self):
+        out = self.run_req("d1", "mailbox-durable",
+                           {"action": "register", "alias": "osync"})
+        self.assertIn("Registered osync@cloud, owned by osync@cloud", out)
+        rows = self.store.durable_rows()
+        self.assertEqual([(r["alias"], r["host"], r["session_id"])
+                          for r in rows], [("osync", "cloud", "cloud-osync")])
+        # Taking the alias again (a new thread) leaves it durable.
+        self.take_alias()
+        self.assertEqual(len(self.store.durable_rows(owner="osync@cloud")), 1)
+        self.assertEqual(self.store.evict_stale(hours=0), 1)  # the peer only
+        self.assertEqual([s.label() for s in self.store.sessions()],
+                         ["osync@cloud"])
+
+
 class CostTests(RelayHarness):
 
     def test_an_empty_folder_opens_no_database_and_sets_no_timer(self):

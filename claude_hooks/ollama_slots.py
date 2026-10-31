@@ -114,6 +114,11 @@ def _remote_tags(base_url: str) -> Optional[dict]:
 
 
 def is_cloud(base_url: str, model: str) -> bool:
+    from claude_hooks import ollama_upstream
+    # ollama.com used directly: every model there is a cloud call on the
+    # account's connections, whatever its name (``gemma4:31b``).
+    if ollama_upstream.is_cloud(base_url):
+        return True
     table = _remote_tags(base_url)
     if table and model in table:
         return table[model]
@@ -126,9 +131,30 @@ def _plan_cache_path() -> Path:
     return Path.home() / ".claude" / "ollama-plan.json"
 
 
+#: The last Ollama server a cloud call went through. ``_fetch_plan``
+#: asks it first: the local server signs ``/api/me`` with its own key,
+#: so the direct signed call below is needed only when it cannot.
+_plan_server: Optional[str] = None
+
+
 def _fetch_plan() -> Optional[str]:
-    """The account's plan from ``ollama.com/api/me``. That response
-    carries personal data; only ``Plan`` is read, and only it is kept."""
+    """The account's plan: through the local server's ``/api/me`` first,
+    else ``ollama.com/api/me`` signed with ``~/.ollama``. That response
+    carries personal data; only the plan is read, and only it is kept."""
+    from claude_hooks import ollama_account, ollama_upstream
+    if _plan_server and not ollama_upstream.is_cloud(_plan_server):
+        acct = ollama_account.whoami(_plan_server)
+        if acct.get("signed_in") and acct.get("plan"):
+            return acct["plan"]
+    # Ollama Cloud's own /api/me with the host's key: the only route when
+    # no local Ollama runs.
+    api_key = ollama_upstream.api_key_source()[0]
+    if api_key:
+        acct = ollama_account.whoami(
+            "https://ollama.com",
+            headers={"Authorization": f"Bearer {api_key}"})
+        if acct.get("signed_in") and acct.get("plan"):
+            return acct["plan"]
     key = Path.home() / ".ollama" / "id_ed25519"
     try:
         from cryptography.hazmat.primitives.serialization import (
@@ -192,6 +218,8 @@ def scope_for(base_url: str, model: str,
     if not s["enabled"]:
         return None
     if is_cloud(base_url, model):
+        global _plan_server
+        _plan_server = base_url
         n = cloud_limit(cfg)
         return ("cloud", n) if n > 0 else None
     n = int(s["local_limit"] or 0)
@@ -268,13 +296,32 @@ def _try_any(d: Path, limit: int):
     return None
 
 
+#: Plan D9: how long a wait on infrastructure (a connection slot, an
+#: outage) runs before it is reported, once each (Cerebriline
+#: ``agent-trouble.ts``: 10 min, then 2 h). Informational only — the run
+#: deadline decides what happens to the lane.
+INFRA_WAIT_NOTICE_S = (600.0, 7200.0)
+
+
+def infra_notices(waited_s: float, sent: set) -> list[float]:
+    """The thresholds in :data:`INFRA_WAIT_NOTICE_S` ``waited_s`` has
+    crossed and ``sent`` has not seen; adds them to ``sent``."""
+    due = [t for t in INFRA_WAIT_NOTICE_S if waited_s >= t and t not in sent]
+    sent.update(due)
+    return due
+
+
 @contextlib.contextmanager
 def slot(base_url: str, model: str, *,
          cancel_check: Optional[Callable[[], bool]] = None,
-         cfg: Optional[dict] = None) -> Iterator[Optional[str]]:
+         cfg: Optional[dict] = None,
+         on_wait: Optional[Callable[[dict], None]] = None,
+         ) -> Iterator[Optional[str]]:
     """Hold a connection slot for one HTTP attempt. Yields the scope
     (``None`` when unlimited or when the limiter failed open). Raises
-    ``Cancelled`` if ``cancel_check`` turns true while waiting."""
+    ``Cancelled`` if ``cancel_check`` turns true while waiting.
+    ``on_wait`` gets one dict per :data:`INFRA_WAIT_NOTICE_S` threshold
+    the queue wait crosses (plan D9)."""
     sc = scope_for(base_url, model, cfg)
     if sc is None:
         yield None
@@ -288,6 +335,7 @@ def slot(base_url: str, model: str, *,
     held = None
     t0 = time.monotonic()
     warned = t0
+    noticed: set = set()
     try:
         d = slot_dir() / scope
         d.mkdir(parents=True, exist_ok=True)
@@ -313,6 +361,14 @@ def slot(base_url: str, model: str, *,
                 log.info("ollama_slots: %s × %s queued %.0fs (limit %d)",
                          model, scope, now - t0, limit)
                 warned = now
+            if on_wait is not None:
+                for _t in infra_notices(now - t0, noticed):
+                    try:
+                        on_wait({"what": "slot", "scope": scope,
+                                 "model": model, "limit": limit,
+                                 "waited_s": round(now - t0)})
+                    except Exception:  # pragma: no cover
+                        log.exception("on_wait raised; ignored")
             time.sleep(delay)
             delay = min(0.5, delay * 1.5)
     except Cancelled:

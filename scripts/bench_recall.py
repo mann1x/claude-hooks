@@ -84,7 +84,7 @@ class QdrantBaseline:
     """Wraps the production QdrantProvider so we measure the same path the
     UserPromptSubmit hook uses (collection_name compat handling included)."""
 
-    def __init__(self, mcp_url: str = "http://192.168.178.2:32775/mcp"):
+    def __init__(self, mcp_url: str):
         from claude_hooks.providers.base import ServerCandidate
         from claude_hooks.providers.qdrant import QdrantProvider
         srv = ServerCandidate(server_key="qdrant", url=mcp_url, source="user", confidence="manual")
@@ -107,7 +107,7 @@ class PgvectorBenchProvider:
         self.conn = psycopg.connect(dsn)
         self.spec = MODELS[model_name]
         self.embedder = OllamaBatchEmbedder(
-            os.environ.get("OLLAMA_URL", "http://192.168.178.2:11434"),
+            os.environ.get("OLLAMA_URL", "http://localhost:11434"),
             self.spec.ollama_model,
             keep_alive="15m",
             max_chars=self.spec.max_chars,
@@ -178,6 +178,15 @@ def _overlap_at_k(baseline: list[str], candidate: list[str], k: int) -> float:
 # Main
 # ---------------------------------------------------------------------------
 
+def _configured_qdrant_mcp() -> Optional[str]:
+    """The host's Qdrant MCP URL from config/claude-hooks.json."""
+    try:
+        from claude_hooks.config import load_config
+        return ((load_config().get("providers") or {}).get("qdrant") or {}).get("mcp_url") or None
+    except Exception:
+        return None
+
+
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     p.add_argument("--k", type=int, default=5)
@@ -192,7 +201,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--queries-file", type=Path,
                    help="newline-separated queries (UTF-8). Defaults to a curated list.")
     p.add_argument("--output", type=Path, default=Path("bench-results.json"))
-    p.add_argument("--qdrant-mcp", default="http://192.168.178.2:32775/mcp")
+    p.add_argument("--qdrant-mcp", default=_configured_qdrant_mcp(),
+                   help="Qdrant MCP URL (default: providers.qdrant.mcp_url)")
     p.add_argument("--dsn", help="pgvector DSN; falls back to /shared/config/mcp-pgvector/.env")
     p.add_argument("--models", default="all",
                    help="comma-separated subset of MODELS keys, or 'all'")
@@ -235,6 +245,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Build providers.
     providers: dict[str, object] = {}
     if not args.skip_qdrant:
+        if not args.qdrant_mcp:
+            raise SystemExit("no Qdrant MCP URL: pass --qdrant-mcp, set "
+                             "providers.qdrant.mcp_url, or --skip-qdrant")
         providers["qdrant"] = QdrantBaseline(args.qdrant_mcp)
     dsn = _resolve_dsn(args)
     for m in selected_models:

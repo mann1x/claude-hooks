@@ -88,6 +88,12 @@ class NodeFinished(CouncilEvent):
     """Counterpart to NodeStarted. ``duration_ms`` is the wall time
     the node spent, ``ok`` distinguishes happy-path from tombstoned
     lanes / role failures.
+
+    Plan D7: ``stop_reason`` says how the node's loop ended
+    (``completed``, ``iteration_cap``, ``loop_guard``, ``mistake_limit``,
+    ``struggle``, ``reasoning_loop``, or the failure class of a failed
+    node); ``failure_class`` is set when the node failed or was stopped by
+    a guard (see :func:`failure_class_of`). ``None`` means not recorded.
     """
     role: str
     round: int = 1
@@ -95,7 +101,48 @@ class NodeFinished(CouncilEvent):
     duration_ms: int = 0
     ok: bool = True
     error: Optional[str] = None
+    stop_reason: Optional[str] = None
+    failure_class: Optional[str] = None
     kind: str = "node_finished"
+
+
+#: Plan D7 failure classes. A provider fault keeps its own name where the
+#: next move differs (``model_missing``, ``context_overflow``,
+#: ``tool_call_unparsable``); the network, admission and stall faults are
+#: all ``infra``; anything else the node raised is ``task_error``.
+INFRA = "infra"
+TASK_ERROR = "task_error"
+CANCELLED = "cancelled"
+
+
+def failure_class_of(exc: BaseException) -> str:
+    """The failure class of an exception a node failed on."""
+    from claude_hooks.get_advice import chat_client as cc
+    fault = getattr(exc, "fault_class", None)
+    if fault in (cc.MODEL_MISSING, cc.CONTEXT_OVERFLOW,
+                 cc.TOOL_CALL_UNPARSABLE):
+        return fault
+    if fault in (cc.TRANSPORT, cc.REFUSAL):
+        return INFRA
+    if fault == cc.BAD_REQUEST:
+        return TASK_ERROR
+    names = {c.__name__ for c in type(exc).__mro__}
+    if "CancelledByOrchestrator" in names:
+        return CANCELLED
+    if "ContextOverflowUnrecovered" in names:
+        return cc.CONTEXT_OVERFLOW
+    if names & {"StallError", "URLError", "TimeoutError", "ConnectionError"}:
+        return INFRA
+    return TASK_ERROR
+
+
+def loop_stop(final: Optional[dict]) -> tuple[str, Optional[str]]:
+    """``(stop_reason, failure_class)`` of a finished ``run_loop``."""
+    final = final or {}
+    reason = final.get("_stop_reason")
+    if not reason:
+        return "completed", None
+    return str(reason), str(final.get("_failure_class") or reason)
 
 
 @dataclass(frozen=True, kw_only=True)

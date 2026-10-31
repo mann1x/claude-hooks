@@ -1,41 +1,41 @@
 #!/bin/sh
-# Caliber: sync agent configs on commit (non-blocking).
-#
-# This hook is intentionally fire-and-forget:
-#   - `caliber refresh` calls an LLM and can take 30-70s even when no
-#     docs change. We cap it (via GNU timeout if available) at 30s
-#     and run it in the background so `git commit` returns
-#     immediately. Any refreshed docs land in the NEXT commit.
-#   - `caliber learn finalize` is NOT run here - SessionEnd hooks
-#     already run `caliber learn finalize --auto`, and running the
-#     full (non-auto) version on the commit path was the single
-#     biggest contributor (~10 min on a 240-event session).
-#   - CALIBER_CLAUDE_CLI_TIMEOUT_MS=60000 bounds the inner Claude CLI
-#     call so a slow LLM can't pin the background process longer than
-#     ~60s even if the outer `timeout` isn't available (Windows Git
-#     Bash lacks GNU coreutils timeout — its `timeout` is a sleep).
-#
-# The keyword "caliber" remains below so tools that grep for it
-# (including Caliber's own setup detection) continue to see an
-# active hook.
-
 # caliber:pre-commit:start
+# Caliber: sync agent configs on commit (non-blocking).
+# Installed by scripts/install-caliber-hook.sh, which merges this block
+# into .git/hooks/pre-commit between its markers and never touches the
+# rest (a secret gate above it keeps running first).
+#
+# - `caliber refresh` runs in the background, so `git commit` returns at
+#   once and refreshed docs land in the NEXT commit. A refresh of this
+#   repo measured ~110 s, so there is no wall-clock cap: the old
+#   `timeout 30` and CALIBER_CLAUDE_CLI_TIMEOUT_MS=60000 killed every one
+#   (AGENTS.md sat at its May content, the state 73 commits behind HEAD).
+#   What bounds it is stream inactivity, which stops a stalled call
+#   without cutting a healthy long generation.
+# - `--quiet` only on a caliber that exempts git hooks from its
+#   Claude-session cascade guard (ai-setup #251, detected by the
+#   GIT_INDEX_FILE check in its build). Elsewhere, from a Claude Code
+#   session (CLAUDECODE=1, stdin not a TTY), `--quiet` makes the refresh
+#   return at once having done nothing.
+# - `caliber learn finalize` is not run here: SessionEnd hooks run the
+#   `--auto` version, and the full one cost ~10 min per commit.
+#
+# Working when `lastRefreshSha` in .caliber/.caliber-state.json tracks
+# HEAD; output is in .caliber/refresh-hook.log.
 if [ -x "caliber" ] || command -v "caliber" >/dev/null 2>&1; then
   mkdir -p .caliber
-  # Pick a GNU-compatible `timeout` binary if available. Windows'
-  # C:\Windows\system32\timeout.exe is a sleep, NOT a command wrapper,
-  # so we skip it and fall back to the Claude-CLI env timeout.
-  _cal_tmo=""
-  if [ -x /usr/bin/timeout ]; then
-    _cal_tmo="/usr/bin/timeout 30"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    _cal_tmo="gtimeout 30"
+  _cal_quiet=""
+  _cal_bin="$(command -v caliber 2>/dev/null)"
+  _cal_real="$(readlink -f "$_cal_bin" 2>/dev/null || echo "$_cal_bin")"
+  if [ -n "$_cal_real" ] && grep -q GIT_INDEX_FILE "$_cal_real" 2>/dev/null; then
+    _cal_quiet="--quiet"
   fi
   echo "caliber: refreshing docs in background..."
   (
-    CALIBER_CLAUDE_CLI_TIMEOUT_MS=60000 \
-      $_cal_tmo caliber refresh --quiet \
-        >.caliber/refresh-hook.log 2>&1 || true
+    CALIBER_CLAUDE_CLI_TIMEOUT_MS=3600000 \
+    CALIBER_GENERATION_TIMEOUT_MS=1800000 \
+    CALIBER_STREAM_INACTIVITY_TIMEOUT_MS=600000 \
+      caliber refresh $_cal_quiet >.caliber/refresh-hook.log 2>&1 || true
   ) </dev/null >/dev/null 2>&1 &
 fi
 # caliber:pre-commit:end

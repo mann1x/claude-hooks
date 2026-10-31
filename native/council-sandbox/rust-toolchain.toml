@@ -1,0 +1,6 @@
+# Pinned: the release asset's sha256 (claude_hooks/sandbox/launcher_pin.json)
+# is reproducible only from this exact toolchain.
+[toolchain]
+channel = "1.89.0"
+targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
+profile = "minimal"

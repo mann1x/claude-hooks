@@ -8,7 +8,9 @@
 #
 #   CALIBER_GROUNDING_HOST       default 127.0.0.1
 #   CALIBER_GROUNDING_PORT       default 38090
-#   CALIBER_GROUNDING_UPSTREAM   default http://192.168.178.2:11433/v1
+#   CALIBER_GROUNDING_UPSTREAM   default: the host's ollama.url
+#                                    (config/claude-hooks.json), else
+#                                    http://localhost:11434
 #   CALIBER_GROUNDING_MAX_ITER   default 35
 #   CALIBER_GROUNDING_CWD        default $(pwd) — the project to ground
 #                                    against; MUST be set to the

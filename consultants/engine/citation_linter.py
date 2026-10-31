@@ -66,7 +66,10 @@ from __future__ import annotations
 
 import ast
 import logging
+import os
 import re
+import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
@@ -181,6 +184,7 @@ CITATION_RE = re.compile(_PATH_RE)
 #: it is the one failure mode that is far more often an infrastructure
 #: problem than a model one.
 UNRESOLVED_REASON = "file not found in any allowed_root"
+AMBIGUOUS_REASON = "several files under the allowed roots end with this path"
 
 #: Below this many distinct citations, a high miss ratio says nothing
 #: — one wrong cite out of one is a normal model error.
@@ -280,6 +284,17 @@ def verify_citation(
 
     resolved = _resolve_path(path, allowed_roots)
     if resolved is None:
+        n = len(_suffix_matches(path, allowed_roots))
+        if n > 1:
+            return CitationIssue(
+                original_match=full_cite,
+                replacement=(f"{full_cite} [unverified — {n} files end with "
+                             "this path; name the full one]"),
+                reason=AMBIGUOUS_REASON,
+                path=path,
+                line_start=line_start,
+                line_end=line_end,
+            )
         return CitationIssue(
             original_match=full_cite,
             replacement=f"{full_cite} [unverified — file not found]",
@@ -478,13 +493,71 @@ def lint_answer(
     return annotated, issues
 
 
+UNSUPPORTED_NOTE = " [unsupported — the cited code does not show this]"
+#: Lines of code around a cite handed to the decision model, each side.
+SEMANTIC_CONTEXT_LINES = 3
+#: Characters of answer text before a cite taken as its claim.
+SEMANTIC_CLAIM_CHARS = 400
+
+
+def semantic_items(answer_text: str, *,
+                   allowed_roots: Sequence[str]) -> list[dict]:
+    """``{"match", "claim", "code"}`` for each cite that resolves to a
+    real line (plan H, ``citations`` seam): the sentence(s) before the
+    cite, and the cited lines with ``SEMANTIC_CONTEXT_LINES`` of context.
+    Cites already annotated, or that do not resolve, are left to
+    :func:`lint_answer`."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for m in CITATION_RE.finditer(answer_text or ""):
+        if _is_url_tail(answer_text, m.start()) or \
+                _already_annotated_at(answer_text, m.end()):
+            continue
+        full = m.group(0)
+        if full in seen:
+            continue
+        resolved = _resolve_path(m.group("path"), allowed_roots)
+        lines = _load_file_lines(resolved) if resolved else None
+        start = int(m.group("line_start"))
+        end = int(m.group("line_end") or start)
+        if not lines or start < 1 or start > len(lines):
+            continue
+        lo = max(1, start - SEMANTIC_CONTEXT_LINES)
+        hi = min(len(lines), max(start, end) + SEMANTIC_CONTEXT_LINES)
+        code = "\n".join(f"{n}: {lines[n - 1]}" for n in range(lo, hi + 1))
+        head = answer_text[max(0, m.start() - SEMANTIC_CLAIM_CHARS):m.end()]
+        # The claim starts at the last sentence or bullet break.
+        cut = max(head.rfind("\n"), head.rfind(". ", 0, len(head) - len(full)))
+        claim = head[cut + 1:].strip() if cut >= 0 else head.strip()
+        seen.add(full)
+        out.append({"match": full, "claim": claim, "code": code})
+    return out
+
+
+def annotate_unsupported(answer_text: str, matches: Sequence[str]) -> str:
+    """Append :data:`UNSUPPORTED_NOTE` after each cite in ``matches``
+    (every occurrence; already-annotated ones are left alone)."""
+    out = answer_text
+    for full in dict.fromkeys(matches):
+        pieces = out.split(full)
+        rebuilt = pieces[0]
+        for piece in pieces[1:]:
+            if piece.startswith((" [unverified", " [in ", " [unsupported")):
+                rebuilt += full + piece
+            else:
+                rebuilt += full + UNSUPPORTED_NOTE + piece
+        out = rebuilt
+    return out
+
+
 def _already_annotated_at(text: str, idx: int) -> bool:
     """True iff a ``[unverified`` or ``[in `` marker immediately
     follows position ``idx`` (the linter's own previous annotation).
     Used to make :func:`lint_answer` idempotent on re-runs.
     """
     suffix = text[idx:idx + 16]
-    return suffix.startswith(" [unverified") or suffix.startswith(" [in ")
+    return (suffix.startswith(" [unverified") or suffix.startswith(" [in ")
+            or suffix.startswith(" [unsupported"))
 
 
 def _verify_symbol_match(
@@ -847,7 +920,63 @@ def _resolve_path(
         candidate = Path(root) / path
         if candidate.is_file():
             return candidate
-    return None
+    # A short path (``executors/index.ts``) names the one file whose
+    # path ends with it (council run 5, mail #1641: marked "file not
+    # found" while it existed deeper in the tree). Only a unique match.
+    found = _suffix_matches(path, allowed_roots)
+    return found[0] if len(found) == 1 else None
+
+
+#: Files listed per root, ``{root: (when, [relative paths])}``.
+_FILES_CACHE: dict = {}
+_FILES_TTL_S = 60.0
+_WALK_MAX_FILES = 200_000
+_WALK_SKIP = {".git", "node_modules", ".venv", "venv", "__pycache__",
+              "dist", "build", "target", ".claude-hooks"}
+
+
+def _files_under(root: str) -> list[str]:
+    """Every file under ``root``, relative: ``git ls-files`` (tracked and
+    untracked, not ignored) when it is a git tree, else a bounded walk."""
+    hit = _FILES_CACHE.get(root)
+    if hit and time.monotonic() - hit[0] < _FILES_TTL_S:
+        return hit[1]
+    files: list[str] = []
+    try:
+        out = subprocess.run(
+            ["git", "-C", root, "ls-files", "-z", "--cached", "--others",
+             "--exclude-standard"], capture_output=True, timeout=10)
+        if out.returncode == 0:
+            files = [f for f in out.stdout.decode("utf-8", "replace").split("\0") if f]
+    except (OSError, subprocess.SubprocessError):
+        files = []
+    if not files:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in _WALK_SKIP]
+            rel = os.path.relpath(dirpath, root)
+            files.extend(f if rel == "." else f"{rel}/{f}" for f in filenames)
+            if len(files) >= _WALK_MAX_FILES:
+                break
+        files = [f.replace(os.sep, "/") for f in files]
+    _FILES_CACHE[root] = (time.monotonic(), files)
+    return files
+
+
+def _suffix_matches(path: str, allowed_roots: Sequence[str]) -> list[Path]:
+    """Files under the roots whose path ends with ``/<path>``."""
+    tail = "/" + path.replace("\\", "/").lstrip("./")
+    if tail.count("/") < 2:          # a bare file name is too weak
+        return []
+    out: list[Path] = []
+    for root in allowed_roots:
+        if not root or not Path(root).is_dir():
+            continue
+        for rel in _files_under(root):
+            if ("/" + rel).endswith(tail):
+                cand = Path(root) / rel
+                if cand.is_file() and cand not in out:
+                    out.append(cand)
+    return out
 
 
 def _count_lines(path: Path) -> int:

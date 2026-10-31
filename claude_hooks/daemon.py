@@ -701,6 +701,17 @@ def serve(
     except Exception as e:
         log.debug("mailbox maintenance thread not started: %s", e)
 
+    # Resource claims: renew this host's leases and drop claims whose
+    # holder exited, whether or not anyone is typing.
+    try:
+        from claude_hooks.config import load_config
+        from claude_hooks.resources.hook import ResourceMaintenanceThread
+
+        ResourceMaintenanceThread(
+            load_config, stop_event=server.stop_event).start()
+    except Exception as e:
+        log.debug("resource maintenance thread not started: %s", e)
+
     # Cloud-session relay: a folder a cloud session can write to, turned
     # into a mailbox client. Only on the host whose folder it is
     # (hooks.mailbox.cloud_relay); blocked on file events, so it costs

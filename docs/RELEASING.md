@@ -161,6 +161,22 @@ release at most. Update it during the same cut.
    two branches land at the same commit again, ready for the next
    round of work.
 
+### The council-sandbox launcher asset
+
+When `claude_hooks/sandbox/launcher_pin.json` names a version that has
+no GitHub release yet, publish it with the cut (hosts without cargo and
+the pinned toolchain install the launcher from it):
+
+```bash
+python3 scripts/build_council_sandbox.py --out dist/council-sandbox   # both arches, static, checked against the pin
+gh release create council-sandbox-v<version> dist/council-sandbox/* \
+  --title "council-sandbox v<version>" --notes "Static launcher for the /consultants shell; sha256 in SHA256SUMS and claude_hooks/sandbox/launcher_pin.json."
+```
+
+A launcher source change is re-pinned on `dev` first (`--pin`, committed
+with the source); the asset's hashes must equal the pin's, or deploy
+refuses it.
+
 ## Hotfix procedure
 
 For a fix that must ship without waiting for the next `dev` cut:

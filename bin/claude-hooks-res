@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+# claude-hooks-res — POSIX entry point for resource claims (hosts, GPUs,
+# pods, the cloud account).
+# Keeps the caller's cwd: a claim records the project it was made from
+# (the shared resolver puts the repo on PYTHONPATH).
+#
+# See docs/resources.md for the full reference.
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+
+. "$HERE/_resolve_python.sh"
+
+if [ -z "$PY" ]; then
+    echo "claude-hooks-res: no python found" >&2
+    exit 1
+fi
+
+exec "$PY" -m claude_hooks.resources.cli "$@"

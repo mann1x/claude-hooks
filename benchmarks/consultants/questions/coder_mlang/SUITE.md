@@ -1,7 +1,7 @@
 ---
 suite: coder_mlang
-suite_version: "1.0.1"
-released: 2026-05-17
+suite_version: "1.1.0"
+released: 2026-10-24
 manifest:
   - python-medium-01-meeting-rooms
   - rust-medium-01-search-rotated
@@ -27,7 +27,33 @@ rubric:
   tie_breaker: median_tokens
 ---
 
-# Coder Multi-Language Suite v1.0.1
+# Coder Multi-Language Suite v1.1.0
+
+## v1.1.0 changelog (2026-10-24) — the coder is shown the spec
+
+**Every result before v1.1.0 is invalid.** The harness sends the coder
+(and every judge) only a question's `task` field, and in this suite
+`task` was a one-line summary: the API, the constraints, the output
+format and the v1.0.1 "CRITICAL CONSTRAINTS" block all live in the
+markdown body, which no model was ever shown. The v1.0 failure modes
+below (wrong function name, wrong output format) were that, not models
+misreading a spec. 2026-10-22: minimax-m3.1-flash named
+`min_conference_rooms` after the task's wording; the spec says
+`min_meeting_rooms`.
+
+- Every question declares `spec: body`; `harness.task_of()` then sends
+  `task` followed by the body as written (indentation kept). No other
+  suite sets it, so their prompts are unchanged.
+- `python-hard-01-lru-cache` and `python-very_hard-01-parser-combinator`
+  oracles failed at collection (`name 'pytest' is not defined`, since
+  v1.0.1's constraint markers): no model could pass them. Fixed.
+- `tests/test_coder_suite_specs.py` checks, with no model, that every
+  oracle of every coder suite loads and that each task here carries its
+  body's API.
+
+The per-language routes in `consultants/engine/coder_defaults.py` are
+not affected: coder_med (2026-06-04, re-based 2026-09-23) superseded
+this suite's numbers.
 
 ## v1.0.1 changelog (2026-05-17)
 

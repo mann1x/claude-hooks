@@ -470,6 +470,19 @@ def _isolated_task_state(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_resources(tmp_path, monkeypatch):
+    """Resource claims go to a per-test SQLite file: the real table is
+    shared by every session on every host, and a test claim on
+    ``solidpc/gpu0`` would hold up real work."""
+    monkeypatch.setenv("CLAUDE_HOOKS_RESOURCES_DB",
+                       str(tmp_path / "claude-hooks-resources.db"))
+    from claude_hooks.resources import api
+    api.reset_store()
+    yield
+    api.reset_store()
+
+
+@pytest.fixture(autouse=True)
 def _isolated_inflight_index(tmp_path, monkeypatch):
     """Every test gets its own consultants in-flight index.
 
@@ -480,6 +493,23 @@ def _isolated_inflight_index(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("CONSULTANTS_INFLIGHT_PATH",
                        str(tmp_path / "consultants-inflight.json"))
+    # The sandbox view registry (plan E4) is read by the same startup
+    # sweep that freezes a dead council's views; a test must never reach
+    # the host's.
+    monkeypatch.setenv("CONSULTANTS_SANDBOX_REGISTRY",
+                       str(tmp_path / "consultants-sandbox-views.json"))
+    # The host-wide council index (the dashboard's list) is written on
+    # every in-flight registration.
+    monkeypatch.setenv("CONSULTANTS_COUNCIL_INDEX",
+                       str(tmp_path / "consultants-councils.db"))
+    # PolyKV holds (plan F3): the engine's startup sweep releases what
+    # this file names on the real engines.
+    monkeypatch.setenv("CONSULTANTS_POLYKV_HELD",
+                       str(tmp_path / "consultants-polykv-held.json"))
+    # An app's startup backfill runs in a thread that outlives the test,
+    # past this fixture's teardown: on 2026-10-18 one wrote 60 finished
+    # councils back to "running" in the real index.
+    monkeypatch.setenv("CONSULTANTS_INDEX_STARTUP", "0")
 
 
 @pytest.fixture(autouse=True)
@@ -512,6 +542,17 @@ def _reset_token_calibration():
 @pytest.fixture(autouse=True)
 def _ollama_slots_off(monkeypatch):
     monkeypatch.setenv("CLAUDE_HOOKS_OLLAMA_SLOTS_DISABLE", "1")
+
+
+# The host's Ollama Cloud key (``ollama.api_key_file`` in the real
+# config/claude-hooks.json, or OLLAMA_API_KEY from a shell profile) must
+# never reach a test: a client built for https://ollama.com would carry it
+# into every mocked request. Tests of the key give their own config.
+@pytest.fixture(autouse=True)
+def _no_ollama_cloud_key(monkeypatch):
+    from claude_hooks import ollama_upstream
+    monkeypatch.delenv(ollama_upstream.API_KEY_ENV, raising=False)
+    monkeypatch.setattr(ollama_upstream, "_key_config", lambda: {})
 
 
 # --------------------------------------------------------------------------- #

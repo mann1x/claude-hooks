@@ -13,7 +13,7 @@ which is honest rather than silently half-working.
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: One registration per ``(alias, host)``, and the migration that makes
 #: it possible.
@@ -182,7 +182,7 @@ MESSAGE_COLUMNS = (
 
 SESSION_COLUMNS = (
     "session_id", "alias", "host", "os", "cwd", "started_at", "last_seen",
-    "client_pid", "client_started",
+    "client_pid", "client_started", "durable", "owner", "durable_until",
 )
 
 #: Columns added after the table first shipped: ``(name, postgres type,
@@ -193,9 +193,21 @@ SESSION_COLUMNS = (
 #: unconditional ``ALTER``: every hook process runs the schema path, and
 #: on Postgres an ``ALTER TABLE`` takes an exclusive lock even when the
 #: column is already there.
+#:
+#: ``durable`` / ``owner`` / ``durable_until`` make a registration last
+#: (ch-18): a durable row is never evicted for being quiet, survives its
+#: session's end, and is handed to whoever next takes its ``(alias,
+#: host)`` slot. ``owner`` is the ``alias@host`` that registered it — the
+#: one identity that may send from it and read its inbox — and
+#: ``durable_until`` an expiry the owner set, NULL for none. A cloud
+#: thread linked to a machine has no session of its own to stay alive
+#: with, so without this its alias lapsed with the 24 h eviction.
 ADDED_REGISTRY_COLUMNS = (
     ("client_pid", "BIGINT", "INTEGER"),
     ("client_started", "DOUBLE PRECISION", "REAL"),
+    ("durable", "SMALLINT", "INTEGER"),
+    ("owner", "TEXT", "TEXT"),
+    ("durable_until", "TIMESTAMPTZ", "TEXT"),
 )
 
 

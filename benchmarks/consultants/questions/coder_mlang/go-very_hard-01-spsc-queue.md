@@ -5,6 +5,7 @@ source: concurrency
 task: 'Lock-free SPSC ring buffer using only sync/atomic (no Mutex). Producer + consumer goroutines must conserve all items.'
 sandbox_path: solution.go
 oracle: go-very_hard-01-spsc-queue-oracle.py
+spec: body
 ---
 
 # go-very_hard-01-spsc-queue

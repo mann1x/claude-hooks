@@ -185,6 +185,41 @@ class TestLifecycle:
             # write to the real index.
             fut.result(timeout=10)
 
+    def test_a_run_still_inside_a_node_keeps_its_polykv_snapshot(self, project_dir):
+        """csl-2026-10-25-0559-4d81: the researchers were mid-call at the
+        end of the grace, the runner's finally never ran, and the resume
+        started with no record of the pools the old process pinned."""
+        import json
+        from consultants.engine import polykv
+        release = threading.Event()
+
+        def stuck(state, runner_input):
+            mgr = polykv.start_run(state.sid, mode="pooled", cwd=state.cwd)
+            mgr.sessions["researcher:0"] = "csl-x~researcher~0"
+            state._polykv = mgr
+            release.wait(10)
+            state.status = "suspended"
+
+        app = create_app(run_council=stuck, start_reaper=False)
+        client = TestClient(app)
+        sid = client.post("/v1/consult", json={
+            "message": "q", "cwd": str(project_dir)}).json()["sid"]
+        fut = app.state.runner_futures[sid]
+        try:
+            assert _wait(lambda: app.state.sessions[sid]._polykv is not None)
+            assert suspend_running_councils(app, grace_s=0.2) == 1
+            snap = json.loads(polykv.snapshot_path(str(project_dir), sid)
+                              .read_text(encoding="utf-8"))
+            assert snap["suspended"] is True
+            assert snap["sessions"] == {"researcher:0": "csl-x~researcher~0"}
+            resumed = polykv.start_run(sid, mode="pooled",
+                                       cwd=str(project_dir), resume=True)
+            assert resumed.sessions == {"researcher:0": "csl-x~researcher~0"}
+            polykv.drop(sid)
+        finally:
+            release.set()
+            fut.result(timeout=10)
+
     def test_startup_resumes_under_the_same_sid(self, project_dir):
         inflight.register({
             "sid": "csl-left", "kind": "consult", "cwd": str(project_dir),
@@ -207,6 +242,83 @@ class TestLifecycle:
         assert seen["input"]["config"].effort == "high"
         assert _wait(lambda: inflight.get("csl-left") is None)
         assert app.state.sessions["csl-left"].status == "completed"
+
+    def test_a_wrap_up_is_written_into_the_record(self, project_dir):
+        """Plan D9: a wrap-up asked of a running council outlives the
+        engine it was asked of."""
+        entered = threading.Event()
+        app = create_app(run_council=_suspendable_runner(entered),
+                         start_reaper=False)
+        c = TestClient(app)
+        sid = c.post("/v1/consult", json={
+            "message": "q", "cwd": str(project_dir)}).json()["sid"]
+        assert entered.wait(5)
+        try:
+            r = c.post(f"/v1/consult/{sid}/wrap-up", json={"reason": "enough"})
+            assert r.json()["wrap_up_accepted"] is True
+            assert inflight.get(sid)["wrap_up"]["reason"] == "enough"
+        finally:
+            # Release the runner even on a failure, or its thread holds
+            # pytest open.
+            suspend_running_councils(app, grace_s=5)
+
+    def test_a_wrapping_up_council_resumes_still_wrapping_up(self, project_dir):
+        inflight.register({
+            "sid": "csl-wrap", "kind": "consult", "cwd": str(project_dir),
+            "question": "unfinished", "effort": "high",
+            "extra_roots": [], "root_sid": "csl-wrap",
+            "started_at": time.time() - 600, "state": "suspended",
+            "wrap_up": {"reason": "enough", "requested_at": 1234.0},
+        })
+        seen = {}
+
+        def run(state, runner_input):
+            seen["wrapping"] = state.run_control.wrapping_up
+            seen["partial"] = state.run_control.partial()
+            _complete(state, runner_input)
+
+        create_app(run_council=run, start_reaper=False, resume_inflight=True)
+        assert _wait(lambda: "wrapping" in seen)
+        assert seen["wrapping"] is True
+        assert seen["partial"]["requested_by"] == "enough"
+        assert seen["partial"]["requested_at"] == 1234.0
+
+    def test_a_cancel_is_written_into_the_record(self, project_dir):
+        """A cancel outlives the engine it was asked of, like a wrap-up."""
+        entered, release = threading.Event(), threading.Event()
+
+        def run(state, runner_input):
+            # A cancel wins over a suspend, so this one waits to be let go.
+            entered.set()
+            release.wait(5)
+            state.status = "cancelled"
+        app = create_app(run_council=run, start_reaper=False)
+        c = TestClient(app)
+        sid = c.post("/v1/consult", json={
+            "message": "q", "cwd": str(project_dir)}).json()["sid"]
+        assert entered.wait(5)
+        try:
+            c.post(f"/v1/consult/{sid}/cancel", json={"reason": "stop it"})
+            assert inflight.get(sid)["cancel"]["reason"] == "stop it"
+        finally:
+            release.set()
+
+    def test_a_cancelled_council_is_settled_not_resumed(self, project_dir):
+        """arm B, 2026-10-24: a council cancelled before a restart came
+        back as a normal run and kept calling a dead server."""
+        from consultants.engine import sessions_index
+        inflight.register({
+            "sid": "csl-stop", "kind": "consult", "cwd": str(project_dir),
+            "question": "q", "effort": "medium",
+            "started_at": time.time(), "state": "interrupted",
+            "cancel": {"reason": "stop it", "requested_at": 1234.0},
+        })
+        calls = []
+        app = create_app(run_council=lambda s, i: calls.append(s.sid),
+                         start_reaper=False)
+        assert resume_inflight_councils(app) == []
+        assert calls == [] and inflight.get("csl-stop") is None
+        assert sessions_index.get(project_dir, "csl-stop").status == "cancelled"
 
     def test_a_follow_up_resumes_with_its_parent(self, project_dir):
         app = create_app(run_council=_complete, run_follow_up=_complete,
@@ -372,3 +484,40 @@ class TestEngineResume:
         assert c2["critic"].calls == 1
         assert out["research"] == ["findings"] or any(
             "findings" in r for r in out["research"])
+
+
+def test_a_resumed_run_starts_after_the_roles_it_finished(tmp_path):
+    """csl-2026-10-25-0559-4d81: the resume re-marked the planner
+    in_progress, and nothing flipped it back."""
+    import sqlite3
+    from types import SimpleNamespace
+    from consultants.server.runner import _start_progress
+    sid = "csl-r"
+    sdir = tmp_path / ".claude-hooks" / "consultants" / sid
+    sdir.mkdir(parents=True)
+    con = sqlite3.connect(sdir / "transcript.db")
+    con.execute("CREATE TABLE runtime_events (event_id INTEGER PRIMARY KEY, "
+                "ts REAL, kind TEXT, role TEXT, round INT, lane_idx INT, "
+                "payload TEXT)")
+    con.execute("INSERT INTO runtime_events (kind, role) VALUES "
+                "('node_enter', 'planner'), ('node_exit', 'planner'), "
+                "('node_enter', 'researcher')")
+    con.commit()
+    con.close()
+    roles = ["planner", "researcher", "synthesizer"]
+
+    def fresh():
+        return SimpleNamespace(cwd=str(tmp_path), sid=sid,
+                               progress={r: "pending" for r in roles})
+
+    state = fresh()
+    _start_progress(state, roles, {"resume": True})
+    assert state.progress == {"planner": "done", "researcher": "pending",
+                              "synthesizer": "pending"}
+    state = fresh()
+    _start_progress(state, roles, {})
+    assert state.progress["planner"] == "in_progress"
+    state = SimpleNamespace(cwd=str(tmp_path / "none"), sid=sid,
+                            progress={r: "pending" for r in roles})
+    _start_progress(state, roles, {"resume": True})   # no transcript: nothing
+    assert set(state.progress.values()) == {"pending"}

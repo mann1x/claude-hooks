@@ -1,0 +1,67 @@
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/minimax-m3-1-flash-cloud-2026-10-22t12-r3/audit-medium.transcript.db
+
+sid: csl-2026-10-22-1815-967d
+status: completed
+total wall: 175.3s
+
+  planner       node=53.3s   (entries) llm=10x=52.9s   tool=18x=360ms   tok=p278565/c5344
+      LLM round=1 model=minimax-m3.1-flash:cloud    14.7s  p=61933  c=1725  
+      LLM round=1 model=minimax-m3.1-flash:cloud     7.6s  p=50001  c=749   
+      LLM round=1 model=minimax-m3.1-flash:cloud     6.3s  p=37113  c=659   
+      LLM round=1 model=minimax-m3.1-flash:cloud     5.0s  p=28311  c=461   
+      LLM round=1 model=minimax-m3.1-flash:cloud     4.9s  p=47277  c=491   
+      LLM round=1 model=minimax-m3.1-flash:cloud     4.4s  p=17945  c=358   
+      LLM round=1 model=minimax-m3.1-flash:cloud     3.4s  p=18116  c=405   
+      LLM round=1 model=minimax-m3.1-flash:cloud     3.4s  p=13165  c=295   
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.4s  p=3092   c=131   
+      LLM round=1 model=minimax-m3.1-flash:cloud    867ms  p=1612   c=70    
+      tool grep               x13    359ms chars=233372
+      tool read_file          x2       1ms chars=7324
+      tool survey_project     x1       0ms chars=3779
+      tool list_files         x2       0ms chars=534
+
+  researcher    node=1.7m    (2xentries) llm=16x=1.7m    tool=47x=470ms   tok=p562175/c11131
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud    33.4s  p=48499  c=4074  
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud    22.7s  p=48142  c=2918  
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     6.2s  p=47983  c=384   
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     6.1s  p=36332  c=638   
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     4.7s  p=47802  c=333   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     4.5s  p=41274  c=401   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     4.4s  p=44472  c=399   
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     3.7s  p=33891  c=326   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     3.3s  p=37422  c=364   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     2.9s  p=33687  c=292   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     2.5s  p=28800  c=319   
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     2.3s  p=26596  c=266   
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     2.1s  p=30703  c=182   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     2.1s  p=17275  c=70    
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     1.5s  p=21951  c=111   
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     1.2s  p=17346  c=54    
+      tool grep               x17    463ms chars=105819
+      tool read_file          x26      7ms chars=81370
+      tool survey_project     x2       0ms chars=7558
+      tool list_files         x2       0ms chars=534
+
+  synthesizer   node=1.0m    (entries) llm=11x=1.0m    tool=29x=203ms   tok=p298438/c5856
+      LLM round=1 model=minimax-m3.1-flash:cloud    17.8s  p=43570  c=2933  
+      LLM round=1 model=minimax-m3.1-flash:cloud     8.3s  p=42011  c=319   
+      LLM round=1 model=minimax-m3.1-flash:cloud     6.7s  p=28406  c=522   
+      LLM round=1 model=minimax-m3.1-flash:cloud     5.9s  p=6052   c=119   
+      LLM round=1 model=minimax-m3.1-flash:cloud     4.5s  p=26604  c=325   
+      LLM round=1 model=minimax-m3.1-flash:cloud     4.0s  p=23936  c=289   
+      LLM round=1 model=minimax-m3.1-flash:cloud     3.7s  p=19251  c=345   
+      LLM round=1 model=minimax-m3.1-flash:cloud     3.3s  p=40289  c=325   
+      LLM round=1 model=minimax-m3.1-flash:cloud     3.1s  p=17828  c=190   
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.6s  p=21077  c=250   
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.2s  p=29414  c=239   
+      tool grep               x7     193ms chars=103909
+      tool glob               x1       7ms chars=37
+      tool read_file          x21      3ms chars=36246
+
+totals
+  wall                  175.3s
+  sum of node spans     3.7m
+  sum of LLM call time  3.6m  (124.7% of wall)
+  sum of tool call time 1.0s
+  total prompt tokens   1139178
+  total completion tok  22331

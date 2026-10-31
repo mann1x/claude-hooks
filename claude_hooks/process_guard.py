@@ -1029,9 +1029,15 @@ class _Walker:
                                          f"{victim.label}, so the kill takes down "
                                          "its own " + ("connection" if ctx.remote else "shell"))
         elif role == "cond":
-            rule, effect = "self-match", ("so the test is always true: a "
-                                          "`while` on it never ends and an `if` "
-                                          "always sees a process")
+            # Both polarities: a waiter is as often `until ! pgrep` or
+            # `[ -f done ] || ! pgrep` (stop when it is gone — a crash
+            # check) as `while pgrep`, and "always true" describes only
+            # the second (bug report from opencoti, 2026-10-08).
+            rule, effect = "self-match", (
+                "so it always finds a process: `pgrep` is always true and "
+                "`! pgrep` always false — a `while` on it never ends, an `if` "
+                "always sees a process, and a check that the process has "
+                "exited (a crash check) never fires")
         else:
             rule, effect = "self-match", (f"so its result always includes {victim.label}"
                                           " — a count or PID list taken from it is wrong")

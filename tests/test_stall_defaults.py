@@ -261,7 +261,9 @@ class TestStallDefaultsPublicSurface(unittest.TestCase):
             "resolve_stall_thresholds",
             "PRODUCTION_HARD_CAPS_BY_MODEL",
             "PRODUCTION_STALL_FLOOR_S",
+            "THRESHOLD_INHERITANCE",
             "runtime_stall_thresholds",
+            "HARD_CAP_REFERENCE_OUTPUT_TOKENS",
         }
         self.assertEqual(set(sd.__all__), expected)
 
@@ -276,3 +278,12 @@ class TestStallDefaultsPublicSurface(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+def test_glm_5_3_flash_is_timed_like_glm_5_2():
+    """Operator decision 2026-10-18: glm-5.3-flash uses glm-5.2's
+    thresholds until its own calls are measured."""
+    from consultants.engine import stall_defaults as sd
+    assert sd.runtime_stall_thresholds("glm-5.3-flash:cloud") == \
+        sd.runtime_stall_thresholds("glm-5.2:cloud")
+    assert "glm-5.3-flash:cloud" not in sd.PRODUCTION_HARD_CAPS_BY_MODEL

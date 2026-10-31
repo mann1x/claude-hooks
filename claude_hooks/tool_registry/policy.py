@@ -5,8 +5,7 @@ front of tool dispatch, so every provider added later inherits
 approval, denial and audit without touching its own code. See
 ``docs/PLAN-council-tool-surface.md`` for the full design.
 
-**Pure Python, no LangGraph import**, deliberately — mirroring
-``consultants/engine/interrupt_policy.py``. The gate returns a
+**Pure Python, no LangGraph import**, deliberately. The gate returns a
 *decision*; whoever owns an approval channel decides how to pose it.
 The consultants engine turns an ``ask_*`` into a LangGraph
 ``interrupt()``; ``/get-advice`` and the caliber proxy have no such
@@ -96,6 +95,21 @@ def is_valid_level(level: object) -> bool:
     return isinstance(level, str) and level in LEVELS
 
 
+#: The control surface's original three-value spelling, kept as
+#: deprecated aliases. ``ask`` meant "a person approves", so it maps to
+#: ``ask_human``, never to the auto-approving ``ask_assistant``: an
+#: alias must not loosen what the operator asked for.
+LEGACY_ALIASES: dict[str, str] = {"allow": AUTO, "ask": ASK_HUMAN}
+
+
+def normalize_level(level: object) -> object:
+    """Map a legacy alias to its ladder level; anything else unchanged
+    (so an invalid value still fails closed in :meth:`PolicyGate.resolve`)."""
+    if isinstance(level, str):
+        return LEGACY_ALIASES.get(level, level)
+    return level
+
+
 # ====================================================================== #
 # Decision
 # ====================================================================== #
@@ -171,11 +185,17 @@ class PolicyGate:
     read_only_tools: frozenset = field(default_factory=frozenset)
     #: Set once the session has consumed untrusted external text.
     tainted: bool = False
+    #: Per-call classifiers: tool name -> ``fn(raw_args)`` returning
+    #: ``(level, reason)`` or ``None``. Consulted after the operator's
+    #: settings and before the provider's static default, for a tool
+    #: whose cost depends on its arguments (``run_command``).
+    call_levels: dict = field(default_factory=dict)
 
     # ---------------------------------------------------------------- #
     def resolve(self, tool: str, *, runtime_permissions: Optional[dict] = None,
                 raw_args: str = "") -> GateDecision:
-        base, source = self._base_level(tool, runtime_permissions)
+        base, source = self._base_level(tool, runtime_permissions,
+                                         raw_args)
 
         if not is_valid_level(base):
             # A malformed level must fail closed. Silently treating it
@@ -213,14 +233,25 @@ class PolicyGate:
         )
 
     # ---------------------------------------------------------------- #
-    def _base_level(self, tool: str,
-                    runtime_permissions: Optional[dict]) -> tuple[object, str]:
+    def _base_level(self, tool: str, runtime_permissions: Optional[dict],
+                    raw_args: str = "") -> tuple[object, str]:
         if runtime_permissions:
             got = runtime_permissions.get(tool)
             if got is not None:
-                return got, "runtime control"
+                # A checkpoint written before the ladder may still hold
+                # ``allow`` / ``ask``; read them as the operator meant.
+                return normalize_level(got), "runtime control"
         if tool in self.overrides:
             return self.overrides[tool], "[tools.permissions] config"
+        classify = self.call_levels.get(tool)
+        if classify is not None:
+            try:
+                got = classify(raw_args)
+            except Exception:
+                log.exception("call classifier for %r raised", tool)
+                got = (ASK_ASSISTANT, "its classifier failed")
+            if got is not None:
+                return got[0], f"classification ({got[1]})"
         if tool in self.provider_defaults:
             return self.provider_defaults[tool], "provider default"
         return self.default_level, "default"
@@ -244,4 +275,5 @@ __all__ = [
     "LEVELS", "ASK_LEVELS",
     "GateDecision", "PolicyGate",
     "escalate", "is_valid_level",
+    "LEGACY_ALIASES", "normalize_level",
 ]

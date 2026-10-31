@@ -327,6 +327,9 @@ def _row_to_dict(row: Optional[sqlite3.Row]) -> Optional[dict[str, Any]]:
 # ---------------------------------------------------------------------- #
 class _Handler(BaseHTTPRequestHandler):
     db_path: Path = Path("~/.claude/claude-hooks-proxy/stats.db")
+    #: The consultants engine's port when the council is enabled
+    #: (``hooks.consultants.engine_url``), for the header link.
+    consultants_port: Optional[int] = None
     ratelimit_path: Path = Path("~/.claude/claude-hooks-proxy/ratelimit-state.json")
 
     def log_message(self, fmt: str, *a: Any) -> None:  # noqa: A002
@@ -429,7 +432,7 @@ class _Handler(BaseHTTPRequestHandler):
             pass
 
     def _send_html(self) -> None:
-        body = _render_html().encode("utf-8")
+        body = _render_html(self.consultants_port).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -463,6 +466,9 @@ _HTML = r"""<!doctype html>
     background: var(--bg); color: var(--fg);
   }
   h1 { font-size: 15px; margin: 0 0 4px; font-weight: 600; }
+  .topbar { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .topbar a { color: var(--accent); font-size: 12px; text-decoration: none; }
+  .topbar a:hover { text-decoration: underline; }
   h2 { font-size: 13px; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
   .subtitle { color: var(--muted); font-size: 11px; margin-bottom: 20px; }
   .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
@@ -499,7 +505,9 @@ _HTML = r"""<!doctype html>
 </style>
 </head>
 <body>
-<h1>claude-hooks proxy dashboard</h1>
+<div class="topbar"><h1>claude-hooks proxy dashboard</h1><a id="council-link" hidden>consultants council dashboard →</a></div>
+<script>(function(){var p="__COUNCIL_PORT__";if(!p)return;var a=document.getElementById("council-link");
+a.href=location.protocol+"//"+location.hostname+":"+p+"/dashboard";a.hidden=false;})();</script>
 <div class="subtitle">auto-refresh 60s · stats.db read-only · no auth, localhost only</div>
 
 <div class="grid">
@@ -900,8 +908,25 @@ setInterval(load, 60_000);
 """
 
 
-def _render_html() -> str:
-    return _HTML
+def consultants_port(cfg: dict) -> Optional[int]:
+    """The consultants engine's port when the council is enabled (the
+    hooks name an ``engine_url``), else None."""
+    url = (((cfg.get("hooks") or {}).get("consultants") or {})
+           .get("engine_url") or "")
+    if not url:
+        return None
+    try:
+        return urlparse(url).port or (443 if url.startswith("https") else 80)
+    except ValueError:
+        return None
+
+
+def _render_html(council_port: Optional[int] = None) -> str:
+    # The link uses the host the browser reached this page on, so it
+    # works from the LAN too (the engine serves its dashboard there when
+    # ``[service] dashboard_host`` is set).
+    return _HTML.replace("__COUNCIL_PORT__",
+                         str(council_port) if council_port else "")
 
 
 # ---------------------------------------------------------------------- #
@@ -923,6 +948,7 @@ def build_server(cfg: Optional[dict] = None) -> ThreadingHTTPServer:
     class _HandlerBound(_Handler):
         pass
     _HandlerBound.db_path = db_path
+    _HandlerBound.consultants_port = consultants_port(merged)
     _HandlerBound.ratelimit_path = state_path
 
     server = ThreadingHTTPServer((host, port), _HandlerBound)

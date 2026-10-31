@@ -1,0 +1,107 @@
+# Consultation transcript — csl-2026-10-22-1941-feca
+
+_Question_: In the consultants engine's Send-API fan-out path, suppose one of the parallel researcher lanes raises an unhandled exception inside agent_loop.runner.run_loop (e.g. an HTTP timeout that exhausts the retry budget, or a tool_executor returning a non-string). Trace the exact failure path through:
+
+1. CouncilState's additive reducers (consultants/engine/graph.py)
+2. consultants/server/runner.py's compiled.stream loop
+3. The synthesizer's input messages — what does it actually see?
+4. The storage.py artifact writer
+
+Answer concretely: does the council still produce a coherent answer to the user, or does the entire consultation fail and surface as status=failed? If it produces a degraded answer, what's the failure mode the user perceives? Cite path:line for every claim. Recommend exactly ONE hardening change with path:line.
+
+
+## Planner
+
+1. Examine `claude_hooks/agent_loop/runner.py` to determine how `run_loop` handles unhandled exceptions and what value/exception is propagated to the caller.
+2. Analyze `consultants/engine/graph.py` to identify `CouncilState` additive reducers and verify if they catch exceptions or handle `None`/error objects from failed researcher lanes.
+3. Trace the result propagation in `consultants/server/runner.py` within the `compiled.stream` loop to see if a partial failure triggers a global `status=failed` or continues to the synthesizer.
+4. Inspect `consultants/engine/storage.py` to verify how the artifact writer persists results when one or more researcher lanes fail.
+5. Verify the exact message structure passed to the synthesizer in the event of a lane failure to determine the perceived failure mode (e.g., missing data vs. explicit error message).
+
+---
+
+## Researcher (round 1)
+
+The failure path for an unhandled exception in a parallel researcher lane is as follows:
+
+### 1. Propagation from `agent_loop.runner.run_loop`
+The `run_loop` function in `claude_hooks/agent_loop/runner.py` does **not** wrap its main loop or `execute_tool_calls` in a try-except block. If an unhandled exception occurs (e.g., a tool executor returning a non-string or a network timeout in `chat_fn`):
+- The exception propagates immediately out of `run_loop` (`claude_hooks/agent_loop/runner.py:215`).
+- Because this is called within a LangGraph node (`consultants/engine/graph.py:147`), the exception bubbles up to the LangGraph runtime.
+
+### 2. CouncilState's Additive Reducers
+The `CouncilState` uses additive reducers (`operator.add`) for `research` (`consultants/engine/graph.py:64`) and `turns` (`consultants/engine/graph.py:68`).
+- **Crucially**, these reducers are only invoked **after** a node successfully returns a value.
+- Since the exception in the researcher lane prevents the node from returning a value, **no additive reduction occurs** for that lane. The partial results from that specific failed lane are lost entirely.
+
+### 3. Execution in `consultants/server/runner.py`
+The `compiled.stream` loop in `consultants/server/runner.py` handles the graph execution:
+- The call to `compiled.stream` (`consultants/server/runner.py:137`) is wrapped in a global `try...except Exception as e` block (`consultants/server/runner.py:136`).
+- When a researcher lane crashes, the exception triggers this catch block.
+- The runner immediately sets `state.status = "failed"` and `state.error = f"graph crashed: {e}"` (`consultants/server/runner.py:157-158`).
+- It then calls `_write_failed_artifacts` and **returns immediately** (`consultants/server/runner.py:161`).
+
+### 4. Synthesizer's Input and Artifacts
+- **Synthesizer Input**: The synthesizer is **never invoked**. The crash in the researcher node terminates the entire graph execution before the synthesizer node can be reached.
+- **Artifact Writer**: The `_write_failed_artifacts` helper (`consultants/server/runner.py:211`) creates a `ConsultationResult` where:
+    - `final_answer` is set to `(consultation failed: <exception>)` (`consultants/server/runner.py:224`).
+    - `status` is `"failed"` (`consultants/server/runner.py:227`).
+    - `turns` is an empty list `[]` (`consultants/server/runner.py:225`).
+- These are persisted via `storage.write_consultation` (`consultants/server/runner.py:235`).
+
+### Conclusion
+The council **does not** produce a coherent or degraded answer. The **entire consultation fails** and surfaces as `status=failed`. The user perceives a complete failure with a "graph crashed" error message in the final artifact.
+
+### Recommended Hardening
+Wrap the researcher node logic in a try-except block to capture exceptions as state updates instead of letting them crash the graph. This allows the synthesizer to at least acknowledge the partial failure of a specific lane.
+
+**Change**: In `consultants/engine/graph.py`, modify `_wrap_researcher` (around line 145) to wrap `council.researcher_node` in a try-except that returns `{"error": str(e), "_role_failed": "researcher"}` on failure.
+
+**Path:line**: `consultants/engine/graph.py:146`
+
+---
+
+## Researcher (round 1)
+
+### Failure Path Analysis
+
+If a parallel researcher lane raises an unhandled exception inside `agent_loop.runner.run_loop` during a `Send` fan-out:
+
+1.  **CouncilState Reducers**: The exception prevents the researcher node from returning a state update. Because LangGraph's `Send` mechanism expects each spawned node to complete to merge its results into the additive channels (`research: Annotated[list, operator.add]` at `consultants/engine/graph.py:64`), the failing lane contributes **nothing** to the state. No partial result is merged, and no error is recorded in the `research` list.
+2.  **Runner Stream Loop**: The exception propagates out of the `compiled.stream` call. In `consultants/server/runner.py`, this is caught by the `try...except Exception as e` block at `consultants/server/runner.py:136-155`.
+3.  **Synthesizer Input**: The synthesizer is **never invoked**. The execution flow jumps immediately from the failing `compiled.stream` loop to the exception handler at `consultants/server/runner.py:155`. The synthesizer never sees any messages because the graph execution crashed before it could reach the synthesizer node.
+4.  **Artifact Writer**: The runner calls `_write_failed_artifacts(state, cwd, question, e)` at `consultants/server/runner.py:160`. This creates a `ConsultationResult` with `status="failed"`, `error=str(exc)`, and a `final_answer` that explicitly states `(consultation failed: <exception>)` at `consultants/server/runner.py:224`.
+
+### Conclusion
+The council **fails entirely**. It does not produce a degraded answer; it surfaces as `status="failed"`. The user perceives a complete crash of the consultation with the specific exception message in the output.
+
+### Recommended Hardening
+Wrap the researcher node logic in a try-except block within `consultants/engine/council.py` (the node implementation) to catch exceptions and return a partial state containing an error message instead of crashing the graph. This allows the additive reducer to merge the error and permits the synthesizer to attempt a result based on the remaining successful lanes.
+
+**Change**: In `consultants/engine/council.py`, wrap `researcher_node` logic in a `try...except` block and return `{"error": str(e), "research": [f"Lane failed: {e}"]}` on failure.
+
+---
+
+## Critic (round 2)
+
+DECISION: ready
+
+The evidence is sufficient to trace the failure path. An unhandled exception in `agent_loop.runner.run_loop` (e.g., at `claude_hooks/agent_loop/runner.py:230`) propagates uncaught through the researcher node (`consultants/engine/graph.py:147`) to the LangGraph runtime. Because LangGraph nodes must return a value for additive reducers to trigger, the failure prevents any merge into `CouncilState.research` (`consultants/engine/graph.py:64`). The exception is then caught by the global handler in `consultants/server/runner.py:155`, which immediately marks `state.status = "failed"` (`consultants/server/runner.py:157`), calls `_write_failed_artifacts` (`consultants/server/runner.py:160`), and returns. The synthesizer is never reached. The user perceives a complete consultation failure with a `final_answer` of `(consultation failed: <exception>)` (`consultants/server/runner.py:224`).
+
+Recommended Hardening:
+Wrap the researcher node call in a try-except block in `consultants/engine/graph.py:147` to return a state update containing the error instead of raising an exception, allowing other lanes to complete and the synthesizer to produce a degraded result.
+
+---
+
+## Synthesizer
+
+The entire consultation fails and surfaces as `status=failed`; no answer (coherent or degraded) is produced.
+
+*   **CouncilState Reducers**: Additive reducers for `research` (`consultants/engine/graph.py:64`) and `turns` (`consultants/engine/graph.py:68`) only trigger after a node successfully returns. An unhandled exception in the researcher lane prevents any value from being returned, meaning no partial results are merged into the state.
+*   **Runner Loop**: The `compiled.stream` call (`consultants/server/runner.py:137`) is wrapped in a global `try...except Exception` block (`consultants/server/runner.py:136`). When a lane crashes, the exception is caught here, `state.status` is set to `"failed"` (`consultants/server/runner.py:157`), and the runner returns immediately (`consultants/server/runner.py:161`).
+*   **Synthesizer Input**: The synthesizer is never invoked. The graph execution terminates during the researcher fan-out, so the flow never reaches the synthesizer node.
+*   **Artifact Writer**: The `_write_failed_artifacts` helper (`consultants/server/runner.py:211`) generates a `ConsultationResult` where `status` is `"failed"` (`consultants/server/runner.py:227`) and `final_answer` is set to `(consultation failed: <exception>)` (`consultants/server/runner.py:224`).
+
+**Hardening Recommendation**: Wrap the researcher node execution in `consultants/engine/graph.py:147` in a `try...except` block that returns a state update (e.g., `{"research": [f"Lane failed: {e}"]}`) rather than raising an exception, allowing the graph to proceed to the synthesizer with partial results.
+
+---

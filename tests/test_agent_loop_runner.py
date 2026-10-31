@@ -87,7 +87,14 @@ class TestRunLoopBasic:
 
     def test_iteration_cap(self):
         # Always tool-call; loop should bail at max_iterations.
+        calls = []
+
         def chat(p):
+            calls.append(p)
+            if "tools" not in p:
+                return {"choices": [{"message": {"role": "assistant",
+                                                 "content": "report"},
+                                     "finish_reason": "stop"}]}
             return _tool("echo", '{"i":1}')
 
         out = runner.run_loop(
@@ -100,7 +107,11 @@ class TestRunLoopBasic:
             chat_fn=chat,
             tool_executor=lambda n, a, c: "x",
         )
-        assert out["choices"][0]["finish_reason"] == "tool_calls"
+        # Plan D6: the cap asks one tool-less report instead of returning
+        # the last tool-call turn.
+        assert len(calls) == 4
+        assert out["choices"][0]["message"]["content"] == "report"
+        assert out["_stop_reason"] == "iteration_cap"
 
 
 class TestForceAnswerAfter:
@@ -121,8 +132,9 @@ class TestForceAnswerAfter:
             chat_fn=chat,
             tool_executor=lambda n, a, c: "x",
         )
-        # iters 0,1 have tools; 2,3 must NOT.
-        assert seen_tools == [True, True, False, False]
+        # iters 0,1 have tools; 2,3 must NOT. (The 5th call is plan D6's
+        # tool-less report at the cap.)
+        assert seen_tools[:4] == [True, True, False, False]
 
     def test_zero_disables_strip(self):
         seen_tools: list[bool] = []
@@ -141,7 +153,9 @@ class TestForceAnswerAfter:
             chat_fn=chat,
             tool_executor=lambda n, a, c: "x",
         )
-        assert all(seen_tools)
+        # Every loop iteration keeps its tools; only plan D6's report at
+        # the cap goes without.
+        assert seen_tools == [True, True, True, False]
 
 
 class TestForceFirstToolCall:
@@ -301,6 +315,37 @@ class TestToolBurstHandling:
         )
         # Identical tool_calls collapse — executor called once only.
         assert executed == ['{"x":1}']
+
+    def test_a_failed_call_is_run_again_never_stubbed(self):
+        # A failure is not a result to reuse: a read refused while out of
+        # order, then asked again once legal, got "duplicate: use that prior
+        # result" — the refusal — for the rest of the lane (gemma, 2026-10).
+        executed: list[str] = []
+        turns = iter([
+            [{"id": "a", "type": "function",
+              "function": {"name": "echo", "arguments": '{"x":1}'}}],
+            [{"id": "b", "type": "function",
+              "function": {"name": "echo", "arguments": '{"x":1}'}}],
+        ])
+
+        def chat(p):
+            calls = next(turns, None)
+            if calls is None:
+                return _stop("done")
+            return {"choices": [{"message": {"role": "assistant",
+                                             "tool_calls": calls},
+                                 "finish_reason": "tool_calls"}]}
+
+        def ex(n, a, c):
+            executed.append(a)
+            return "error: not yet" if len(executed) == 1 else "the content"
+
+        runner.run_loop(
+            {"model": "m", "messages": [{"role": "user", "content": "go"}]},
+            cwd="/tmp",
+            config=runner.LoopConfig(force_first_tool_call=False),
+            tool_specs=TOOL_SPECS, chat_fn=chat, tool_executor=ex)
+        assert executed == ['{"x":1}', '{"x":1}']
 
     def test_cap_max_tool_calls_per_turn(self):
         # Three distinct tool calls, cap at 2.

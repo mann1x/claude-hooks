@@ -26,9 +26,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 try:
     import tomllib  # Python 3.11+
@@ -217,6 +218,13 @@ class RoleConfig:
     # ``None`` means "no global default route — fall through to
     # legacy ``model`` field with no failover (v1 back-compat)".
     default_route: Optional[CoderLanguageRoute] = None
+    # Plan B: ``[role.X.budget]`` (only the keys set) and
+    # ``[role.X.models."<model>"]`` (per-model settings, keyed by the
+    # model string exactly as the role names it).
+    budget: dict[str, Any] = field(default_factory=dict)
+    sampling: dict[str, Any] = field(default_factory=dict)
+    compaction: dict[str, Any] = field(default_factory=dict)
+    model_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 # Per-role think defaults. Tuned from the 2026-05-07 trace
@@ -254,10 +262,8 @@ DEFAULT_THINK_BY_ROLE: dict[str, Any] = {
 #
 # - ``tool_executor`` → ``gemma4:31b-cloud`` per the user's
 #   observation + the M11c bench (pending).
-# - ``coder`` → ``glm-5.2:cloud`` (succession from the
-#   2026-05-16 M11b winner glm-5.1; see MODEL_SUCCESSIONS)
-#   (suite v1.0 rubric winner: pass=100%, avg_quality=4.88,
-#   median_tokens=1841, median_wall=4.9 s). The constant lives in
+# - ``coder`` → ``RECOMMENDED_CODER_MODEL`` (the 2026-09-23 coder_med
+#   re-baseline: ``deepseek-v4.1-flash:cloud``). The constant lives in
 #   ``consultants/engine/coder_defaults.py`` and is sourced from
 #   the baselines ledger; imported at module top.
 DEFAULT_MODEL_BY_ROLE: dict[str, str] = {
@@ -356,6 +362,11 @@ def role_think(cfg: "ConsultantsConfig", role: str) -> Any:
 class ServiceConfig:
     mode: str = DEFAULT_SERVICE_MODE
     http_port: int = DEFAULT_HTTP_PORT
+    #: An address the engine also listens on for the read-only council
+    #: dashboard (``0.0.0.0`` or a LAN address, like the proxy
+    #: dashboard's ``listen_host``). Only the dashboard's routes answer
+    #: there; the control API stays loopback-only. "" = loopback only.
+    dashboard_host: str = ""
 
 
 VALID_CHECKPOINTER_BACKENDS: tuple[str, ...] = ("sqlite", "postgres")
@@ -395,13 +406,13 @@ class RuntimeConfig:
       execution pauses just before the synthesizer composes the final
       answer. The HTTP ``GET /state`` endpoint exposes the partial
       research so the human can preview + inject before approving.
-    - ``interrupt_on_low_confidence`` (default ``False``) — opt-in
-      dynamic interrupt when the synthesizer's self-rating dips
-      below ``confidence_target``. Off by default because the same
-      signal normally drives xauto escalation, not a human pause.
+    - ``xauto_retry_infra_lanes`` (default ``True``) — plan D9: an xauto
+      run reruns, once and before the critic, the first-round researcher
+      lanes that failed on infrastructure (``failure_class = infra``), as
+      ``retry-lanes`` would after the run. Other tiers never do.
     """
     review_before_synthesis: bool = False
-    interrupt_on_low_confidence: bool = False
+    xauto_retry_infra_lanes: bool = True
 
 
 @dataclass
@@ -511,9 +522,8 @@ StoreReaperThread` finds expiring research rows, it groups them by
 
     - ``model = "gemma4:31b-cloud"`` — the M11c-2 tool_executor
       winner; already trusted in the council pipeline.
-    - ``fallback_models = ["glm-5.2:cloud"]`` — caliber-init
-      fallback model; ~64k context window comfortable for prompt
-      overflow.
+    - ``fallback_models = ["glm-5.3-flash:cloud"]`` — the council's
+      glm lane since 2026-10-18 (operator decision; was glm-5.2).
     - ``sweep_interval_seconds = 3600`` — hourly. Cheap on a
       24-hour TTL boundary; safe on a 30-day TTL.
     - ``min_entries_per_distillation = 3`` — cost gate.
@@ -539,7 +549,7 @@ StoreReaperThread` finds expiring research rows, it groups them by
     """
     enabled: bool = True
     model: str = "gemma4:31b-cloud"
-    fallback_models: tuple[str, ...] = ("glm-5.2:cloud",)
+    fallback_models: tuple[str, ...] = ("glm-5.3-flash:cloud",)
     sweep_interval_seconds: float = 3600.0
     min_entries_per_distillation: int = 3
     max_session_entries: int = 50
@@ -642,6 +652,108 @@ class StoreConfig:
 
 
 @dataclass
+class ShellConfig:
+    """``[tools.shell]``: the sandboxed ``run_command`` (plan E5).
+
+    Off unless asked for (``--shell`` on ask / follow-up) or
+    ``default = "always"``. Only ``mode = "read"`` and ``net = "none"``
+    exist so far: ``write`` gives each lane a private git worktree (git
+    roots only), egress is plan E6.
+    """
+    #: ``off`` | ``always`` — the user's "enable always" knob.
+    default: str = "off"
+    mode: str = "read"
+    net: str = "none"
+    #: ``auto`` | ``bwrap``.
+    backend: str = "auto"
+    #: Toolchain dirs shown read-only (their ``bin`` goes first on PATH).
+    ro_binds: list = field(default_factory=list)
+    timeout_s: int = 120
+    max_timeout_s: int = 600
+    memory_mib: int = 4096
+    pids: int = 256
+    cpu_pct: int = 400
+    lane_disk_gib: float = 2.0
+    free_floor_gib: float = 20.0
+    free_floor_pct: float = 10.0
+    #: Days a held patch (write mode) waits for apply / discard before it
+    #: moves to the session's ``expired/`` (kept, never deleted silently).
+    held_ttl_days: float = 7.0
+
+
+def _shell_choice(*choices):
+    def check(v):
+        if v not in choices:
+            raise ValueError(f"must be one of {', '.join(choices)}")
+        return v
+    return check
+
+
+def _shell_net(v):
+    if v != "none":
+        raise ValueError("only 'none' exists so far (egress is plan E6)")
+    return v
+
+
+def _shell_paths(v):
+    if not isinstance(v, list) or not all(
+            isinstance(x, str) and (x.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", x))
+            for x in v):
+        raise ValueError("must be a list of absolute paths")
+    return list(v)
+
+
+def _shell_num(lo, hi, kind=int):
+    def check(v):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError("must be a number")
+        if kind is int and int(v) != v:
+            raise ValueError("must be an integer")
+        if not lo <= v <= hi:
+            raise ValueError(f"must be in [{lo}, {hi}]")
+        return kind(v)
+    return check
+
+
+#: ``[tools.shell]`` keys and how each is checked.
+SHELL_KEYS = {
+    "default": _shell_choice("off", "always"),
+    "mode": _shell_choice("read", "write"),
+    "net": _shell_net,
+    "backend": _shell_choice("auto", "launcher", "bwrap"),
+    "ro_binds": _shell_paths,
+    "timeout_s": _shell_num(1, 3600),
+    "max_timeout_s": _shell_num(1, 3600),
+    "memory_mib": _shell_num(64, 1 << 20),
+    "pids": _shell_num(8, 1 << 16),
+    "cpu_pct": _shell_num(10, 100 * 1024),
+    "lane_disk_gib": _shell_num(0.01, 1 << 14, float),
+    "free_floor_gib": _shell_num(0, 1 << 14, float),
+    "free_floor_pct": _shell_num(0, 99, float),
+    "held_ttl_days": _shell_num(0.01, 3650, float),
+}
+
+
+def apply_shell(sc: ShellConfig, values: dict, *, strict: bool) -> None:
+    """Set ``[tools.shell]`` keys on ``sc``. ``strict`` raises on a bad
+    key or value (the setter); otherwise it is logged and skipped (a
+    hand-edited file must not take the council down)."""
+    for k, v in values.items():
+        try:
+            if k not in SHELL_KEYS:
+                raise ValueError(f"unknown key (valid: {', '.join(SHELL_KEYS)})")
+            setattr(sc, k, SHELL_KEYS[k](v))
+        except ValueError as e:
+            if strict:
+                raise ValueError(f"[tools.shell] {k}: {e}") from None
+            log.warning("[tools.shell] %s = %r ignored: %s", k, v, e)
+    if sc.timeout_s > sc.max_timeout_s:
+        if strict:
+            raise ValueError("[tools.shell] timeout_s must be <= max_timeout_s")
+        sc.timeout_s = sc.max_timeout_s
+
+
+@dataclass
 class ToolsConfig:
     """M-A: the council's tool surface and its permission ladder.
 
@@ -700,6 +812,8 @@ class ToolsConfig:
     #: the ladder), so this is the spend-approval deadline. Timeout
     #: denies on purpose: absence of an approver never authorizes spend.
     approval_timeout_s: float = 600.0
+    #: ``[tools.shell]`` — the sandboxed shell, off by default (plan E5).
+    shell: ShellConfig = field(default_factory=ShellConfig)
 
 
 #: Floor for :attr:`ToolsConfig.approval_timeout_s`. A value below this
@@ -739,6 +853,419 @@ class CoderLimitsConfig:
     max_files: int = 16
 
 
+def _budget_int(v: Any, lo: int) -> Any:
+    if isinstance(v, bool) or not isinstance(v, int) or v < lo:
+        raise ValueError(f"must be an integer >= {lo}")
+    return v
+
+
+def _budget_share(v: Any, lo: float, hi: float, *, lo_open: bool) -> Any:
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise ValueError("must be a number")
+    v = float(v)
+    if (v <= lo if lo_open else v < lo) or v > hi:
+        raise ValueError(f"must be in {'(' if lo_open else '['}{lo}, {hi}]")
+    return v
+
+
+def _budget_num_ctx(v: Any) -> Any:
+    if isinstance(v, str) and v.strip().lower() == "model":
+        return "model"
+    if isinstance(v, str) and v.strip().isdigit():
+        v = int(v.strip())
+    return _budget_int(v, 1)
+
+
+def _budget_bool(v: Any) -> Any:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str) and v.lower() in ("on", "true", "yes", "1"):
+        return True
+    if isinstance(v, str) and v.lower() in ("off", "false", "no", "0"):
+        return False
+    raise ValueError("must be true or false")
+
+
+#: Budget knobs (plan B1/B2) and their validators. Defaults live in
+#: ``consultants.engine.budget.Knobs``; a config holds only what was set.
+BUDGET_KEYS: dict[str, Any] = {
+    "output_ceiling": lambda v: _budget_int(v, 1),
+    "output_window_share": lambda v: _budget_share(v, 0.0, 1.0, lo_open=True),
+    "reserve_min": lambda v: _budget_int(v, 0),
+    "reserve_share": lambda v: _budget_share(v, 0.0, 0.9, lo_open=False),
+    "num_ctx": _budget_num_ctx,
+    "announce": _budget_bool,
+    "trigger_ratio": lambda v: _budget_share(v, 0.3, 0.98, lo_open=False),
+    "output_room_min": lambda v: _budget_int(v, 0),
+}
+
+#: ``think`` values (plan B3): off, on (the model's own budget), a level,
+#: or a token count. ``auto`` / ``on`` mean on; ``xhigh`` means ``max``.
+THINK_LEVELS = ("minimal", "low", "medium", "high", "max")
+
+
+def check_think(v: Any) -> Any:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int):
+        if v <= 0:
+            raise ValueError("a token count must be > 0 (use false for off)")
+        return v
+    if isinstance(v, str):
+        t = v.strip().lower()
+        if t in ("auto", "on", "true"):
+            return True
+        if t in ("off", "false", "none"):
+            return False
+        if t == "xhigh":
+            return "max"
+        if t in THINK_LEVELS:
+            return t
+        if t.isdigit():
+            return check_think(int(t))
+    raise ValueError("think must be true/false/auto, a level "
+                     f"({'/'.join(THINK_LEVELS)}, xhigh) or a token count")
+
+
+def _check_seed(v: Any) -> Any:
+    if isinstance(v, str) and v.strip().lower() in ("random", "off"):
+        return v.strip().lower()
+    if isinstance(v, str) and v.strip().isdigit():
+        v = int(v.strip())
+    if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+        return v
+    raise ValueError("seed must be 'random', 'off' or an integer >= 0")
+
+
+def _check_temperature(v: Any) -> Any:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+        raise ValueError("temperature must be a number >= 0")
+    return float(v)
+
+
+def _check_range_pct(v: Any) -> Any:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+        raise ValueError("temperature_range_pct must be a number >= 0")
+    if v > 10:
+        log.warning("consultants config: temperature_range_pct %s clamped "
+                    "to 10 (the fork's margin)", v)
+    return min(10.0, float(v))
+
+
+#: Sampling diversity (plan B4). Defaults: seed "random",
+#: temperature_range_pct 2 (consultants.engine.sampling_diversity).
+SAMPLING_KEYS: dict[str, Any] = {
+    "seed": _check_seed,
+    "temperature": _check_temperature,
+    "temperature_range_pct": _check_range_pct,
+}
+
+def _choice(*allowed: str):
+    def check(v: Any) -> str:
+        if isinstance(v, str) and v.strip().lower() in allowed:
+            return v.strip().lower()
+        raise ValueError(f"must be one of {', '.join(allowed)}")
+    return check
+
+
+#: Compaction (plan C). Defaults live in
+#: ``consultants.engine.compaction.Settings``: flow "auto" ("full" —
+#: halfway writer → retrospective → two half-critics → synthesizer — from a
+#: 64k window up, "reduced" below), placement "system", review true,
+#: target_share 0.25, writer_attempts 3, ledger true, tool results
+#: middle-truncated past 32000 chars (file contents 50000), stale reads
+#: rewritten at 0.4 of the window, reasoning_replay "none".
+COMPACTION_KEYS: dict[str, Any] = {
+    "flow": _choice("auto", "reduced", "full", "basic"),
+    "placement": _choice("system", "user"),
+    "review": _budget_bool,
+    "target_share": lambda v: _budget_share(v, 0.05, 0.6, lo_open=False),
+    "writer_attempts": lambda v: min(5, _budget_int(v, 1)),
+    "ledger": _budget_bool,
+    "tool_result_max_chars": lambda v: _budget_int(v, 1_000),
+    "file_result_max_chars": lambda v: _budget_int(v, 1_000),
+    "stale_read_share": lambda v: _budget_share(v, 0.0, 1.0, lo_open=False),
+    "reasoning_replay": _choice("none", "all", "inline"),
+    "continuation": _choice("auto", "on", "off"),
+}
+
+#: Keys a ``[role.X.models."<model>"]`` table takes.
+MODEL_OVERRIDE_KEYS: dict[str, Any] = {**BUDGET_KEYS, **SAMPLING_KEYS,
+                                       **COMPACTION_KEYS,
+                                       "think": check_think}
+
+
+def validate_settings(raw: Any, keys: dict[str, Any], *,
+                      where: str) -> dict[str, Any]:
+    """The valid ``key = value`` pairs of a settings table. An unknown
+    key or a bad value is logged and dropped, never fatal at load."""
+    out: dict[str, Any] = {}
+    if not isinstance(raw, dict):
+        return out
+    for k, v in raw.items():
+        check = keys.get(k)
+        if check is None:
+            log.warning("consultants config: %s: unknown key %r ignored",
+                        where, k)
+            continue
+        try:
+            out[k] = check(v)
+        except ValueError as e:
+            log.warning("consultants config: %s.%s = %r ignored: %s",
+                        where, k, v, e)
+    return out
+
+
+@dataclass
+class ProtocolConfig:
+    """How roles hand results to each other (plan Milestone G).
+
+    ``typed``: planner, researcher, critic, meta-critic and adversary
+    hand in a typed record through a result tool, rendered back to the
+    prose each role writes today; the synthesizer stays prose. Off by
+    default until the paired prose-vs-typed bench (G6) decides."""
+    typed: bool = False
+
+
+GUARD_PROFILES = ("standard", "strict")
+#: Roles the strict profile changes (plan §0.7). The critic, meta-critic,
+#: adversary, refuter and synthesizer are never nudged under either.
+GUARD_ROLES = ("planner", "researcher", "tool_executor", "coder")
+
+
+@dataclass
+class GuardsConfig:
+    """The nudge profile (plan §0.7, D3). ``strict`` is for councils on
+    small models: the lanes (researcher, tool_executor, coder) must open
+    with a tool call and a report after none is re-asked once; the
+    planner is re-asked once when its plan does not parse; thinking-only
+    re-asks go from 2 to 3; the wrap-up warning comes at least 2 turns
+    before the cap. ``roles`` overrides the profile per role. The loop
+    guards are in no profile: always on."""
+    profile: str = "standard"
+    roles: dict = field(default_factory=dict)
+
+    def for_role(self, role: str) -> str:
+        return self.roles.get(role) or self.profile
+
+    def is_default(self) -> bool:
+        return self.profile == "standard" and all(
+            v == "standard" for v in self.roles.values())
+
+
+@dataclass
+class EscalationConfig:
+    """Per-lane model escalation (plan D, after D1/D2): a first-round
+    researcher lane that a guard ended (struggle, loop guard, mistake
+    limit, reasoning loop) or that failed on its task reruns its plan item
+    once on ``expert_model``, given a brief of the failed attempt instead
+    of its transcript; at most ``max_per_council`` lanes. The harness
+    decides. ``expert_model`` empty (the default): off, and the graph is
+    unchanged. A tag on the engine's server, or ``@endpoint/model``."""
+    expert_model: str = ""
+    max_per_council: int = 2
+
+
+ESCALATION_MAX = 10
+
+
+#: ``[critic] cross_examination`` value meaning "on for shell runs".
+CROSS_EXAM_SHELL = "shell"
+
+
+@dataclass
+class CriticConfig:
+    """Cross-examination (plan council-memory M5): a critic not convinced
+    names the claim it doubts, ``CHALLENGE report=N: ... Settle with:
+    ...``; the lane that wrote report N resumes its own conversation and
+    answers with a run or a concession, and the critic rules on each
+    (stands / narrowed / falls / open). An open challenge falls back to
+    the reroute. ``"shell"`` (default) turns it on for runs with the
+    sandboxed shell only: council run 10b (2026-10-26) showed it pays
+    there (a lane answered with 12 runs; one claim narrowed, one fell)
+    for 4% of the run's prompt tokens. ``True`` / ``False`` force it."""
+    cross_examination: Union[bool, str] = CROSS_EXAM_SHELL
+
+
+def cross_examination_on(cfg: Any, shell: Any) -> bool:
+    """Whether this run cross-examines: ``True``, or ``"shell"`` on a
+    run that has the sandboxed shell."""
+    v = getattr(getattr(cfg, "critic", None), "cross_examination", False)
+    return v is True or (v == CROSS_EXAM_SHELL and bool(shell))
+
+
+POLYKV_MODES = ("off", "affinity", "pooled", "assured", "auto")
+#: Plan F4: ``shared`` puts what the roles have in common first and each
+#: role's instructions last on a PolyKV root, one layer per shared block;
+#: ``as-built`` sends what the builders wrote.
+POLYKV_LAYOUTS = ("shared", "as-built")
+
+
+@dataclass
+class PolykvConfig:
+    """PolyKV placement (plan Milestone F, ``consultants/engine/polykv.py``):
+    on opencoti and on xOllama models with client-pool seats, each
+    conversation gets its own engine session and the shared head of the
+    council's prompts is one pool, prefilled once. ``auto`` pools where
+    the engine can and keeps session affinity elsewhere. Other backends
+    are never touched. Off by default until a live council has shown
+    it."""
+    enabled: bool = False
+    mode: str = "auto"
+    layout: str = "shared"
+
+    def is_default(self) -> bool:
+        return self == PolykvConfig()
+
+
+def check_guard_profile(value: Any) -> str:
+    v = str(value or "").strip().lower()
+    if v not in GUARD_PROFILES:
+        raise ValueError(f"profile must be one of {', '.join(GUARD_PROFILES)}")
+    return v
+
+
+#: Where a decision model is asked (plan H). ``review``: an accept /
+#: followup / research recommendation on the council's answer;
+#: ``confidence``: a scored confidence beside the critic's and
+#: synthesizer's self-rating; ``struggle``: a stuck-vs-progressing reading
+#: of a lane's recent calls; ``citations``: whether quoted code supports
+#: the claim citing it. A seam in ``shadow`` is asked and recorded (a
+#: ``decision`` event) but never acted on — for collecting live scores
+#: before trusting them (plan H6).
+DECISION_SEAMS = ("review", "confidence", "struggle", "citations")
+
+
+@dataclass
+class DecisionConfig:
+    """A decision model (TypeSafe's Jev, or a ``/v1/systemone`` server
+    such as xOllama with tev1 / nimble). Off by default; no host defaults.
+
+    ``url`` empty means TypeSafe (``https://api.typesafe.ai/v1``), which
+    needs a key: ``key_file`` names a file holding it (the secret itself
+    never enters this config or the run's checkpoint), else the
+    ``TYPESAFE_API_KEY`` environment variable."""
+    enabled: bool = False
+    url: Optional[str] = None
+    model: str = "jev-latest"
+    key_file: Optional[str] = None
+    floor: float = 0.6
+    high_stakes_floor: float = 0.85
+    timeout_s: float = 15.0
+    seams: list = field(default_factory=lambda: list(DECISION_SEAMS))
+    shadow: list = field(default_factory=list)
+
+
+def check_decision_seams(value: Any) -> list:
+    items = value if isinstance(value, (list, tuple)) else [
+        v.strip() for v in str(value).split(",") if v.strip()]
+    bad = [v for v in items if v not in DECISION_SEAMS]
+    if bad:
+        raise ValueError(f"unknown seam(s) {bad}; seams: "
+                         f"{', '.join(DECISION_SEAMS)}")
+    return list(dict.fromkeys(items))
+
+
+#: Backends an ``[endpoints.<name>]`` entry may name. ``opencoti`` and
+#: ``llamacpp`` speak OpenAI ``/v1/chat/completions``; ``xollama`` and
+#: ``ollama`` speak Ollama's native ``/api/chat``.
+ENDPOINT_BACKENDS = ("opencoti", "llamacpp", "xollama", "ollama")
+_ENDPOINT_NAME_RX = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+@dataclass
+class EndpointConfig:
+    """A named chat server a role can use as ``@name`` or
+    ``@name/<model>``. Nothing here is a host default: endpoints exist
+    only where a user configured them."""
+    url: str
+    backend: str = "opencoti"
+    #: The served model when the reference names none; else the first
+    #: id the server lists (OpenAI-compatible backends).
+    model: Optional[str] = None
+    #: Legacy: a key written in the config itself. Prefer ``key_file``.
+    api_key: Optional[str] = None
+    #: A file holding the Bearer key (first line). An ollama.com endpoint
+    #: with neither falls back to the host's Ollama Cloud key
+    #: (``ollama.api_key_file`` in claude-hooks.json, else OLLAMA_API_KEY).
+    key_file: Optional[str] = None
+    #: PolyKV window mode (plan B2). ``dynamic``: no fixed context; each
+    #: agent's request is its own allocation, up to the engine's
+    #: ``session_ctx_max`` (the model's window, more with DCA), and the
+    #: council budgets against that. ``assured`` (a booked window per
+    #: agent session) needs Milestone F's session manager.
+    window: str = "dynamic"
+    #: Serves Ollama Cloud models under their bare names (a ``<m>:cloud``
+    #: / ``<m>:<tag>-cloud`` role model goes here as ``<m>`` /
+    #: ``<m>:<tag>``). Set only on the endpoint :func:`client_endpoints`
+    #: adds for ``[cloud] route = "direct"``; never read from a file.
+    cloud_models: bool = False
+
+
+#: ``[cloud] route``: ``direct`` sends every Ollama Cloud model
+#: (``:cloud`` / ``-cloud``) to ollama.com itself, with the account key;
+#: ``local`` sends it to the host's Ollama, which relays it.
+CLOUD_ROUTES = ("direct", "local")
+OLLAMA_CLOUD_URL = "https://ollama.com"
+#: The endpoint name the direct route goes by in the role clients.
+CLOUD_ENDPOINT = "ollama-cloud"
+
+
+@dataclass
+class CloudConfig:
+    """Where Ollama Cloud models run. ``direct`` (default) keeps cloud
+    councils off every host's Ollama: a council relayed through the
+    local xOllama held that server for its whole run (2026-10-27). The
+    config keeps the models' cloud names, so sampling templates, stall
+    thresholds and coder routes still match them; only the wire carries
+    the bare name. ``key_file`` overrides the host's Ollama Cloud key
+    (``ollama.api_key_file`` in claude-hooks.json, else
+    ``OLLAMA_API_KEY``)."""
+    route: str = "direct"
+    url: str = OLLAMA_CLOUD_URL
+    key_file: Optional[str] = None
+
+    def is_default(self) -> bool:
+        return self == CloudConfig()
+
+
+def client_endpoints(cfg) -> dict:
+    """The endpoints the role clients route by: the configured ones,
+    plus the direct cloud route when ``[cloud] route = "direct"``."""
+    eps = dict(getattr(cfg, "endpoints", None) or {})
+    cloud = getattr(cfg, "cloud", None)
+    if cloud is not None and cloud.route == "direct":
+        name = CLOUD_ENDPOINT
+        while name in eps:
+            name += "-direct"
+        eps[name] = EndpointConfig(url=cloud.url, backend="ollama",
+                                   key_file=cloud.key_file,
+                                   cloud_models=True)
+    return eps
+
+
+#: Endpoint window modes accepted today (plan B2 / F).
+ENDPOINT_WINDOW_MODES = ("dynamic",)
+ENDPOINT_WINDOW_MODES_LATER = ("assured",)
+
+
+def check_endpoint_window(mode: str) -> str:
+    m = (mode or "").strip().lower()
+    if m in ENDPOINT_WINDOW_MODES:
+        return m
+    if m in ENDPOINT_WINDOW_MODES_LATER:
+        raise ValueError(
+            "window = 'assured' books a window per agent session, which "
+            "needs the PolyKV session manager (plan Milestone F); until it "
+            "lands, use 'dynamic' (no fixed context, budgeted against the "
+            "engine's session_ctx_max)")
+    raise ValueError(f"window must be one of {ENDPOINT_WINDOW_MODES}")
+
+
+def valid_endpoint_name(name: str) -> bool:
+    return bool(_ENDPOINT_NAME_RX.match(name or ""))
+
+
 @dataclass
 class ConsultantsConfig:
     topology: str = DEFAULT_TOPOLOGY
@@ -771,6 +1298,18 @@ class ConsultantsConfig:
     roles: dict[str, RoleConfig] = field(default_factory=lambda: {
         r: _default_role_config(r) for r in ROLES
     })
+    endpoints: dict[str, EndpointConfig] = field(default_factory=dict)
+    protocol: ProtocolConfig = field(default_factory=ProtocolConfig)
+    guards: GuardsConfig = field(default_factory=GuardsConfig)
+    escalation: EscalationConfig = field(default_factory=EscalationConfig)
+    critic: CriticConfig = field(default_factory=CriticConfig)
+    cloud: CloudConfig = field(default_factory=CloudConfig)
+    polykv: PolykvConfig = field(default_factory=PolykvConfig)
+    decision: DecisionConfig = field(default_factory=DecisionConfig)
+    # Plan B: ``[budget]`` / ``[sampling]`` — only the keys a layer set.
+    budget: dict[str, Any] = field(default_factory=dict)
+    sampling: dict[str, Any] = field(default_factory=dict)
+    compaction: dict[str, Any] = field(default_factory=dict)
 
     def role(self, name: str) -> RoleConfig:
         if name not in ROLES:
@@ -838,7 +1377,28 @@ def _merge_role(base: RoleConfig, override: dict) -> RoleConfig:
         extra_models=list(base.extra_models),
         routes_by_language=dict(base.routes_by_language),
         default_route=base.default_route,
+        budget=dict(base.budget),
+        sampling=dict(base.sampling),
+        compaction=dict(base.compaction),
+        model_overrides={m: dict(v) for m, v in base.model_overrides.items()},
     )
+    if "budget" in override:
+        out.budget.update(validate_settings(
+            override["budget"], BUDGET_KEYS, where="role budget"))
+    if "sampling" in override:
+        out.sampling.update(validate_settings(
+            override["sampling"], SAMPLING_KEYS, where="role sampling"))
+    if "compaction" in override:
+        out.compaction.update(validate_settings(
+            override["compaction"], COMPACTION_KEYS, where="role compaction"))
+    if isinstance(override.get("models"), dict):
+        for m, table in override["models"].items():
+            if not isinstance(m, str) or not m.strip():
+                continue
+            vals = validate_settings(table, MODEL_OVERRIDE_KEYS,
+                                     where=f"role models.{m}")
+            if vals:
+                out.model_overrides.setdefault(m.strip(), {}).update(vals)
     if "enabled" in override:
         out.enabled = bool(override["enabled"])
     if "model" in override and isinstance(override["model"], str):
@@ -857,12 +1417,14 @@ def _merge_role(base: RoleConfig, override: dict) -> RoleConfig:
     # the usual "no override").
     if "think" in override:
         v = override["think"]
-        if isinstance(v, bool):
-            out.think = v
-        elif isinstance(v, str) and v.lower() in ("low", "medium", "high"):
-            out.think = v.lower()
-        elif v is None:
+        if v is None:
             out.think = None
+        else:
+            try:
+                out.think = check_think(v)
+            except ValueError as e:
+                log.warning("consultants config: role think = %r ignored: %s",
+                            v, e)
     if "extra_models" in override:
         raw_extras = override["extra_models"]
         if isinstance(raw_extras, list):
@@ -960,6 +1522,8 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
             base.service.mode = svc["mode"]
         if isinstance(svc.get("http_port"), int) and 1 <= svc["http_port"] <= 65535:
             base.service.http_port = svc["http_port"]
+        if isinstance(svc.get("dashboard_host"), str):
+            base.service.dashboard_host = svc["dashboard_host"].strip()
 
     # checkpointer (v2)
     cp = raw.get("checkpointer") or {}
@@ -986,9 +1550,11 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
         if "review_before_synthesis" in rt:
             base.runtime.review_before_synthesis = \
                 bool(rt["review_before_synthesis"])
-        if "interrupt_on_low_confidence" in rt:
-            base.runtime.interrupt_on_low_confidence = \
-                bool(rt["interrupt_on_low_confidence"])
+        # ``interrupt_on_low_confidence`` (removed 2026-10-19, plan §9)
+        # was never read; an old file naming it still loads.
+        if "xauto_retry_infra_lanes" in rt:
+            base.runtime.xauto_retry_infra_lanes = \
+                bool(rt["xauto_retry_infra_lanes"])
 
     # store (M8)
     tl = raw.get("tools") or {}
@@ -1032,6 +1598,9 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
             base.tools.permissions = {
                 str(k): v for k, v in perms.items()
             }
+        sh = tl.get("shell")
+        if isinstance(sh, dict):
+            apply_shell(base.tools.shell, sh, strict=False)
 
     st = raw.get("store") or {}
     if isinstance(st, dict):
@@ -1179,6 +1748,180 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
             if isinstance(v, int) and v > 0:
                 setattr(base.coder_limits, k, v)
 
+    # budget (plan B1/B2)
+    if "budget" in raw:
+        base.budget.update(validate_settings(raw["budget"], BUDGET_KEYS,
+                                             where="budget"))
+    if "sampling" in raw:
+        base.sampling.update(validate_settings(raw["sampling"], SAMPLING_KEYS,
+                                               where="sampling"))
+    if "compaction" in raw:
+        base.compaction.update(validate_settings(
+            raw["compaction"], COMPACTION_KEYS, where="compaction"))
+
+    # protocol (plan G)
+    proto = raw.get("protocol") or {}
+    if isinstance(proto, dict) and isinstance(proto.get("typed"), bool):
+        base.protocol.typed = proto["typed"]
+
+    # nudge profile (plan §0.7)
+    gd = raw.get("guards") or {}
+    if isinstance(gd, dict) and gd:
+        try:
+            if "profile" in gd:
+                base.guards.profile = check_guard_profile(gd["profile"])
+        except ValueError as e:
+            log.warning("consultants config: guards.profile ignored: %s", e)
+        for role, v in (gd.get("roles") or {}).items():
+            try:
+                if role not in GUARD_ROLES:
+                    raise ValueError(f"role must be one of {', '.join(GUARD_ROLES)}")
+                base.guards.roles[role] = check_guard_profile(v)
+            except ValueError as e:
+                log.warning("consultants config: guards.roles.%s ignored: %s",
+                            role, e)
+
+    # per-lane model escalation (plan D)
+    es = raw.get("escalation") or {}
+    if isinstance(es, dict) and es:
+        if isinstance(es.get("expert_model"), str):
+            base.escalation.expert_model = es["expert_model"].strip()
+        mx = es.get("max_per_council")
+        if isinstance(mx, int) and not isinstance(mx, bool) \
+                and 0 <= mx <= ESCALATION_MAX:
+            base.escalation.max_per_council = mx
+        elif mx is not None:
+            log.warning("consultants config: escalation.max_per_council "
+                        "ignored: must be an integer in [0, %d]",
+                        ESCALATION_MAX)
+
+    # cross-examination (plan council-memory M5)
+    cr = raw.get("critic") or {}
+    if isinstance(cr, dict) and "cross_examination" in cr:
+        if (isinstance(cr["cross_examination"], bool)
+                or cr["cross_examination"] == CROSS_EXAM_SHELL):
+            base.critic.cross_examination = cr["cross_examination"]
+        else:
+            log.warning("consultants config: critic.cross_examination "
+                        "ignored: must be true, false or \"shell\"")
+
+    # where Ollama Cloud models run
+    cl = raw.get("cloud") or {}
+    if isinstance(cl, dict):
+        route = str(cl.get("route") or base.cloud.route).strip().lower()
+        if route in CLOUD_ROUTES:
+            base.cloud.route = route
+        else:
+            log.warning("consultants config: cloud.route %r ignored: must "
+                        "be one of %s", cl.get("route"), CLOUD_ROUTES)
+        url = cl.get("url")
+        if isinstance(url, str) and url.strip().startswith(
+                ("http://", "https://")):
+            base.cloud.url = url.strip().rstrip("/")
+        elif url is not None:
+            log.warning("consultants config: cloud.url %r ignored", url)
+        if cl.get("key_file"):
+            base.cloud.key_file = str(cl["key_file"]).strip()
+
+    # PolyKV placement (plan F)
+    pk = raw.get("polykv") or {}
+    if isinstance(pk, dict):
+        if isinstance(pk.get("enabled"), bool):
+            base.polykv.enabled = pk["enabled"]
+        elif "enabled" in pk:
+            log.warning("consultants config: polykv.enabled ignored: must be "
+                        "true or false")
+        if "mode" in pk:
+            if pk["mode"] in POLYKV_MODES:
+                base.polykv.mode = pk["mode"]
+            else:
+                log.warning("consultants config: polykv.mode ignored: must be "
+                            "one of %s", ", ".join(POLYKV_MODES))
+        if "layout" in pk:
+            if pk["layout"] in POLYKV_LAYOUTS:
+                base.polykv.layout = pk["layout"]
+            else:
+                log.warning("consultants config: polykv.layout ignored: must "
+                            "be one of %s", ", ".join(POLYKV_LAYOUTS))
+
+    # decision model (plan H)
+    dec = raw.get("decision") or {}
+    if isinstance(dec, dict) and dec:
+        d = base.decision
+        if isinstance(dec.get("enabled"), bool):
+            d.enabled = dec["enabled"]
+        for k in ("url", "key_file"):
+            if k in dec:
+                v = dec[k]
+                setattr(d, k, (str(v).strip().rstrip("/") or None)
+                        if v is not None else None)
+        if isinstance(dec.get("model"), str) and dec["model"].strip():
+            d.model = dec["model"].strip()
+        for k, lo, hi in (("floor", 0.0, 1.0), ("high_stakes_floor", 0.0, 1.0),
+                          ("timeout_s", 0.5, 300.0)):
+            if k in dec:
+                try:
+                    v = float(dec[k])
+                    if not lo <= v <= hi:
+                        raise ValueError(f"must be in [{lo}, {hi}]")
+                    setattr(d, k, v)
+                except (TypeError, ValueError) as e:
+                    log.warning("consultants config: decision.%s = %r "
+                                "ignored: %s", k, dec[k], e)
+        if "seams" in dec:
+            try:
+                d.seams = check_decision_seams(dec["seams"])
+            except ValueError as e:
+                log.warning("consultants config: decision.seams: %s", e)
+        if "shadow" in dec:
+            try:
+                d.shadow = check_decision_seams(dec["shadow"])
+            except ValueError as e:
+                log.warning("consultants config: decision.shadow: %s", e)
+        if "api_key" in dec:
+            log.warning("consultants config: decision.api_key is not read; "
+                        "put the key in a file and set decision.key_file")
+
+    # endpoints (plan A1): ``[endpoints.<name>] url, backend, model, api_key``
+    eps = raw.get("endpoints") or {}
+    if isinstance(eps, dict):
+        for name, ep in eps.items():
+            if not isinstance(ep, dict) or not valid_endpoint_name(name):
+                continue
+            url = ep.get("url")
+            if not isinstance(url, str) or not url.strip():
+                continue
+            backend = str(ep.get("backend") or "opencoti").lower()
+            if backend not in ENDPOINT_BACKENDS:
+                log.warning("consultants config: endpoint %r has unknown "
+                            "backend %r; skipped", name, backend)
+                continue
+            window = "dynamic"
+            if "window" in ep:
+                try:
+                    window = check_endpoint_window(str(ep["window"]))
+                except ValueError as e:
+                    log.warning("consultants config: endpoint %r: %s; "
+                                "using 'dynamic'", name, e)
+            url = url.strip().rstrip("/")
+            api_key = ep.get("api_key") or None
+            prev = base.endpoints.get(name)
+            if "api_key" not in ep and prev is not None and prev.url == url:
+                # a project file never carries an inherited key
+                # (_drop_inherited_secrets); the same endpoint keeps it
+                api_key = prev.api_key
+            base.endpoints[name] = EndpointConfig(
+                url=url, backend=backend,
+                model=(ep.get("model") or None),
+                api_key=api_key,
+                key_file=(str(ep.get("key_file")).strip()
+                          if ep.get("key_file") else None),
+                window=window)
+            if ep.get("api_key"):
+                log.warning("consultants config: endpoint %r keeps its key in "
+                            "the config; put it in a file and set key_file",
+                            name)
+
     # roles
     roles = raw.get("role") or {}
     if isinstance(roles, dict):
@@ -1270,6 +2013,15 @@ def _toml_str(value: str) -> str:
     return '"' + "".join(parts) + '"'
 
 
+def _toml_value(value: Any) -> str:
+    """A scalar settings value (bool / int / float / str) as TOML."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    return _toml_str(str(value))
+
+
 def _render(cfg: ConsultantsConfig, *,
             override_flag: Optional[bool] = None) -> str:
     L: list[str] = []
@@ -1308,6 +2060,8 @@ def _render(cfg: ConsultantsConfig, *,
     L.append("[service]")
     L.append(f"mode = {_toml_str(cfg.service.mode)}")
     L.append(f"http_port = {cfg.service.http_port}")
+    if cfg.service.dashboard_host:
+        L.append(f"dashboard_host = {_toml_str(cfg.service.dashboard_host)}")
     L.append("")
     L.append("[checkpointer]")
     L.append(f"backend = {_toml_str(cfg.checkpointer.backend)}")
@@ -1326,10 +2080,10 @@ def _render(cfg: ConsultantsConfig, *,
              "approve / inject")
     L.append("review_before_synthesis = "
              f"{'true' if cfg.runtime.review_before_synthesis else 'false'}")
-    L.append("# interrupt_on_low_confidence: opt-in HITL when synthesizer "
-             "self-rates below confidence_target")
-    L.append("interrupt_on_low_confidence = "
-             f"{'true' if cfg.runtime.interrupt_on_low_confidence else 'false'}")
+    L.append("# xauto_retry_infra_lanes: xauto reruns lanes that failed on "
+             "infrastructure, once, before the critic")
+    L.append("xauto_retry_infra_lanes = "
+             f"{'true' if cfg.runtime.xauto_retry_infra_lanes else 'false'}")
     L.append("")
     L.append("[tools]")
     L.append("# The council's tool surface (M-A). Every tool is dispatched")
@@ -1364,6 +2118,7 @@ def _render(cfg: ConsultantsConfig, *,
         L.append("# [tools.permissions]")
         L.append('# "git_diff" = "auto"')
         L.append('# "some_tool" = "ask_assistant"')
+    L.extend(_render_shell(cfg.tools.shell))
     L.append("")
     L.append("[store]")
     L.append("# Long-term memory BaseStore for cross-lane / cross-session recall.")
@@ -1518,11 +2273,143 @@ def _render(cfg: ConsultantsConfig, *,
     L.append(f"max_total_bytes = {cfg.coder_limits.max_total_bytes}")
     L.append(f"max_files = {cfg.coder_limits.max_files}")
     L.append("")
+    L.append("[budget]")
+    L.append("# Output cap and window (plan B). Unset keys use the shipped "
+             "defaults: output_ceiling = 96000, output_window_share = 0.75, "
+             "reserve_min = 1024, reserve_share = 0.12, num_ctx = \"model\", "
+             "announce = true. Per role: [role.X.budget]; per (role, model): "
+             "[role.X.models.\"<model>\"].")
+    for k in BUDGET_KEYS:
+        if k in cfg.budget:
+            L.append(f"{k} = {_toml_value(cfg.budget[k])}")
+    L.append("")
+    L.append("[sampling]")
+    L.append("# Sampling diversity (plan B4). Unset keys use the defaults: "
+             "seed = \"random\" (per instance, never shared by same-model "
+             "instances in a run; an integer s gives s + i; \"off\" sends "
+             "none), temperature = the model's own, temperature_range_pct "
+             "= 2 (max 10). Per role: [role.X.sampling].")
+    for k in SAMPLING_KEYS:
+        if k in cfg.sampling:
+            L.append(f"{k} = {_toml_value(cfg.sampling[k])}")
+    L.append("")
+    L.append("[compaction]")
+    L.append("# Compaction (plan C). Unset keys use the defaults: flow = "
+             "\"auto\" (\"full\" from a 64k window up: halfway marker, "
+             "retrospective, two half-critics, synthesizer; \"reduced\" "
+             "below: a replay writer, retrospective and one reviewer; "
+             "\"basic\" makes no model call), placement = "
+             "\"system\", review = true, target_share = 0.25, "
+             "writer_attempts = 3, ledger = true, tool_result_max_chars = "
+             "32000, file_result_max_chars = 50000, stale_read_share = 0.4, "
+             "reasoning_replay = \"none\". Every step runs on the role's "
+             "own model. Per role: [role.X.compaction].")
+    for k in COMPACTION_KEYS:
+        if k in cfg.compaction:
+            L.append(f"{k} = {_toml_value(cfg.compaction[k])}")
+    L.append("")
+    L.append("[protocol]")
+    L.append("# typed: roles hand typed records to each other (plan G); the "
+             "synthesizer stays prose. Off until benched.")
+    L.append(f"typed = {'true' if cfg.protocol.typed else 'false'}")
+    L.append("")
+    es = cfg.escalation
+    if es.expert_model or es.max_per_council != EscalationConfig().max_per_council:
+        L.append("[escalation]")
+        L.append("# Per-lane model escalation: a lane a guard ended, or one "
+                 "that failed on its task, reruns once on expert_model with "
+                 "a brief of the failed attempt. Empty expert_model = off.")
+        L.append(f"expert_model = {_toml_value(es.expert_model)}")
+        L.append(f"max_per_council = {es.max_per_council}")
+        L.append("")
+    if not cfg.polykv.is_default():
+        L.append("[polykv]")
+        L.append("# PolyKV placement on opencoti / xOllama: an engine session "
+                 "per conversation, the council's shared prompt head one pool. "
+                 "mode: auto | affinity | pooled | assured | off.")
+        L.append(f"enabled = {'true' if cfg.polykv.enabled else 'false'}")
+        L.append(f"mode = {_toml_value(cfg.polykv.mode)}")
+        L.append("# layout: shared (the roles' common blocks first, each "
+                 "role's instructions last, a layer per block) | as-built.")
+        L.append(f"layout = {_toml_value(cfg.polykv.layout)}")
+        L.append("")
+    if not cfg.cloud.is_default():
+        L.append("[cloud]")
+        L.append("# route: direct (Ollama Cloud models go to ollama.com "
+                 "with the account key) | local (the host's Ollama relays "
+                 "them).")
+        L.append(f"route = {_toml_str(cfg.cloud.route)}")
+        if cfg.cloud.url != OLLAMA_CLOUD_URL:
+            L.append(f"url = {_toml_str(cfg.cloud.url)}")
+        if cfg.cloud.key_file:
+            L.append(f"key_file = {_toml_str(cfg.cloud.key_file)}")
+        L.append("")
+    if cfg.critic.cross_examination != CROSS_EXAM_SHELL:
+        L.append("[critic]")
+        L.append("# cross_examination: a critic names the claims it doubts "
+                 "(CHALLENGE report=N); each lane answers with a run or a "
+                 "concession before the critic rules. true | false | "
+                 "\"shell\" (default: on for runs with the shell).")
+        L.append("cross_examination = "
+                 + _toml_value(cfg.critic.cross_examination))
+        L.append("")
+    g = cfg.guards
+    if not g.is_default():
+        L.append("[guards]")
+        L.append("# The nudge profile (plan §0.7): \"strict\" for small "
+                 "models — lanes must open with a tool call, the planner is "
+                 "re-asked when its plan does not parse, 3 thinking-only "
+                 "re-asks, the cap warning 2+ turns early. Loop guards are "
+                 "always on, in no profile.")
+        L.append(f"profile = {_toml_value(g.profile)}")
+        if g.roles:
+            L.append("")
+            L.append("[guards.roles]")
+            for role in sorted(g.roles):
+                L.append(f"{role} = {_toml_value(g.roles[role])}")
+        L.append("")
+    d = cfg.decision
+    if d != DecisionConfig():
+        L.append("[decision]")
+        L.append("# A decision model (plan H): TypeSafe's Jev when url is "
+                 "unset (key from key_file or TYPESAFE_API_KEY), or a "
+                 "/v1/systemone server such as xOllama. seams: "
+                 + ", ".join(DECISION_SEAMS) + ".")
+        L.append(f"enabled = {'true' if d.enabled else 'false'}")
+        if d.url:
+            L.append(f"url = {_toml_str(d.url)}")
+        L.append(f"model = {_toml_str(d.model)}")
+        if d.key_file:
+            L.append(f"key_file = {_toml_str(d.key_file)}")
+        L.append(f"floor = {d.floor!r}")
+        L.append(f"high_stakes_floor = {d.high_stakes_floor!r}")
+        L.append(f"timeout_s = {d.timeout_s!r}")
+        L.append("seams = [" + ", ".join(_toml_str(x) for x in d.seams) + "]")
+        if d.shadow:
+            L.append("# asked and recorded, never acted on")
+            L.append("shadow = [" + ", ".join(_toml_str(x) for x in d.shadow)
+                     + "]")
+        L.append("")
+    for name, ep in sorted(cfg.endpoints.items()):
+        L.append(f"[endpoints.{name}]")
+        L.append(f"url = {_toml_str(ep.url)}")
+        L.append(f"backend = {_toml_str(ep.backend)}")
+        L.append(f"window = {_toml_str(ep.window)}  # dynamic: no fixed "
+                 "context, each agent up to the engine's session_ctx_max")
+        if ep.model:
+            L.append(f"model = {_toml_str(ep.model)}")
+        if ep.key_file:
+            L.append(f"key_file = {_toml_str(ep.key_file)}")
+        if ep.api_key:
+            L.append(f"api_key = {_toml_str(ep.api_key)}")
+        L.append("")
     for role in ROLES:
         rc = cfg.roles[role]
         L.append(f"[role.{role}]")
         L.append(f"enabled = {'true' if rc.enabled else 'false'}")
         L.append(f"model = {_toml_str(rc.model)}")
+        if rc.think is not None:
+            L.append(f"think = {_toml_value(rc.think)}")
         if rc.ctx_max is not None:
             L.append(f"ctx_max = {int(rc.ctx_max)}")
         L.append(f"ctx_max_explicit = "
@@ -1562,6 +2449,29 @@ def _render(cfg: ConsultantsConfig, *,
                     L.append('# fallback = ""  # empty / unset: '
                              "no failover on this route")
                 L.append("")
+        if rc.budget:
+            L.append(f"[role.{role}.budget]")
+            for k, v in rc.budget.items():
+                L.append(f"{k} = {_toml_value(v)}")
+            L.append("")
+        if rc.sampling:
+            L.append(f"[role.{role}.sampling]")
+            for k, v in rc.sampling.items():
+                L.append(f"{k} = {_toml_value(v)}")
+            L.append("")
+        if rc.compaction:
+            L.append(f"[role.{role}.compaction]")
+            for k, v in rc.compaction.items():
+                L.append(f"{k} = {_toml_value(v)}")
+            L.append("")
+        for m in sorted(rc.model_overrides):
+            vals = rc.model_overrides[m]
+            if not vals:
+                continue
+            L.append(f"[role.{role}.models.{_toml_str(m)}]")
+            for k, v in vals.items():
+                L.append(f"{k} = {_toml_value(v)}")
+            L.append("")
     return "\n".join(L)
 
 
@@ -1650,8 +2560,47 @@ def save_config(cfg: ConsultantsConfig, *, scope: str = "user",
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     text = _render(cfg, override_flag=emit_flag)
+    if scope != "user":
+        text = _drop_inherited_secrets(text, _read_toml(user_config_path()))
     path.write_text(text, encoding="utf-8", newline="\n")
     return path
+
+
+_CRED_URL = re.compile(r"://[^\s:/@]+:[^\s@]+@")
+_SECRET_KEYS = re.compile(r"(?i)(^|_)(api_key|password|passwd|token|secret)$")
+_STR_LINE = re.compile(r'^(\s*)([A-Za-z_][\w.-]*)\s*=\s*"(.*)"\s*$')
+
+
+def _string_values(raw: Any) -> set:
+    if isinstance(raw, dict):
+        return set().union(*(_string_values(v) for v in raw.values())) if raw else set()
+    if isinstance(raw, list):
+        return set().union(*(_string_values(v) for v in raw)) if raw else set()
+    return {raw} if isinstance(raw, str) else set()
+
+
+def _drop_inherited_secrets(text: str, user_raw: dict) -> str:
+    """A project file never carries a credential it only inherited: a
+    line whose value holds one (a URL with a password, a secret-named
+    key) and equals the user-global value becomes a comment; the merge
+    at load still supplies it. ``set-* --project`` used to copy the
+    pgvector DSN with its password into ``<project>/.claude-hooks/``,
+    inside a tree that may not ignore it (c2f2caa leaked that password)."""
+    inherited = _string_values(user_raw)
+    out = []
+    for line in text.splitlines(keepends=True):
+        m = _STR_LINE.match(line)
+        if m:
+            indent, key, value = m.groups()
+            value = value.replace('\\"', '"').replace("\\\\", "\\")
+            if (value in inherited and value
+                    and (_CRED_URL.search(value) or _SECRET_KEYS.search(key))):
+                out.append(f"{indent}# {key}: inherited from the user config "
+                           f"(credentials are never written to a project "
+                           f"file)\n")
+                continue
+        out.append(line)
+    return "".join(out)
 
 
 # ----------------------- mutators ----------------------------------- #
@@ -1760,6 +2709,334 @@ def _validate_lang_id(lang: str) -> str:
             "([a-z][a-z0-9_+-]*)"
         )
     return s
+
+
+def set_endpoint(name: str, *, url: Optional[str] = None,
+                 backend: Optional[str] = None,
+                 model: Optional[str] = None,
+                 api_key: Optional[str] = None,
+                 key_file: Optional[str] = None,
+                 window: Optional[str] = None,
+                 scope: str = "user",
+                 cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Add or update ``[endpoints.<name>]``. ``url`` is required for a
+    new endpoint; on an update unset arguments keep their value and an
+    empty string clears ``model`` / ``api_key`` / ``key_file``."""
+    if not valid_endpoint_name(name):
+        raise ValueError(f"endpoint name {name!r} must match [A-Za-z0-9_.-]+")
+    cfg = _load_for_edit(scope, cwd)
+    ep = cfg.endpoints.get(name)
+    if ep is None and not (url and url.strip()):
+        raise ValueError(f"endpoint {name!r} does not exist; --url is required")
+    if backend is not None and backend.lower() not in ENDPOINT_BACKENDS:
+        raise ValueError(f"backend must be one of {', '.join(ENDPOINT_BACKENDS)}")
+    if url is not None and not url.strip().startswith(("http://", "https://")):
+        raise ValueError("url must start with http:// or https://")
+    ep = ep or EndpointConfig(url=url.strip())
+    if url:
+        ep.url = url.strip().rstrip("/")
+    if backend:
+        ep.backend = backend.lower()
+    if model is not None:
+        ep.model = model.strip() or None
+    if api_key is not None:
+        ep.api_key = api_key.strip() or None
+    if key_file is not None:
+        ep.key_file = key_file.strip() or None
+    if window is not None:
+        ep.window = check_endpoint_window(window)
+    cfg.endpoints[name] = ep
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_protocol(*, typed: Optional[bool] = None, scope: str = "user",
+                 cwd: Optional[Path] = None) -> ConsultantsConfig:
+    cfg = _load_for_edit(scope, cwd)
+    if typed is not None:
+        cfg.protocol.typed = bool(typed)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_guards(*, profile: Optional[str] = None, role: Optional[str] = None,
+               scope: str = "user",
+               cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set ``[guards] profile``, or one role's override with ``role``
+    (``profile = "standard"`` on a role removes the override when the
+    run-wide profile is standard). Bad values raise ``ValueError``."""
+    if profile is None:
+        raise ValueError("--profile is required (standard or strict)")
+    checked = check_guard_profile(profile)
+    if role is not None and role not in GUARD_ROLES:
+        raise ValueError(f"role must be one of {', '.join(GUARD_ROLES)}")
+    cfg = _load_for_edit(scope, cwd)
+    if role is None:
+        cfg.guards.profile = checked
+    elif checked == cfg.guards.profile:
+        cfg.guards.roles.pop(role, None)
+    else:
+        cfg.guards.roles[role] = checked
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_escalation(*, model: Optional[str] = None,
+                   max_per_council: Optional[int] = None,
+                   scope: str = "user",
+                   cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set ``[escalation]``; ``model=""`` turns it off. Bad values raise
+    ``ValueError``; nothing is written then."""
+    if max_per_council is not None and not 0 <= int(max_per_council) <= ESCALATION_MAX:
+        raise ValueError(f"max must be in [0, {ESCALATION_MAX}]")
+    cfg = _load_for_edit(scope, cwd)
+    if model is not None:
+        cfg.escalation.expert_model = model.strip()
+    if max_per_council is not None:
+        cfg.escalation.max_per_council = int(max_per_council)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_cloud(*, route: Optional[str] = None, url: Optional[str] = None,
+              key_file: Optional[str] = None, scope: str = "user",
+              cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set ``[cloud]``: ``route`` direct | local, ``url`` (default
+    https://ollama.com), ``key_file`` (empty string clears it)."""
+    if route is not None and route.strip().lower() not in CLOUD_ROUTES:
+        raise ValueError(f"route must be one of {', '.join(CLOUD_ROUTES)}")
+    if url is not None and url.strip() and not url.strip().startswith(
+            ("http://", "https://")):
+        raise ValueError("url must start with http:// or https://")
+    cfg = _load_for_edit(scope, cwd)
+    if route is not None:
+        cfg.cloud.route = route.strip().lower()
+    if url is not None:
+        cfg.cloud.url = url.strip().rstrip("/") or OLLAMA_CLOUD_URL
+    if key_file is not None:
+        cfg.cloud.key_file = key_file.strip() or None
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_cross_examination(*, enabled: Union[bool, str], scope: str = "user",
+                          cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set ``[critic] cross_examination`` (plan council-memory M5):
+    ``True``, ``False`` or ``"shell"``."""
+    if not (isinstance(enabled, bool) or enabled == CROSS_EXAM_SHELL):
+        raise ValueError('cross_examination must be true, false or "shell"')
+    cfg = _load_for_edit(scope, cwd)
+    cfg.critic.cross_examination = enabled
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_polykv(*, enabled: Optional[bool] = None, mode: Optional[str] = None,
+               layout: Optional[str] = None, scope: str = "user",
+               cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set ``[polykv]`` (plan F)."""
+    if mode is not None and mode not in POLYKV_MODES:
+        raise ValueError(f"mode must be one of {', '.join(POLYKV_MODES)}")
+    if layout is not None and layout not in POLYKV_LAYOUTS:
+        raise ValueError(f"layout must be one of {', '.join(POLYKV_LAYOUTS)}")
+    cfg = _load_for_edit(scope, cwd)
+    if enabled is not None:
+        cfg.polykv.enabled = bool(enabled)
+    if mode is not None:
+        cfg.polykv.mode = mode
+    if layout is not None:
+        cfg.polykv.layout = layout
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_xauto_retry(*, enabled: bool, scope: str = "user",
+                    cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set ``[runtime] xauto_retry_infra_lanes`` (plan D9)."""
+    cfg = _load_for_edit(scope, cwd)
+    cfg.runtime.xauto_retry_infra_lanes = bool(enabled)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_decision(*, enabled: Optional[bool] = None,
+                 url: Optional[str] = None, model: Optional[str] = None,
+                 key_file: Optional[str] = None,
+                 floor: Optional[float] = None,
+                 high_stakes_floor: Optional[float] = None,
+                 timeout_s: Optional[float] = None,
+                 seams: Optional[Any] = None,
+                 shadow: Optional[Any] = None, reset: bool = False,
+                 scope: str = "user",
+                 cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set ``[decision]`` (plan H). Unset arguments keep their value; an
+    empty ``url`` / ``key_file`` clears it (TypeSafe / the env key).
+    Bad values raise ``ValueError``; nothing is written then."""
+    if url and not url.strip().startswith(("http://", "https://")):
+        raise ValueError("url must start with http:// or https://")
+    for name, v, lo, hi in (("floor", floor, 0.0, 1.0),
+                            ("high_stakes_floor", high_stakes_floor, 0.0, 1.0),
+                            ("timeout_s", timeout_s, 0.5, 300.0)):
+        if v is not None and not lo <= float(v) <= hi:
+            raise ValueError(f"{name} must be in [{lo}, {hi}]")
+    checked_seams = check_decision_seams(seams) if seams is not None else None
+    checked_shadow = (check_decision_seams(shadow) if shadow is not None
+                      else None)
+    if key_file:
+        kp = Path(key_file).expanduser()
+        if not kp.is_file():
+            raise ValueError(f"key_file {key_file!r} is not a file")
+    cfg = _load_for_edit(scope, cwd)
+    d = DecisionConfig() if reset else cfg.decision
+    if enabled is not None:
+        d.enabled = bool(enabled)
+    if url is not None:
+        d.url = url.strip().rstrip("/") or None
+    if model is not None and model.strip():
+        d.model = model.strip()
+    if key_file is not None:
+        d.key_file = key_file.strip() or None
+    if floor is not None:
+        d.floor = float(floor)
+    if high_stakes_floor is not None:
+        d.high_stakes_floor = float(high_stakes_floor)
+    if timeout_s is not None:
+        d.timeout_s = float(timeout_s)
+    if checked_seams is not None:
+        d.seams = checked_seams
+    if checked_shadow is not None:
+        d.shadow = checked_shadow
+    cfg.decision = d
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_budget(values: Optional[dict] = None, *,
+               clear: Optional[list[str]] = None,
+               role: Optional[str] = None, model: Optional[str] = None,
+               scope: str = "user",
+               cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set or clear budget knobs (plan B) in ``[budget]``,
+    ``[role.<role>.budget]`` or ``[role.<role>.models."<model>"]``.
+    Bad values raise ``ValueError``; nothing is written then."""
+    if model and not role:
+        raise ValueError("--model needs --role: per-model settings belong "
+                         "to a role")
+    keys = MODEL_OVERRIDE_KEYS if model else BUDGET_KEYS
+    checked: dict[str, Any] = {}
+    for k, v in (values or {}).items():
+        if k not in keys:
+            raise ValueError(f"unknown budget key {k!r} "
+                             f"(keys: {', '.join(keys)})")
+        checked[k] = keys[k](v)
+    for k in clear or []:
+        if k not in keys:
+            raise ValueError(f"unknown budget key {k!r}")
+    cfg = _load_for_edit(scope, cwd)
+    if role:
+        rc = cfg.role(role)
+        if model:
+            target = rc.model_overrides.setdefault(model, {})
+        else:
+            target = rc.budget
+    else:
+        target = cfg.budget
+    target.update(checked)
+    for k in clear or []:
+        target.pop(k, None)
+    if role and model and not target:
+        cfg.roles[role].model_overrides.pop(model, None)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_sampling(values: Optional[dict] = None, *,
+                 clear: Optional[list[str]] = None,
+                 role: Optional[str] = None, model: Optional[str] = None,
+                 scope: str = "user",
+                 cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set or clear sampling-diversity keys (plan B4) in ``[sampling]``,
+    ``[role.<role>.sampling]`` or ``[role.<role>.models."<model>"]``."""
+    if model and not role:
+        raise ValueError("--model needs --role: per-model settings belong "
+                         "to a role")
+    checked = {}
+    for k, v in (values or {}).items():
+        if k not in SAMPLING_KEYS:
+            raise ValueError(f"unknown sampling key {k!r} "
+                             f"(keys: {', '.join(SAMPLING_KEYS)})")
+        checked[k] = SAMPLING_KEYS[k](v)
+    for k in clear or []:
+        if k not in SAMPLING_KEYS:
+            raise ValueError(f"unknown sampling key {k!r}")
+    cfg = _load_for_edit(scope, cwd)
+    if role:
+        rc = cfg.role(role)
+        target = (rc.model_overrides.setdefault(model, {}) if model
+                  else rc.sampling)
+    else:
+        target = cfg.sampling
+    target.update(checked)
+    for k in clear or []:
+        target.pop(k, None)
+    if role and model and not target:
+        cfg.roles[role].model_overrides.pop(model, None)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_compaction(values: Optional[dict] = None, *,
+                   clear: Optional[list[str]] = None,
+                   role: Optional[str] = None, model: Optional[str] = None,
+                   scope: str = "user",
+                   cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set or clear compaction keys (plan C) in ``[compaction]``,
+    ``[role.<role>.compaction]`` or ``[role.<role>.models."<model>"]``.
+    Bad values raise ``ValueError``; nothing is written then."""
+    if model and not role:
+        raise ValueError("--model needs --role: per-model settings belong "
+                         "to a role")
+    checked = {}
+    for k, v in (values or {}).items():
+        if k not in COMPACTION_KEYS:
+            raise ValueError(f"unknown compaction key {k!r} "
+                             f"(keys: {', '.join(COMPACTION_KEYS)})")
+        checked[k] = COMPACTION_KEYS[k](v)
+    for k in clear or []:
+        if k not in COMPACTION_KEYS:
+            raise ValueError(f"unknown compaction key {k!r}")
+    cfg = _load_for_edit(scope, cwd)
+    if role:
+        rc = cfg.role(role)
+        target = (rc.model_overrides.setdefault(model, {}) if model
+                  else rc.compaction)
+    else:
+        target = cfg.compaction
+    target.update(checked)
+    for k in clear or []:
+        target.pop(k, None)
+    if role and model and not target:
+        cfg.roles[role].model_overrides.pop(model, None)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_think(role: str, value: Any = None, *, model: Optional[str] = None,
+              clear: bool = False, scope: str = "user",
+              cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set or clear a role's ``think`` (plan B3), or its per-model one
+    (``[role.<role>.models."<model>"] think``)."""
+    checked = None if clear else check_think(value)
+    cfg = _load_for_edit(scope, cwd)
+    rc = cfg.role(role)
+    if model:
+        table = rc.model_overrides.setdefault(model, {})
+        if clear:
+            table.pop("think", None)
+            if not table:
+                rc.model_overrides.pop(model, None)
+        else:
+            table["think"] = checked
+    else:
+        rc.think = checked
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def remove_endpoint(name: str, *, scope: str = "user",
+                    cwd: Optional[Path] = None) -> ConsultantsConfig:
+    cfg = _load_for_edit(scope, cwd)
+    if name not in cfg.endpoints:
+        raise ValueError(f"endpoint {name!r} is not configured")
+    del cfg.endpoints[name]
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 
 def set_coder_route(language: str, *, primary: Optional[str] = None,
@@ -1875,6 +3152,25 @@ def set_service_mode(mode: str, *, scope: str = "user",
         )
     cfg = _load_for_edit(scope, cwd)
     cfg.service.mode = mode
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_dashboard_host(host: str, *, scope: str = "user",
+                       cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """``""`` / ``off`` = loopback only; else an address to bind the
+    read-only dashboard listener on (``0.0.0.0`` or this host's LAN IP)."""
+    import ipaddress
+    host = (host or "").strip()
+    if host.lower() in ("off", "none", "loopback"):
+        host = ""
+    if host:
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            raise ValueError(f"{host!r} is not an IP address (use 0.0.0.0, "
+                             "a LAN address, or off)") from None
+    cfg = _load_for_edit(scope, cwd)
+    cfg.service.dashboard_host = host
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 
@@ -2003,12 +3299,46 @@ VALID_STORE_BACKENDS: tuple[str, ...] = ("memory", "pgvector", "sqlite_vec")
 #: The permission ladder, mirrored from
 #: ``claude_hooks.tool_registry.policy.LEVELS``. Duplicated rather than
 #: imported so ``consultants.config`` stays importable without
-#: ``claude_hooks`` on the path — the same reason ``interrupt_policy``
-#: avoids its LangGraph import. ``test_tool_registry`` pins the two
+#: ``claude_hooks`` on the path. ``test_tool_registry`` pins the two
 #: lists together so they cannot drift.
 VALID_PERMISSION_LEVELS: tuple[str, ...] = (
     "auto", "ask_assistant", "ask_human", "deny",
 )
+
+
+def _render_shell(sc: ShellConfig) -> list[str]:
+    """``[tools.shell]``, only the keys that differ from the default
+    (all commented out when none do), so an untouched config renders the
+    shell as a documented example."""
+    default = ShellConfig()
+    changed = [k for k in SHELL_KEYS if getattr(sc, k) != getattr(default, k)]
+    L = ["", "# The sandboxed shell (run_command), off by default. Turn it on",
+         "# per run with --shell, or always with default = \"always\".",
+         "# mode: read (project read-only + private /scratch); net: none."]
+    if not changed:
+        L += ["# [tools.shell]", '# default = "off"', '# ro_binds = []']
+        return L
+    L.append("[tools.shell]")
+    for k in changed:
+        v = getattr(sc, k)
+        if isinstance(v, str):
+            L.append(f"{k} = {_toml_str(v)}")
+        elif isinstance(v, list):
+            L.append(f"{k} = [" + ", ".join(_toml_str(x) for x in v) + "]")
+        else:
+            L.append(f"{k} = {v:g}" if isinstance(v, float) else f"{k} = {v}")
+    return L
+
+
+def set_shell(*, values: dict, reset: bool = False, scope: str = "user",
+              cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set ``[tools.shell]`` keys (``reset`` first restores the
+    defaults) and persist. Values are validated; a bad one raises."""
+    cfg = _load_for_edit(scope, cwd)
+    if reset:
+        cfg.tools.shell = ShellConfig()
+    apply_shell(cfg.tools.shell, values, strict=True)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 
 def set_tools(

@@ -208,6 +208,12 @@ class CoderArtifact:
     parent_round: int = 1
     duration_ms: int = 0
     error: Optional[str] = None
+    #: ``"view"`` when the lane wrote into its own worktree view
+    #: (``--shell write``): ``files`` are then relative to the repo root
+    #: and reach the user as a held patch, not under ``coder-out/``.
+    workspace: str = ""
+    #: Commands the lane ran in that view: ``{"command", "exit"}``.
+    commands: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -262,6 +268,13 @@ class RuntimeControl(TypedDict, total=False):
     max_reroutes: int           # critic re-routes
     # ---- topology gates ----
     enabled_roles: list[str]    # subset of the project's roles
+    typed_protocol: bool        # plan G: roles hand in typed records
+    cross_examination: bool     # plan council-memory M5: critic challenges
+    guards: dict                # plan §0.7: {profile, roles}, only when not all standard
+    budget: dict                # plan B: budget knob layers (control.budget_layers)
+    think: dict                 # plan B3: per-(role, model) think, "<role>@<model>"
+    sampling_run: str           # plan B4: scopes per-run seed uniqueness
+    sampling: dict              # plan B4: sampling layers (control.sampling_layers)
     # ---- quality thresholds ----
     confidence_target: float    # synthesizer self-rating cutoff
     # M4 dynamic critic dial. ``adversarial`` is reachable only via a
@@ -308,6 +321,26 @@ def merge_runtime_control(left: Optional[RuntimeControl],
             continue
         out[k] = v  # type: ignore[literal-required]
     return out
+
+
+def join_errors(left: Optional[str], right: Optional[str]) -> Optional[str]:
+    """Reducer for ``error``: fan-out lanes that fail in the same
+    superstep each write one, and a plain channel then aborts the whole
+    run (``InvalidUpdateError``) instead of tombstoning the lanes.
+    Distinct messages are joined in order."""
+    if not right:
+        return left
+    if not left:
+        return right
+    if right in left.split(" | "):
+        return left
+    return f"{left} | {right}"
+
+
+def latest_non_none(left: Any, right: Any) -> Any:
+    """Reducer for ``_role_failed``: the latest failed role wins, and a
+    write of ``None`` never clears it."""
+    return right if right is not None else left
 
 
 def append_doc(left: Optional[list[Doc]],
@@ -464,8 +497,9 @@ class CouncilStateV2(TypedDict, total=False):
     retries_by_role: dict[str, int]
 
     # ---- error tombstones ----
-    error: Optional[str]
-    _role_failed: Optional[str]
+    # Reducers, so lanes failing in the same superstep both land.
+    error: Annotated[Optional[str], join_errors]
+    _role_failed: Annotated[Optional[str], latest_non_none]
 
     # ---- Send-injected per-lane fields ----
     plan_item: Optional[str]
@@ -489,6 +523,27 @@ class CouncilStateV2(TypedDict, total=False):
     # Synthesizer + critic emit floats here. Append-only series so
     # we keep history for escalation + telemetry; readers use [-1].
     confidence: Annotated[list[float], latest_or_none]
+
+    # Plan H: the decision model's recommendation on the final answer.
+    decision_review: Optional[dict]
+
+    # Plan D9: the xauto automatic lane retry (0 / 1 retrying / 2 done),
+    # written only by the ``lane_retry`` node.
+    lane_retry: int
+    # Plan council-memory M5 (see graph.CouncilState).
+    research_lanes: Annotated[list, operator.add]
+    # Set only on a multi-critic fan-out Send: this critic is one of C
+    # parallel instances and writes no decision (critic_node).
+    critic_fanout: bool
+    cross_exam: Annotated[list, operator.add]
+    cross_exam_round: int
+    # One per challenged report: the critic's ruling (stands / narrowed /
+    # falls / open), read by the synthesis audits.
+    cross_exam_rulings: Annotated[list, operator.add]
+    # Plan G5: a typed follow-up's route (``follow_up_route_node``).
+    follow_up_route: Optional[str]
+    # Send-injected: the one lane a cross_examine node answers for.
+    cross_exam_item: Optional[dict]
 
     # Synthesizer's work-in-progress draft. Overwritten on each
     # iteration. The HITL interrupt-before-synthesis flow shows this

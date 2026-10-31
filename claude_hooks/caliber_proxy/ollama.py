@@ -26,6 +26,7 @@ import os
 import time
 from typing import Any, Optional
 
+from claude_hooks import ollama_upstream
 from claude_hooks._chat_retry import (
     ProxyRetryConfig,
     compute_backoff,
@@ -46,14 +47,12 @@ except ImportError as e:  # pragma: no cover - guarded at install time
 
 
 def default_upstream() -> str:
-    """Configured upstream Ollama base. Accepts either the bare host
-    (``http://192.168.178.2:11433``) or the legacy ``.../v1`` form;
-    :func:`_base_url` strips the suffix either way.
-    """
-    return os.environ.get(
-        "CALIBER_GROUNDING_UPSTREAM",
-        "http://192.168.178.2:11433",
-    )
+    """Configured upstream Ollama base:
+    :func:`claude_hooks.ollama_upstream.url` (``CALIBER_GROUNDING_UPSTREAM``
+    — bare host or the legacy ``.../v1`` form — then the host's
+    ``ollama.url``, then Ollama's default)."""
+    from claude_hooks import ollama_upstream
+    return ollama_upstream.url()
 
 
 def default_upstream_backend() -> str:
@@ -422,7 +421,8 @@ def chat_completions(payload: dict[str, Any],
             resp = client.post(
                 url,
                 json=ollama_payload,
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json",
+                         **ollama_upstream.auth_headers(base)},
             )
         except (httpx.RequestError, httpx.HTTPError) as e:
             # Network-level failure (connection reset, DNS, etc.) —

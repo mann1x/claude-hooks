@@ -23,7 +23,13 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from claude_hooks import capped_thinking, truncation
+from claude_hooks import capped_thinking, reasoning_replay, truncation
+from claude_hooks import reasoning_loop_guard as rlg
+from claude_hooks import reasoning_repetition
+from claude_hooks import loop_detection
+from claude_hooks import struggle_supervisor
+from claude_hooks import silent_turns
+from claude_hooks import test_reruns
 
 log = logging.getLogger("claude_hooks.agent_loop")
 
@@ -86,6 +92,12 @@ class LoopConfig:
     # guard, which is the correct handling for half-written arguments.
     max_answer_continuations: int = 2
 
+    # Past-turn reasoning on the wire (plan C4): "none" drops it (the
+    # default and the pre-C4 behaviour), "all" keeps the field, "inline"
+    # puts it in the content as <think>…</think>. Callers resolve "all"
+    # against the server first (claude_hooks.reasoning_replay.resolve).
+    reasoning_replay: str = "none"
+
     # Called with the payload before every chat_fn call in the loop, and
     # may rewrite it in place (compact ``messages``, size
     # ``options.num_predict``). The history grows by a tool result per
@@ -93,6 +105,116 @@ class LoopConfig:
     # the second call. Exceptions are logged and the call goes ahead
     # unprepared. None = no preparation (caliber / advisor behavior).
     prepare_payload: Optional[Callable[[dict], None]] = None
+
+    # Called with (payload, response) after every conversation call the
+    # loop makes — each iteration and each answer continuation — with the
+    # payload exactly as it was sent. For calibration: the provider's
+    # prompt count belongs to that payload, and only to that one.
+    # Auxiliary calls (the capped-thinking condenser) are not reported,
+    # so they cannot overwrite the conversation's anchor. Exceptions are
+    # logged and ignored. None = no callback (caliber / advisor).
+    on_response: Optional[Callable[[dict, dict], None]] = None
+
+    # Result tools: calls the loop answers itself instead of executing.
+    # A result call that is the turn's only call ends the loop; its
+    # arguments travel back as ``final["_result_call"]`` and are never
+    # run. Beside other calls it is not taken: the others run and the
+    # result call is answered with ``result_not_alone_message``. Arguments
+    # that don't parse as JSON are answered with ``result_invalid_message``
+    # once. When the loop strips tools to force an answer, the result
+    # tools stay, so the forced answer can still be a record. Both
+    # messages take ``{name}`` (and the second ``{what}``). Empty = none
+    # (caliber / advisor).
+    result_tools: tuple[str, ...] = ()
+    result_not_alone_message: str = (
+        "Not taken yet: call {name} on its own, after you have read what "
+        "your other calls returned.")
+    result_invalid_message: str = (
+        "Your {name} call was {what}. Call {name} again, smaller: shorter "
+        "fields and fewer items.")
+
+    # Plan D1: the reasoning-loop guard is always on. A turn whose
+    # reasoning collapsed into repetition is cut (the stream readers stop
+    # reading; a reply that was not streamed is scanned after the fact),
+    # its partial content kept and the loop continued with a note; this
+    # many cut turns in a row end the loop with one forced tool-less
+    # report. ``on_guard`` gets one event dict per trip and per stop —
+    # the quantity the guard fired on included. Exceptions are ignored.
+    reasoning_loop_max_trips: int = rlg.DEFAULT.max_consecutive_trips
+    # Plan D10/D14 (always on): consecutive failed tool calls that end the
+    # loop, and tools whose same call rightly repeats (status / await).
+    mistake_limit: int = loop_detection.MISTAKE_LIMIT
+    polling_tools: tuple[str, ...] = ()
+    on_guard: Optional[Callable[[dict], None]] = None
+    # Plan §0.7 / D3: the nudge profile. "strict" (for small models)
+    # re-asks a thinking-only turn 3 times instead of 2 and warns at
+    # least 2 turns before the cap. The loop guards are in no profile.
+    # Callers pair it with ``force_first_tool_call`` for the lanes.
+    guard_profile: str = "standard"
+    # Plan D9: graceful stop. Asked before every turn; once it answers
+    # True the loop sends no further work and ends on one tool-less
+    # report (``_stop_reason`` = ``wrap_up``). ``None`` never asks.
+    wrap_up_check: Optional[Callable[[], bool]] = None
+    # Asked once, when the loop is about to end on a report: given the
+    # conversation, a note to re-ask with, or None to let the report
+    # stand. The caller owns the rule (council run 4: a lane on a shell
+    # run whose runs never reached the code). Exceptions are ignored.
+    report_check: Optional[Callable[[list], Optional[str]]] = None
+    # Asked before every turn after the first, until it answers once:
+    # given ``(iteration, messages)``, a note to put on the last tool
+    # result, or None. The caller owns the rule (council run 6: a coder
+    # that spent its 60 turns on reconnaissance and wrote no test).
+    # Exceptions are ignored.
+    turn_check: Optional[Callable[[int, list], Optional[str]]] = None
+    # True: ``turn_check`` is asked every turn and owns its cadence (council
+    # run 8: one nudge at turn 12 was ignored for 42 more turns).
+    turn_check_repeat: bool = False
+    # Tools that survive ``force_answer_after`` (council run 8: the coder
+    # lost ``write_file`` at turn 54 having written nothing, and its
+    # calls were refused "tools are off"). The cap still ends the loop.
+    keep_after_strip: tuple[str, ...] = ()
+    #: What this loop's answer is ("your plan — …", "your verdict — …").
+    #: Empty: the messages that end a loop (cap warning, cap / tools-off /
+    #: wrap-up report) ask for a findings report, as a researcher owes. A
+    #: role whose answer is something else names it here, or those
+    #: messages replace its plan or verdict with a report of its own
+    #: checks (2026-10-22: every minimax synthesizer answer on the audits).
+    deliverable: str = ""
+    #: Keep the role's own thinking on the forced call that ends a loop
+    #: gracefully (``GRACEFUL_STOPS``) when the loop has a ``deliverable``:
+    #: that call writes the plan, verdict or answer itself. Off by default;
+    #: a loop a guard ended (reasoning loop, repeated call, mistakes,
+    #: struggle) always answers with thinking off.
+    forced_think: bool = False
+
+
+#: Stops where the role was working normally and ran out of turns or time.
+GRACEFUL_STOPS = frozenset({"iteration_cap", "tools_off", "wrap_up"})
+
+
+#: Plan D13: every message the harness writes into a conversation opens
+#: with this one tag, so a model never takes it for the user's words.
+HARNESS_TAG = "[SYSTEM MESSAGE]"
+
+
+def harness_note(text: str) -> dict:
+    """A user-role message the harness wrote: tagged once, and marked
+    ``_harness`` so the compaction planner never takes it for a typed
+    prompt."""
+    body = text or ""
+    if not body.lstrip().startswith(HARNESS_TAG):
+        body = f"{HARNESS_TAG} {body}"
+    return {"role": "user", "content": body, "_harness": True}
+
+
+def _json_args(tc: dict) -> bool:
+    args = (tc.get("function") or {}).get("arguments")
+    if isinstance(args, dict):
+        return True
+    try:
+        return isinstance(json.loads(args or ""), dict)
+    except (TypeError, json.JSONDecodeError):
+        return False
 
 
 # Type aliases.
@@ -141,6 +263,27 @@ class _ChatFnClient:
         return self._chat_fn(payload)
 
 
+def _detect_capped(msg: dict, response: dict, payload: dict,
+                   config: "LoopConfig"):
+    """``(capped, stand_down, budget)`` for one turn: did its thinking run
+    to the allowance? The real allowance first (plan B3): what the server
+    says it enforced, or the budget the request stated. Only without either
+    is the whole output cap the bound — thinking counts toward it."""
+    timings = response.get("timings") or {}
+    budget = timings.get("think_budget_tokens")
+    if not (isinstance(budget, int) and budget > 0):
+        budget = (payload.get("options") or {}).get("num_predict")
+    completion_tokens = int(
+        (response.get("usage") or {}).get("completion_tokens") or 0)
+    capped, stand_down = capped_thinking.detect(
+        msg,
+        budget_tokens=budget or getattr(config, "thinking_budget_tokens", None),
+        budget_message=getattr(config, "thinking_budget_message", None),
+        completion_tokens=completion_tokens,
+    )
+    return capped, stand_down, budget
+
+
 def _capped_thinking_note(msg: dict, response: dict, payload: dict,
                           config: "LoopConfig", chat_fn: "ChatFn", *,
                           iteration: int) -> Optional[str]:
@@ -159,15 +302,7 @@ def _capped_thinking_note(msg: dict, response: dict, payload: dict,
     """
     if getattr(config, "capped_thinking_enabled", True) is not True:
         return None
-    budget = (payload.get("options") or {}).get("num_predict")
-    completion_tokens = int(
-        (response.get("usage") or {}).get("completion_tokens") or 0)
-    capped, stand_down = capped_thinking.detect(
-        msg,
-        budget_tokens=budget or getattr(config, "thinking_budget_tokens", None),
-        budget_message=getattr(config, "thinking_budget_message", None),
-        completion_tokens=completion_tokens,
-    )
+    capped, stand_down, budget = _detect_capped(msg, response, payload, config)
     if capped is None:
         if stand_down not in ("turn-did-not-reason", "reasoning-within-budget"):
             log.debug("capped-thinking stood down on iter %d: %s",
@@ -197,11 +332,36 @@ def _capped_thinking_note(msg: dict, response: dict, payload: dict,
     return capped_thinking.as_thinking_block(note)
 
 
+def _notify_response(config: "LoopConfig", payload: dict,
+                     response: dict) -> None:
+    callback = getattr(config, "on_response", None)
+    if callback is None:
+        return
+    try:
+        callback(payload, response)
+    except Exception:
+        log.exception("on_response callback raised; ignored")
+
+
 def _answer_text(response: dict) -> str:
     choices = response.get("choices") or []
     if not choices:
         return ""
     return (choices[0].get("message") or {}).get("content") or ""
+
+
+def _prepare(config: "LoopConfig", payload: dict, where: str) -> None:
+    """``LoopConfig.prepare_payload`` for a call outside the loop's own
+    turn (an answer continuation, a forced report): those carry the same
+    history plus more, so they need the same compaction and output
+    allowance (bug-1101 / bug-1102)."""
+    if getattr(config, "prepare_payload", None) is None:
+        return
+    try:
+        config.prepare_payload(payload)
+    except Exception:
+        log.exception("prepare_payload raised on the %s; sending the "
+                      "payload unprepared", where)
 
 
 def _continue_truncated_answer(final: dict, payload: dict, chat_fn: ChatFn,
@@ -239,19 +399,36 @@ def _continue_truncated_answer(final: dict, payload: dict, chat_fn: ChatFn,
             "agent loop: answer truncated on iter %d (%s) — "
             "continuing (%d/%d)", iter_idx, cut.detail, n + 1, budget,
         )
-        messages = messages + [
-            {"role": "assistant", "content": "".join(parts)},
-            {"role": "user", "content": CONTINUE_ANSWER_INSTRUCTION},
-        ]
+        # The discarded-turn path (plan C4): a cut answer is usually a turn
+        # whose reasoning ran to its budget, and the continuation would
+        # otherwise reason the same ground again from nothing.
+        cut_msg = ((result.get("choices") or [{}])[0].get("message") or {})
+        note = _capped_thinking_note(cut_msg, result, payload, config, chat_fn,
+                                     iteration=iter_idx)
+        instruction = CONTINUE_ANSWER_INSTRUCTION
+        if note:
+            instruction = (CONTINUE_ANSWER_INSTRUCTION + "\n\n"
+                           + capped_thinking.as_discarded_turn_note(note))
+        # The partial so far replaces the previous continuation's pair,
+        # never joins it: appending sent part 1 twice from the second
+        # continuation on (bug-1101).
+        tail = [{"role": "assistant", "content": "".join(parts)},
+                harness_note(instruction)]
         cont_payload = dict(payload)
-        cont_payload["messages"] = messages
+        cont_payload["messages"] = messages + tail
         # Tools stay off for a continuation: the model already decided
         # it was answering, and re-offering tools invites it to restart
         # the investigation instead of finishing the sentence.
         cont_payload.pop("tools", None)
         cont_payload.pop("tool_choice", None)
+        _prepare(config, cont_payload, "answer continuation")
+        sent = cont_payload.get("messages") or []
+        if len(sent) >= 2 and sent[-2:] == tail:
+            # Keep what the budgeter compacted for the next continuation.
+            messages = list(sent[:-2])
         t0 = time.monotonic()
         result = chat_fn(cont_payload)
+        _notify_response(config, cont_payload, result)
         if on_iter is not None:
             try:
                 on_iter(iter_idx, cont_payload, result,
@@ -303,11 +480,199 @@ def merge_tools(existing: Optional[list[dict]],
     ]
 
 
+#: Every this-many repeats of a stubbed call, the real result is served
+#: again (the fork's ``unchanged-reads.ts``): a model that keeps asking
+#: may no longer have the copy the stub points at.
+RESERVE_EVERY = 4
+
+#: Calls that change something: after one, earlier results may be stale,
+#: so nothing is answered from memory any more.
+_WRITE_PREFIXES = ("write_", "edit_", "apply_", "run_", "delete_", "create_",
+                   "move_", "patch")
+
+
+def is_write_tool(name: str) -> bool:
+    return (name or "").lower().startswith(_WRITE_PREFIXES)
+
+
+def dedup_key(name: str, args: Any) -> str:
+    """``name|arguments`` with the arguments in canonical JSON, so a
+    reordered or re-spaced repeat is still the same call."""
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except (TypeError, ValueError):
+            return f"{name}|{args}"
+    try:
+        return f"{name}|{json.dumps(args, sort_keys=True, separators=(',', ':'))}"
+    except (TypeError, ValueError):
+        return f"{name}|{args}"
+
+
+LOOP_GUARD_LAST_WARNING = (
+    "This call was not run. This is your last warning: the next call the "
+    "loop guard stops ends this task. Send something different, or give "
+    "your answer with what you have.")
+
+def cap_warning_margin(cap: int, *, strict: bool = False) -> int:
+    """Turns before the cap at which a loop is told to wrap up (plan D6,
+    Cerebriline ``capWarningMargin``): a tenth of the cap, 1 to 5; at
+    least 2 under the strict profile (plan §0.7)."""
+    margin = min(5, max(1, int(cap * 0.1 + 0.5)))
+    return max(2, margin) if strict else margin
+
+
+CAP_WARNING = (
+    "[SYSTEM MESSAGE] This is turn {turn} of the {cap} this task may take. "
+    "Wrap up: finish the step you are on, then end with your answer — what "
+    "you found, with its evidence, and what remains open. If you cannot "
+    "finish in time, say exactly where you stopped.")
+
+#: Plan D6: the last turn of a loop stopped at its cap. At the cap a loop's
+#: last output is usually a tool call's preamble — "Now let me check line
+#: 90" as the report of the whole run (Cerebriline ``FINAL_REPORT_NOTE``).
+CAP_FINAL_REPORT = (
+    "[SYSTEM MESSAGE] Your turn budget is spent and your work is being "
+    "taken as it is. Do not call any tool. In this one reply, report: what "
+    "you found, with its evidence, what you verified and how, and what is "
+    "still open or unfinished — exactly where you stopped.")
+
+
+#: Plan D9: the operator asked the run to stop and synthesize what it has
+#: (Cerebriline ``wrapUpNote``). Unlike the cap, nothing went wrong.
+#: A call made after the tools were taken away is answered with this, not
+#: run (council run 6: a coder whose tools were stripped at turn 14 went
+#: on calling run_command, and every call ran, to the cap).
+TOOLS_OFF_ANSWER = (
+    "Not run: your tools are off now. Write your answer from what you "
+    "already have — what you found, with its evidence, and what is still "
+    "open.")
+TOOLS_NARROWED_ANSWER = (
+    "Not run: only {tools} is left now. Write what you still have to "
+    "write, then your answer — what you did, with its evidence, and what "
+    "is still open.")
+TOOLS_OFF_FINAL = (
+    "[SYSTEM MESSAGE] Your tools are off and calls are not run. Do not "
+    "call any tool. In this one reply, report what you found, with its "
+    "evidence, what you verified, and what is still open.")
+
+WRAP_UP_FINAL = (
+    "[SYSTEM MESSAGE] The operator is wrapping this run up: the answer is "
+    "being written from the work done so far. Do not call any tool. In this "
+    "one reply, report what you found, with its evidence, what you "
+    "verified, and what is still open — exactly where you stopped.")
+
+#: The same messages for a loop whose answer is not a findings report
+#: (``LoopConfig.deliverable``): they ask for that answer, from what the
+#: role already has. ``LOOP_GUARD_FINAL_DELIVERABLE`` and
+#: ``REASONING_LOOP_FINAL_DELIVERABLE`` sit beside their originals below.
+CAP_WARNING_DELIVERABLE = (
+    "[SYSTEM MESSAGE] This is turn {turn} of the {cap} this task may take. "
+    "Wrap up: finish the step you are on, then write {deliverable}.")
+CAP_FINAL_DELIVERABLE = (
+    "[SYSTEM MESSAGE] Your turn budget is spent. Do not call any tool. In "
+    "this one reply, write {deliverable}, from what you already have; where "
+    "something you meant to check is still unchecked, say so inside it.")
+TOOLS_OFF_ANSWER_DELIVERABLE = (
+    "Not run: your tools are off now. Write {deliverable} from what you "
+    "already have.")
+TOOLS_OFF_FINAL_DELIVERABLE = (
+    "[SYSTEM MESSAGE] Your tools are off and calls are not run. Do not "
+    "call any tool. In this one reply, write {deliverable}, from what you "
+    "already have.")
+WRAP_UP_FINAL_DELIVERABLE = (
+    "[SYSTEM MESSAGE] The operator is wrapping this run up. Do not call any "
+    "tool. In this one reply, write {deliverable}, from the work done so "
+    "far; where something is still unchecked, say so inside it.")
+
+
+def _asks_for(config: "LoopConfig", generic: str, own: str, **fmt) -> str:
+    """``generic`` (a findings report) unless the loop names its own
+    deliverable, then ``own`` asking for it."""
+    deliverable = getattr(config, "deliverable", "") or ""
+    if not deliverable:
+        return generic.format(**fmt) if fmt else generic
+    return own.format(deliverable=deliverable, **fmt)
+
+
+def _wrapping_up(config: "LoopConfig") -> bool:
+    check = getattr(config, "wrap_up_check", None)
+    if check is None:
+        return False
+    try:
+        return bool(check())
+    except Exception:
+        log.exception("wrap_up_check raised; carrying on")
+        return False
+
+
+LOOP_GUARD_FINAL = (
+    "[SYSTEM MESSAGE] The harness is ending this task: {why} Tools are off. "
+    "Write your report now from what you have already established: what "
+    "you found, with its evidence, and what is still open.")
+LOOP_GUARD_FINAL_DELIVERABLE = (
+    "[SYSTEM MESSAGE] The harness is ending this task: {why} Tools are off. "
+    "Write {deliverable} now, from what you have already established.")
+
+
+class ToolGuards:
+    """Plan D10/D14 state for one ``run_loop``: the loop tracker, the
+    mistake limit, and what fired during the current batch of calls."""
+
+    def __init__(self, config: "LoopConfig") -> None:
+        self.config = config
+        self.tracker = loop_detection.LoopTracker(
+            polling=frozenset(getattr(config, "polling_tools", ()) or ())
+            or loop_detection.POLLING_TOOL_NAMES)
+        self.mistakes = loop_detection.MistakeLimit(
+            limit=max(1, int(getattr(config, "mistake_limit",
+                                     loop_detection.MISTAKE_LIMIT))))
+        self.hard_hits = 0
+        self.stop: Optional[dict] = None
+        self.iteration = 0
+
+    def _emit(self, event: dict) -> None:
+        _emit_guard(self.config, {"iteration": self.iteration, **event})
+
+    def hard(self, name: str, args: str, verdict) -> None:
+        self.hard_hits += 1
+        call = loop_detection.describe_call(name, args)
+        action = "stop" if self.hard_hits >= 2 else "last_warning"
+        self._emit({"guard": "loop_guard", "action": action,
+                    "rule": verdict.rule, "count": verdict.count,
+                    "call": call})
+        if action == "stop" and self.stop is None:
+            self.stop = {"stop_reason": "loop_guard", "call": call,
+                         "why": f"{verdict.message} The call was {call}."}
+
+    def outcome(self, name: str, args: str, answer: str, output: str,
+                verdict) -> str:
+        failed = loop_detection.is_failed_output(answer)
+        self.tracker.note_outcome(not failed, answer)
+        if self.mistakes.note(failed) and self.stop is None:
+            n = self.mistakes.streak
+            self._emit({"guard": "mistake_limit", "action": "stop",
+                        "count": n, "call":
+                        loop_detection.describe_call(name, args)})
+            self.stop = {"stop_reason": "mistake_limit", "why": (
+                f"{n} tool calls in a row have failed, the last one "
+                f"{loop_detection.describe_call(name, args)}.")}
+        if verdict.kind == "soft":
+            self._emit({"guard": "loop_guard", "action": "warn",
+                        "rule": verdict.rule, "count": verdict.count,
+                        "call": loop_detection.describe_call(name, args)})
+            return f"{output}\n\n[SYSTEM MESSAGE] {verdict.message}"
+        return output
+
+
 def execute_tool_calls(tool_calls: list[dict], cwd: str,
                        seen: dict[str, str],
                        tool_executor: ToolExecutor,
                        *,
-                       on_tool: Optional[OnTool] = None) -> list[dict]:
+                       on_tool: Optional[OnTool] = None,
+                       repeats: Optional[dict[str, int]] = None,
+                       guards: Optional["ToolGuards"] = None,
+                       cut_off: bool = False) -> list[dict]:
     """Run each tool and return ``role: tool`` messages.
 
     Duplicate (name+args) calls within a single agent loop return a
@@ -315,10 +680,25 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
     (notably gemma4-98e) will otherwise loop on the same tool call
     dozens of times, exploding context and wall time.
 
+    Plan C5: the key is the canonical arguments; every
+    :data:`RESERVE_EVERY`-th repeat (counted in ``repeats``) serves the
+    real result again; and a call that writes clears ``seen``, because an
+    earlier result may no longer be true. ``run_loop`` also clears it on
+    compaction, when the result the stub points at was folded away.
+
     When ``on_tool`` is set, it fires once per tool call (real and
     deduped) with ``(name, args_str, output, duration_ms, error)``.
     Callback exceptions are swallowed so a misbehaving recorder
     can't crash the loop.
+
+    Plan D10/D14: with ``guards``, every call is inspected first. A soft
+    verdict rides on the result; a hard one answers the call without
+    running it. Each outcome then feeds the loop tracker and the mistake
+    limit, and what fired is left in ``guards.hits`` for ``run_loop``.
+
+    Plan D4: on a turn the output cap ended (``cut_off``), a call whose
+    arguments do not parse is answered as cut off, not run — it was not
+    written wrong, it was not finished.
     """
     results: list[dict] = []
     for tc in tool_calls:
@@ -328,15 +708,39 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
         args_str = fn.get("arguments") or "{}"
         if isinstance(args_str, dict):
             args_str = json.dumps(args_str)
-        key = f"{name}|{args_str}"
+        key = dedup_key(name, args_str)
         err: Optional[str] = None
-        if key in seen:
+        verdict = (guards.tracker.inspect(name, args_str) if guards is not None
+                   else loop_detection.OK)
+        if verdict.kind == "hard":
+            guards.hard(name, args_str, verdict)
+            output = (f"[SYSTEM MESSAGE] {verdict.message}\n\n"
+                      f"{LOOP_GUARD_LAST_WARNING}")
+            guards.tracker.pending = ""
+            if on_tool is not None:
+                try:
+                    on_tool(name, args_str, output, 0, None)
+                except Exception:
+                    log.exception("on_tool callback raised; ignored")
+            results.append({"role": "tool", "tool_call_id": tc_id,
+                            "name": name, "content": output})
+            continue
+        reserve = False
+        if key in seen and repeats is not None:
+            repeats[key] = repeats.get(key, 0) + 1
+            reserve = repeats[key] % RESERVE_EVERY == 0
+        if key in seen and not reserve:
             output = (
                 f"(duplicate: you already called {name}({args_str[:80]}). "
                 "Use that prior result and continue. Do not repeat this call.)"
             )
             dt_ms = 0
             log.info("tool %s(%s) -> DEDUP stub", name, args_str[:80])
+        elif cut_off and not _json_args(tc):
+            output = silent_turns.truncated_arguments_answer(len(args_str))
+            dt_ms = 0
+            log.info("tool %s: arguments cut off at the output cap (%d "
+                     "chars); not run", name, len(args_str))
         else:
             t0 = time.monotonic()
             try:
@@ -355,7 +759,21 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
                 "tool %s(%s) -> %d chars in %d ms",
                 name, args_str[:80], len(output), dt_ms,
             )
-            seen[key] = output
+            # A failure is not a result to reuse: stubbing its repeat as a
+            # duplicate kept a call that would now succeed on its error for
+            # the rest of the lane. The strike counter still sees repeats.
+            if loop_detection.is_failed_output(output):
+                seen.pop(key, None)
+            else:
+                seen[key] = output
+            if is_write_tool(name):
+                seen.clear()
+                if repeats is not None:
+                    repeats.clear()
+        if guards is not None:
+            # A stubbed repeat is the earlier answer again, failure included.
+            answer = seen.get(key, output)
+            output = guards.outcome(name, args_str, answer, output, verdict)
         if on_tool is not None:
             try:
                 on_tool(name, args_str, output, dt_ms, err)
@@ -368,6 +786,291 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
             "content": output,
         })
     return results
+
+
+REASONING_LOOP_NOTE = (
+    "[SYSTEM MESSAGE] Your last turn was stopped by the harness: {diagnosis} "
+    "That turn's reasoning was cut and is not carried into this request. "
+    "Do not reason through the same ground again. Take the next concrete "
+    "step instead: call a tool, or give your answer.")
+
+REASONING_LOOP_FINAL = (
+    "[SYSTEM MESSAGE] Your reasoning has looped {trips} turns in a row "
+    "({diagnosis}), so the harness is ending this task. Tools are off. "
+    "Write your report now from what you have already established: what "
+    "you found, with its evidence, and what is still open. Keep any "
+    "reasoning short.")
+REASONING_LOOP_FINAL_DELIVERABLE = (
+    "[SYSTEM MESSAGE] Your reasoning has looped {trips} turns in a row "
+    "({diagnosis}), so the harness is ending this task. Tools are off. "
+    "Write {deliverable} now, from what you have already established. "
+    "Keep any reasoning short.")
+
+
+def reasoning_loop_verdict(response: dict) -> Optional[dict]:
+    """The guard's verdict on one reply, or ``None``.
+
+    A streamed reply the reader cut carries it already. A reply that was
+    not streamed is scanned after the fact, and counts only when the
+    reasoning ate the turn — no content and no tool call: there the
+    billing already happened, but a loop that left nothing still has to
+    end the lane rather than be asked again forever."""
+    v = response.get("reasoning_loop")
+    if isinstance(v, dict) and v:
+        return v
+    choices = response.get("choices") or [{}]
+    choice = choices[0] or {}
+    if (choice.get("done_reason") or response.get("done_reason")) == rlg.DONE_REASON:
+        return {"kind": "unknown"}
+    msg = choice.get("message") or {}
+    if (msg.get("content") or "").strip() or msg.get("tool_calls"):
+        return None
+    found = rlg.scan(capped_thinking.thinking_text(msg))
+    return found.public_dict() if found is not None else None
+
+
+def _verdict_text(v: dict) -> str:
+    if v.get("kind") not in ("low-uniqueness", "line-cycle", "phrase-cycle"):
+        return "The model's reasoning collapsed into repetition."
+    return rlg.describe(rlg.Verdict(
+        kind=v["kind"], chars=int(v.get("chars") or 0),
+        sample=str(v.get("sample") or ""), period=v.get("period"),
+        cycles=v.get("cycles"), distinct=v.get("distinct")))
+
+
+def _emit_guard(config: "LoopConfig", event: dict) -> None:
+    cb = getattr(config, "on_guard", None)
+    if cb is None:
+        return
+    try:
+        cb(event)
+    except Exception:
+        log.exception("on_guard callback raised; ignored")
+
+
+#: Reasoning handed to the condenser, at most (the part before the loop).
+LOOP_NOTE_INPUT_CHARS = 20_000
+
+
+def _before_loop(thinking: str, verdict: dict) -> str:
+    """The reasoning up to the first occurrence of the repeating unit."""
+    if not thinking:
+        return ""
+    unit = str(verdict.get("sample") or "").split(" / ")[0].strip()[:60]
+    at = thinking.find(unit) if len(unit) >= 4 else -1
+    head = thinking[:at] if at >= 0 else ""
+    return head[-LOOP_NOTE_INPUT_CHARS:]
+
+
+def _reasoning_loop_note(msg: dict, payload: dict, chat_fn: "ChatFn",
+                         verdict: dict) -> Optional[str]:
+    """What the cut reasoning had settled before it looped, condensed —
+    or ``None``. The loop itself is not sent to the condenser: tens of
+    thousands of repeated characters are nothing to summarise, and a
+    condenser fed them tends to repeat them."""
+    thinking = _before_loop(capped_thinking.thinking_text(msg), verdict)
+    if len(thinking.strip()) < 200:
+        return None
+    capped = capped_thinking.CappedThinking(
+        thinking=thinking, thinking_tokens=0, budget_tokens=None,
+        evidence="reasoning-loop")
+    note, reason = capped_thinking.condense(
+        capped, chat_client=_ChatFnClient(chat_fn),
+        model=payload.get("model") or "")
+    if note is None:
+        log.info("reasoning-loop: no usable condensed note (%s)", reason)
+        return None
+    return capped_thinking.as_discarded_turn_note(
+        capped_thinking.as_thinking_block(note))
+
+
+def _recover_tool_names(tool_calls: list, payload: dict, config: "LoopConfig",
+                        iteration: int) -> list:
+    """Plan D4: a call whose name the provider mangled (an argument glued
+    on, the turn's text in front) is renamed to the offered tool it can
+    only mean, when its arguments parse; anything else is left for the
+    executor to answer as unknown."""
+    from claude_hooks import tool_args
+    offered = {(t.get("function") or {}).get("name"):
+               (t.get("function") or {}).get("parameters") or {}
+               for t in payload.get("tools") or []}
+    if not offered:
+        return tool_calls
+    out = []
+    for tc in tool_calls:
+        fn = tc.get("function") or {}
+        name = fn.get("name") or ""
+        fixed = (tool_args.recover_tool_name(name, offered)
+                 if name not in offered and _json_args(tc) else None)
+        if fixed:
+            log.info("tool name %r recovered as %r on iter %d",
+                     name[:80], fixed, iteration)
+            _emit_guard(config, {"guard": "tool_name", "action": "recover",
+                                 "iteration": iteration,
+                                 "sent": name[:200], "tool": fixed})
+            tc = {**tc, "function": {**fn, "name": fixed}}
+        out.append(tc)
+    return out
+
+
+def _unparsable_fault(exc: BaseException) -> Optional[BaseException]:
+    """The ``tool_call_unparsable`` fault in ``exc`` or what it wraps."""
+    seen = 0
+    while exc is not None and seen < 4:
+        if getattr(exc, "fault_class", None) == "tool_call_unparsable":
+            return exc
+        exc = exc.__cause__ or exc.__context__
+        seen += 1
+    return None
+
+
+class _SilentTurns:
+    """Plan D3 (standard): which silent turns are re-asked, with budgets.
+    A tool-calling turn resets the streaks; the intent nudge and the
+    non-convergence line are spent once per loop."""
+
+    def __init__(self, *, strict: bool = False) -> None:
+        self.thinking_budget = (silent_turns.THINKING_ONLY_RETRY_BUDGET_STRICT
+                                if strict else
+                                silent_turns.THINKING_ONLY_RETRY_BUDGET)
+        self.thinking = 0
+        self.parse = 0
+        self.intent = 0
+        self.rejected = 0
+        self.streak = 0
+        self.streak_chars = 0
+        self.non_convergence_spent = False
+
+    def reset(self) -> None:
+        self.thinking = self.parse = self.rejected = 0
+        self.streak = self.streak_chars = 0
+
+    def rejected_call(self, exc: BaseException) -> Optional[tuple[str, dict]]:
+        """Plan D4: ``(reminder, rejection)`` for a call the server could
+        not read, while the budget lasts; ``None`` to let the fault stand.
+        The payload is never repaired: a call cut mid-argument, patched up
+        and run, writes the fragment over the file it names."""
+        fault = _unparsable_fault(exc)
+        if fault is None:
+            return None
+        if self.rejected >= silent_turns.TOOL_CALL_REJECTED_RETRY_BUDGET:
+            return None
+        self.rejected += 1
+        rejection = getattr(fault, "rejection", None) or {}
+        return silent_turns.rejected_call_reminder(rejection), rejection
+
+    def reask(self, response: dict, msg: dict, *, tools_offered: bool,
+              had_tools: bool = False) -> Optional[tuple[str, str]]:
+        """``(kind, reminder)`` for a silent turn to ask again, or ``None``
+        to let it stand as the answer. A truncated answer is never taken:
+        the continuation owns it."""
+        if truncation.classify(response) is not None:
+            return None
+        content = msg.get("content") or ""
+        reasoning = capped_thinking.thinking_text(msg)
+        found = None
+        only = silent_turns.thinking_only(content, reasoning)
+        if only is not None:
+            if self.thinking < self.thinking_budget:
+                self.thinking += 1
+                found = (("tool_call_in_thinking",
+                          silent_turns.TOOL_CALL_IN_THINKING_REMINDER)
+                         if only and tools_offered else
+                         ("thinking_only", silent_turns.THINKING_ONLY_REMINDER
+                          if tools_offered else
+                          silent_turns.THINKING_ONLY_ANSWER_REMINDER))
+        elif tools_offered and (call := silent_turns.unparsed_tool_call(content)):
+            if self.parse < silent_turns.TOOL_CALL_PARSE_RETRY_BUDGET:
+                self.parse += 1
+                found = ("unparsed_tool_call",
+                         silent_turns.unparsed_reminder(call))
+        elif (had_tools and not tools_offered
+              and silent_turns.only_tool_call(content)):
+            # Tools stripped (force-answer) and the model wrote its next
+            # call as text: that is not a report. A loop that never had
+            # tools is not re-asked.
+            if self.parse < silent_turns.TOOL_CALL_PARSE_RETRY_BUDGET:
+                self.parse += 1
+                found = ("tool_call_without_tools",
+                         silent_turns.NO_TOOLS_REPORT_REMINDER)
+        elif tools_offered and (said := silent_turns.announced_intent(content)):
+            if self.intent < silent_turns.ANNOUNCED_INTENT_BUDGET:
+                self.intent += 1
+                found = ("announced_intent",
+                         silent_turns.announced_intent_reminder(said))
+        if found is None:
+            return None
+        if len(reasoning) >= silent_turns.NON_CONVERGENCE_MIN_REASONING_CHARS:
+            self.streak += 1
+            self.streak_chars += len(reasoning)
+        else:
+            self.streak = self.streak_chars = 0
+        if (tools_offered and not self.non_convergence_spent
+                and self.streak >= silent_turns.NON_CONVERGENCE_STREAK):
+            self.non_convergence_spent = True
+            kind, text = found
+            return kind, text + "\n\n" + silent_turns.non_convergence_note(
+                self.streak, self.streak_chars)
+        return found
+
+
+def _offered_names(payload: dict) -> set[str]:
+    return {(t.get("function") or {}).get("name") for t in
+            payload.get("tools") or [] if isinstance(t, dict)}
+
+
+def _forced_report(payload: dict, history: list, instruction: str,
+                   stop_reason: str, chat_fn: "ChatFn", config: "LoopConfig",
+                   on_iter: Optional["OnIter"], iteration: int
+                   ) -> tuple[dict, dict]:
+    """The named terminal action (plan D): one tool-less, think-off report
+    asked of the lane, marked ``_stop_reason`` / ``_failure_class``. With
+    ``LoopConfig.forced_think`` a graceful stop of a loop with a
+    deliverable keeps the payload's own thinking."""
+    payload = dict(payload)
+    payload.pop("tools", None)
+    payload.pop("tool_choice", None)
+    if not (getattr(config, "forced_think", False)
+            and getattr(config, "deliverable", "")
+            and stop_reason in GRACEFUL_STOPS):
+        payload["think"] = False
+        payload["reasoning_effort"] = "none"
+    payload["messages"] = list(history) + [
+        harness_note(instruction)]
+    # A report written as a tool call is no report: it is re-asked as the
+    # loop's own turn would be. csl-2026-10-25-0510-99f5: the planner's
+    # cap report was a grep in markup, taken as the plan, and the council
+    # ran one researcher.
+    for attempt in range(silent_turns.TOOL_CALL_PARSE_RETRY_BUDGET + 1):
+        _prepare(config, payload, "forced report")
+        t0 = time.monotonic()
+        final = chat_fn(payload)
+        _notify_response(config, payload, final)
+        if on_iter is not None:
+            try:
+                on_iter(iteration, payload, final,
+                        int((time.monotonic() - t0) * 1000))
+            except Exception:
+                log.exception("on_iter callback raised; ignored")
+        final = dict(final or {})
+        content = (((final.get("choices") or [{}])[0].get("message") or {})
+                   .get("content") or "")
+        if not silent_turns.only_tool_call(content):
+            break
+        if attempt == silent_turns.TOOL_CALL_PARSE_RETRY_BUDGET:
+            final["_stop_reason"] = stop_reason
+            final["_failure_class"] = "tool_call_unparsable"
+            return payload, final
+        _emit_guard(config, {"guard": "silent_turn", "action": "reask",
+                             "kind": "tool_call_without_tools",
+                             "iteration": iteration, "stop": stop_reason})
+        payload = dict(payload)
+        payload["messages"] = list(payload["messages"]) + [
+            {"role": "assistant", "content": content},
+            harness_note(silent_turns.NO_TOOLS_REPORT_REMINDER)]
+    final["_stop_reason"] = stop_reason
+    final["_failure_class"] = stop_reason
+    return payload, final
 
 
 def run_loop(
@@ -426,18 +1129,33 @@ def run_loop(
 
     final: dict[str, Any] = {}
     tools_stripped = False
+    cap_warned = False
     has_called_tool = False
     force_first = (config.force_first_tool_call
                    if config.tools_available else False)
     force_first_retried = False
+    result_invalid_sent = False
     seen_calls: dict[str, str] = {}
+    repeats: dict[str, int] = {}
+    compaction_gen = 0
+    loop_trips = 0
+    nudger = reasoning_repetition.RepetitionNudger()
+    guards = ToolGuards(config)
+    supervisor = struggle_supervisor.StruggleSupervisor(config.max_iterations)
+    strict = getattr(config, "guard_profile", "standard") == "strict"
+    silent = _SilentTurns(strict=strict)
+    tests_nudged = False
+    report_checked = False
+    turn_checked = False
+    tools_off_turns = 0
 
     if config.tools_available and preseed_builder is not None:
         preseed = preseed_builder(cwd)
         if preseed is not None:
-            preseed_msgs, dedup_key, dedup_content = preseed
+            preseed_msgs, preseed_key, dedup_content = preseed
             payload["messages"] = list(payload["messages"]) + preseed_msgs
-            seen_calls[dedup_key] = dedup_content
+            name, _, args = str(preseed_key).partition("|")
+            seen_calls[dedup_key(name, args)] = dedup_content
             has_called_tool = True
             log.info(
                 "preseed: injected %d synthetic message(s) (%d chars), "
@@ -450,15 +1168,67 @@ def run_loop(
     cap = config.max_tool_calls_per_turn
 
     for i in range(config.max_iterations):
+        if _wrapping_up(config):
+            # Plan D9: the turn already running finished; no new one starts.
+            _emit_guard(config, {"guard": "wrap_up", "action": "stop",
+                                 "iteration": i})
+            payload, final = _forced_report(
+                payload, payload["messages"],
+                _asks_for(config, WRAP_UP_FINAL, WRAP_UP_FINAL_DELIVERABLE),
+                "wrap_up", chat_fn, config, on_iter, i)
+            break
         if (config.tools_available and force_after > 0 and i >= force_after
                 and not tools_stripped):
             log.info(
                 "force-answer: stripping tools at iter %d (after=%d)",
                 i, force_after,
             )
-            payload.pop("tools", None)
-            payload.pop("tool_choice", None)
+            kept = [t for t in (payload.get("tools") or [])
+                    if ((t.get("function") or {}).get("name")
+                        in config.result_tools
+                        or (t.get("function") or {}).get("name")
+                        in config.keep_after_strip)]
+            if kept:
+                payload["tools"] = kept
+                payload["tool_choice"] = "auto"
+            else:
+                payload.pop("tools", None)
+                payload.pop("tool_choice", None)
             tools_stripped = True
+        # Plan D6: once per loop, a margin before the cap, say so — rather
+        # than let the cap cut the lane off mid-step.
+        if (config.tools_available and not tools_stripped and not cap_warned
+                and i > 0 and config.max_iterations - (i + 1)
+                < cap_warning_margin(config.max_iterations, strict=strict)):
+            cap_warned = True
+            text = _asks_for(config, CAP_WARNING, CAP_WARNING_DELIVERABLE,
+                             turn=i + 1, cap=config.max_iterations)
+            last = (payload.get("messages") or [None])[-1]
+            if isinstance(last, dict) and last.get("role") == "tool":
+                last["content"] = f"{last.get('content') or ''}\n\n{text}"
+            else:
+                payload["messages"] = list(payload["messages"]) + [
+                    harness_note(text)]
+            _emit_guard(config, {"guard": "iteration_cap", "action": "warn",
+                                 "iteration": i,
+                                 "cap": config.max_iterations})
+        if (config.turn_check is not None and not turn_checked and i > 0
+                and config.tools_available and not tools_stripped):
+            try:
+                note = config.turn_check(i, payload.get("messages") or [])
+            except Exception:  # noqa: BLE001 — the caller's rule
+                log.exception("turn_check raised; ignored")
+                note = None
+            if note:
+                turn_checked = not config.turn_check_repeat
+                last = (payload.get("messages") or [None])[-1]
+                if isinstance(last, dict) and last.get("role") == "tool":
+                    last["content"] = f"{last.get('content') or ''}\n\n{note}"
+                else:
+                    payload["messages"] = list(payload["messages"]) + [
+                        harness_note(note)]
+                _emit_guard(config, {"guard": "turn_check", "action": "nudge",
+                                     "iteration": i})
         if config.tools_available and not tools_stripped:
             if force_first and not has_called_tool:
                 payload["tool_choice"] = "required"
@@ -470,9 +1240,45 @@ def run_loop(
             except Exception:
                 log.exception("prepare_payload raised on iter %d; sending "
                               "the payload unprepared", i)
+            gen = max((int(m.get("_compaction_generation") or 1)
+                       for m in payload.get("messages") or []
+                       if isinstance(m, dict) and m.get("_compaction_marker")),
+                      default=0)
+            if gen > compaction_gen:
+                # The results the duplicate stub points at may be folded
+                # away: answer repeats for real again (plan C5).
+                compaction_gen = gen
+                seen_calls.clear()
+                repeats.clear()
         t_iter = time.monotonic()
-        final = chat_fn(payload)
+        try:
+            final = chat_fn(payload)
+        except Exception as exc:
+            recovered = silent.rejected_call(exc)
+            if recovered is None:
+                raise
+            # Plan D4: nothing ran and nothing changed. Whatever streamed
+            # before the call is kept; the call is asked for again.
+            reminder, rejection = recovered
+            _emit_guard(config, {
+                "guard": "silent_turn", "kind": "tool_call_unparsable",
+                "action": "reask", "iteration": i,
+                "attempt": silent.rejected,
+                "limit": silent_turns.TOOL_CALL_REJECTED_RETRY_BUDGET,
+                **({"rejection": rejection} if rejection else {}),
+                "error": str(exc)[:300]})
+            log.warning("tool call rejected as unreadable on iter %d "
+                        "(%d/%d): %s", i, silent.rejected,
+                        silent_turns.TOOL_CALL_REJECTED_RETRY_BUDGET,
+                        str(exc)[:200])
+            partial = (getattr(_unparsable_fault(exc), "partial", "")
+                       or "").strip()
+            payload["messages"] = list(payload["messages"]) + (
+                [{"role": "assistant", "content": partial}] if partial else []
+            ) + [harness_note(reminder)]
+            continue
         iter_ms = int((time.monotonic() - t_iter) * 1000)
+        _notify_response(config, payload, final)
         if on_iter is not None:
             try:
                 on_iter(i, payload, final, iter_ms)
@@ -491,6 +1297,50 @@ def run_loop(
             i, finish_reason, len(tool_calls),
             len((msg.get("content") or "")),
         )
+        verdict = reasoning_loop_verdict(final)
+        if verdict is None:
+            loop_trips = 0
+        else:
+            # Plan D1. The turn is cut: its tool calls may be half-written
+            # and its reasoning is the loop, so neither goes back. A
+            # thinking-only re-ask (force_first, truncation continuation)
+            # never applies to it.
+            loop_trips += 1
+            limit = max(1, int(config.reasoning_loop_max_trips))
+            diagnosis = _verdict_text(verdict)
+            event = {
+                "guard": "reasoning_loop", "action": (
+                    "stop" if loop_trips >= limit else "cut"),
+                "iteration": i, "trips": loop_trips, "limit": limit,
+                **verdict}
+            # The realized sampler (plan A5): loops trace back to sampling.
+            sampler = (final.get("timings") or {}).get("sampler")
+            if sampler:
+                event["sampler"] = sampler
+            _emit_guard(config, event)
+            log.warning("reasoning loop on iter %d (%d/%d): %s",
+                        i, loop_trips, limit, diagnosis)
+            partial = (msg.get("content") or "").strip()
+            history = list(payload["messages"])
+            if partial:
+                history.append({"role": "assistant", "content": partial})
+            if loop_trips >= limit:
+                payload, final = _forced_report(
+                    payload, history, _asks_for(
+                        config, REASONING_LOOP_FINAL,
+                        REASONING_LOOP_FINAL_DELIVERABLE,
+                        trips=loop_trips, diagnosis=diagnosis),
+                    "reasoning_loop", chat_fn, config, on_iter, i)
+                final["_reasoning_loop"] = verdict
+                break
+            note = _reasoning_loop_note(msg, payload, chat_fn, verdict)
+            text = REASONING_LOOP_NOTE.format(diagnosis=diagnosis)
+            if note:
+                text += "\n\n" + note
+            payload = dict(payload)
+            payload["messages"] = history + [
+                harness_note(text)]
+            continue
         if finish_reason != "tool_calls" or not tool_calls:
             if (force_first and not has_called_tool
                     and config.tools_available
@@ -504,19 +1354,73 @@ def run_loop(
                 )
                 force_first_retried = True
                 prior_content = msg.get("content") or ""
+                retry = config.force_first_retry_message
+                note = _capped_thinking_note(msg, final, payload, config,
+                                             chat_fn, iteration=i)
+                if note:
+                    retry += ("\n\n"
+                              + capped_thinking.as_discarded_turn_note(note))
                 payload = dict(payload)
                 payload["messages"] = list(payload["messages"]) + [
                     {"role": "assistant", "content": prior_content},
-                    {
-                        "role": "user",
-                        "content": config.force_first_retry_message,
-                    },
+                    harness_note(retry),
                 ]
                 continue
+            reminder = silent.reask(final, msg, tools_offered=bool(
+                payload.get("tools")), had_tools=config.tools_available)
+            if reminder is not None:
+                kind, text = reminder
+                _emit_guard(config, {"guard": "silent_turn", "action": "reask",
+                                     "kind": kind, "iteration": i})
+                payload = dict(payload)
+                history = list(payload["messages"])
+                if (msg.get("content") or "").strip():
+                    history.append({"role": "assistant",
+                                    "content": msg["content"]})
+                payload["messages"] = history + [
+                    harness_note(text)]
+                continue
+            # A lane about to report with test files it wrote that never
+            # ran green is asked once to run them (council run 3).
+            if not tests_nudged and "run_command" in _offered_names(payload):
+                unrun = test_reruns.unrun_tests(payload.get("messages") or [])
+                if unrun and truncation.classify(final) is None:
+                    tests_nudged = True
+                    _emit_guard(config, {"guard": "unrun_tests",
+                                         "action": "nudge", "iteration": i,
+                                         "files": sorted(unrun)})
+                    payload = dict(payload)
+                    history = list(payload["messages"])
+                    if (msg.get("content") or "").strip():
+                        history.append({"role": "assistant",
+                                        "content": msg["content"]})
+                    payload["messages"] = history + [
+                        harness_note(test_reruns.nudge(unrun))]
+                    continue
+            if (config.report_check is not None and not report_checked
+                    and truncation.classify(final) is None):
+                report_checked = True
+                try:
+                    note = config.report_check(payload.get("messages") or [])
+                except Exception:  # noqa: BLE001 — the caller's rule
+                    log.exception("report_check raised; report stands")
+                    note = None
+                if note:
+                    _emit_guard(config, {"guard": "report_check",
+                                         "action": "nudge", "iteration": i})
+                    payload = dict(payload)
+                    history = list(payload["messages"])
+                    if (msg.get("content") or "").strip():
+                        history.append({"role": "assistant",
+                                        "content": msg["content"]})
+                    payload["messages"] = history + [harness_note(note)]
+                    continue
             final = _continue_truncated_answer(
                 final, payload, chat_fn, config, on_iter, i)
             break
         has_called_tool = True
+        silent.reset()
+        tool_calls = _recover_tool_names(tool_calls, payload, config, i)
 
         # Collapse identical tool_calls within one assistant turn, then
         # cap. Preserves distinct calls; suppresses gemma-style bursts.
@@ -542,6 +1446,33 @@ def run_loop(
             )
         tool_calls = uniq
 
+        results_called = [tc for tc in tool_calls
+                          if ((tc.get("function") or {}).get("name")
+                              in config.result_tools)]
+        if results_called and len(tool_calls) == 1:
+            tc = results_called[0]
+            if _json_args(tc):
+                final = dict(final)
+                final["_result_call"] = {
+                    "name": (tc.get("function") or {}).get("name"),
+                    "arguments": (tc.get("function") or {}).get("arguments"),
+                }
+                break
+            if not result_invalid_sent:
+                result_invalid_sent = True
+                cut = (choice.get("done_reason") or final.get("done_reason")) == "length"
+                name = (tc.get("function") or {}).get("name") or ""
+                payload["messages"] = list(payload["messages"]) + [
+                    {"role": "assistant", "content": None, "tool_calls": [tc]},
+                    {"role": "tool", "tool_call_id": tc.get("id") or "",
+                     "name": name,
+                     "content": config.result_invalid_message.format(
+                         name=name, what="cut off at the output limit" if cut
+                         else "not valid JSON")},
+                ]
+                continue
+            break
+
         clean_msg = dict(msg)
         clean_msg["content"] = None
         clean_msg["tool_calls"] = tool_calls
@@ -556,19 +1487,133 @@ def run_loop(
         # its place; otherwise it goes, as before.
         note = _capped_thinking_note(
             msg, final, payload, config, chat_fn, iteration=i)
-        for k in capped_thinking.token_calib.REASONING_KEYS:
-            clean_msg.pop(k, None)
         if note:
+            for k in capped_thinking.token_calib.REASONING_KEYS:
+                clean_msg.pop(k, None)
             clean_msg["content"] = note
+        else:
+            clean_msg = reasoning_replay.apply(
+                clean_msg, getattr(config, "reasoning_replay", "none"))
         payload["messages"] = list(payload["messages"]) + [clean_msg]
-        payload["messages"].extend(
-            execute_tool_calls(
-                tool_calls, cwd, seen_calls, tool_executor,
-                on_tool=on_tool,
-            )
+        runnable = [tc for tc in tool_calls if tc not in results_called]
+        kept_calls = [tc for tc in runnable
+                      if tools_stripped and ((tc.get("function") or {})
+                                             .get("name") in config.keep_after_strip)]
+        if kept_calls:
+            # The kept tools run; the rest are answered as off.
+            payload["messages"].extend(
+                {"role": "tool", "tool_call_id": tc.get("id") or "",
+                 "name": (tc.get("function") or {}).get("name") or "",
+                 "content": TOOLS_NARROWED_ANSWER.format(
+                     tools=", ".join(config.keep_after_strip))}
+                for tc in runnable if tc not in kept_calls)
+            runnable = kept_calls
+        elif tools_stripped and runnable:
+            tools_off_turns += 1
+            _emit_guard(config, {"guard": "tools_off", "iteration": i,
+                                 "action": ("stop" if tools_off_turns >= 2
+                                            else "refuse"),
+                                 "calls": len(runnable)})
+            payload["messages"].extend(
+                {"role": "tool", "tool_call_id": tc.get("id") or "",
+                 "name": (tc.get("function") or {}).get("name") or "",
+                 "content": _asks_for(config, TOOLS_OFF_ANSWER,
+                                      TOOLS_OFF_ANSWER_DELIVERABLE)}
+                for tc in tool_calls)
+            if tools_off_turns >= 2:
+                payload, final = _forced_report(
+                    payload, payload["messages"],
+                    _asks_for(config, TOOLS_OFF_FINAL,
+                              TOOLS_OFF_FINAL_DELIVERABLE),
+                    "tools_off", chat_fn, config, on_iter, i)
+                break
+            continue
+        guards.iteration = i
+        batch = execute_tool_calls(
+            runnable, cwd, seen_calls, tool_executor,
+            on_tool=on_tool, repeats=repeats, guards=guards,
+            cut_off=(choice.get("done_reason") or final.get("done_reason")
+                     or finish_reason) == "length",
         )
+        payload["messages"].extend(batch)
+        for tc in results_called:
+            name = (tc.get("function") or {}).get("name") or ""
+            payload["messages"].append({
+                "role": "tool", "tool_call_id": tc.get("id") or "",
+                "name": name,
+                "content": config.result_not_alone_message.format(name=name),
+            })
+        # Plan D1: a turn that re-derives the same conclusion paragraph
+        # after paragraph while still calling tools reads as productive to
+        # every turn-level check. One rationed nudge; it never cuts.
+        if guards.stop is not None:
+            # Plan D10/D14: the second hard loop verdict, or the mistake
+            # limit. The batch's results stay in the history the report
+            # is asked from.
+            stop = guards.stop
+            payload, final = _forced_report(
+                payload, payload["messages"],
+                _asks_for(config, LOOP_GUARD_FINAL,
+                          LOOP_GUARD_FINAL_DELIVERABLE, why=stop["why"]),
+                stop["stop_reason"], chat_fn, config, on_iter, i)
+            if stop.get("call"):
+                final["_loop_call"] = stop["call"]
+            break
+        # Plan D2: the struggle supervisor. Its nudge rides on the turn's
+        # last tool result, which is what the model reads next.
+        spent = _detect_capped(msg, final, payload, config)[0] is not None
+        failed = [loop_detection.is_failed_output(m.get("content") or "")
+                  for m in batch]
+        move = supervisor.close_iteration(
+            i, budget_spent=spent, failures=failed,
+            calls=[(f"{(tc.get('function') or {}).get('name') or ''}:"
+                    + loop_detection.call_signature(
+                        (tc.get("function") or {}).get("arguments")),
+                    m.get("content") or "", bad)
+                   for tc, m, bad in zip(runnable, batch, failed)])
+        if move is not None:
+            action, why = move
+            _emit_guard(config, {"guard": "struggle", "action": action,
+                                 "reason": why, "iteration": i,
+                                 "budget_turns": len(supervisor.spent)})
+            if action == "stop":
+                payload, final = _forced_report(
+                    payload, payload["messages"], _asks_for(
+                        config, LOOP_GUARD_FINAL, LOOP_GUARD_FINAL_DELIVERABLE,
+                        why=struggle_supervisor.describe_stop(
+                            why, supervisor.spent_after_nudge())),
+                    "struggle", chat_fn, config, on_iter, i)
+                break
+            tool_msgs = [m for m in payload["messages"] if m.get("role") == "tool"]
+            text = struggle_supervisor.describe_nudge(why)
+            if tool_msgs:
+                tool_msgs[-1]["content"] = (
+                    f"{tool_msgs[-1].get('content') or ''}\n\n{text}")
+            else:
+                payload["messages"].append(
+                    harness_note(text))
+        nudge = nudger.inspect(capped_thinking.thinking_text(msg), i)
+        if nudge:
+            payload["messages"].append(
+                harness_note(nudge))
+            _emit_guard(config, {"guard": "reasoning_repetition",
+                                 "action": "nudge", "iteration": i,
+                                 **nudger.last.public_dict()})
     else:
         log.warning("agent loop hit max_iterations=%d", config.max_iterations)
+        # Plan D6: the cap ended a turn that was still calling tools. Its
+        # report is asked for once, tools off, rather than returned as a
+        # tool-call turn with no text.
+        last_msg = ((final or {}).get("choices") or [{}])[0].get("message") or {}
+        if config.max_iterations > 0 and last_msg.get("tool_calls"):
+            _emit_guard(config, {"guard": "iteration_cap", "action": "stop",
+                                 "iteration": config.max_iterations - 1,
+                                 "cap": config.max_iterations})
+            payload, final = _forced_report(
+                payload, payload["messages"],
+                _asks_for(config, CAP_FINAL_REPORT, CAP_FINAL_DELIVERABLE),
+                "iteration_cap", chat_fn, config, on_iter,
+                config.max_iterations)
     # Attach the final conversation transcript to the response so
     # callers that need to follow up (e.g., the consultants
     # researcher fallback when the loop ends with empty text) can
@@ -576,4 +1621,12 @@ def run_loop(
     # Existing callers (caliber, advisor) ignore the extra key.
     final = dict(final or {})
     final.setdefault("_loop_messages", list(payload.get("messages") or []))
+    # A loop whose last word is a tool call written as text has no
+    # answer, whatever else ended it: say so, so a caller never takes
+    # the markup for one (plan D7's stop / failure class).
+    last = ((final.get("choices") or [{}])[0].get("message") or {})
+    if (not final.get("_stop_reason") and not last.get("tool_calls")
+            and silent_turns.only_tool_call(last.get("content") or "")):
+        final["_stop_reason"] = "no_report"
+        final["_failure_class"] = "tool_call_unparsable"
     return final

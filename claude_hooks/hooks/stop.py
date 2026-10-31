@@ -174,6 +174,23 @@ def _with_task_nudge(result: Optional[dict], event: dict, config: dict,
     return out
 
 
+def _host_kept_quiet(event: dict, config: dict) -> bool:
+    """Another session keeps this host quiet (a performance measurement):
+    background work such as a reindex waits for a later turn."""
+    try:
+        from claude_hooks.resources import api
+        from claude_hooks.resources.hook import enabled
+        if not enabled(config):
+            return False
+        holder = api.quiet_holder(session_id=event.get("session_id") or "")
+    except Exception:
+        return False
+    if holder is not None:
+        log.info("host kept quiet by %s (%s): background reindex skipped",
+                 holder.owner, holder.reason)
+    return holder is not None
+
+
 def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[dict]:
     hook_cfg = (config.get("hooks") or {}).get("stop") or {}
     if not hook_cfg.get("enabled", True):
@@ -184,6 +201,9 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
 
     turn_modified = _turn_modified_files(transcript)
 
+    from claude_hooks.resources.hook import touch as _touch_resources
+    _touch_resources(event=event, config=config)
+
     # Claudemem reindex: if the turn touched files and the project has
     # a claudemem index, spawn a background reindex. Runs detached so
     # it never adds latency to the hook itself.
@@ -192,6 +212,7 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         reindex_cfg.get("enabled", True)
         and reindex_cfg.get("check_on_stop", True)
         and turn_modified
+        and not _host_kept_quiet(event, config)
     ):
         try:
             from claude_hooks.claudemem_reindex import reindex_if_dirty_async

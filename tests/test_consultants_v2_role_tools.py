@@ -348,7 +348,7 @@ class TestToolAddendum(unittest.TestCase):
         and the synthesizer both see."""
         d = council._ROLE_TOOL_DIRECTIVE["critic"]
         self.assertIn("CORRECTIONS:", d)
-        self.assertIn("RESEARCHER REPORT (round N)", d)
+        self.assertIn("RESEARCHER REPORT N", d)
         self.assertIn("report N: claimed", d)
 
     def test_a_correction_does_not_trigger_another_research_round(self):
@@ -419,7 +419,9 @@ class TestToolAddendum(unittest.TestCase):
         about tools it will not be offered."""
         chat = FakeChat()
         council._role_turn(chat, "m", [{"role": "system", "content": "SYS"}])
-        self.assertEqual(chat.payloads[0]["messages"][0]["content"], "SYS")
+        sys_text = chat.payloads[0]["messages"][0]["content"]
+        self.assertTrue(sys_text.startswith("SYS"))
+        self.assertNotIn("TOOLS AVAILABLE TO YOU", sys_text)
 
     def test_tooled_role_payload_carries_it(self):
         captured = {}
@@ -445,7 +447,9 @@ class TestToolAddendum(unittest.TestCase):
         council._role_turn(chat, "m", [{"role": "system", "content": "SYS"}],
                            tool_specs=_spec(), tool_executor=lambda *a: "",
                            loop_runner=boom, role="critic")
-        self.assertEqual(chat.payloads[0]["messages"][0]["content"], "SYS")
+        sys_text = chat.payloads[0]["messages"][0]["content"]
+        self.assertTrue(sys_text.startswith("SYS"))
+        self.assertNotIn("TOOLS AVAILABLE TO YOU", sys_text)
 
 
 class TestExtraToolsNote(unittest.TestCase):

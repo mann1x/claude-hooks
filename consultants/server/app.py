@@ -128,6 +128,11 @@ class SessionState:
     # as ``extra_roots``. Empty list when display info wasn't
     # captured at session-creation time (legacy sessions on disk).
     extra_roots_display: list[str] = field(default_factory=list)
+    # Plan E5: this run's sandboxed shell ``{"mode", "net", "since"}``,
+    # or None (off). ``shell_banked`` (root only) is what later
+    # follow-ups inherit until one turns it off.
+    shell: Optional[dict] = None
+    shell_banked: Optional[dict] = None
     # Display form of the primary cwd (pre-realpath) — used only for
     # log rendering, never for filesystem access. ``cwd`` itself
     # remains the original path the runner received (so subsequent
@@ -147,6 +152,9 @@ class SessionState:
     # The follow-up runner reuses these to skip the /api/show probe
     # and the upstream warmup.
     _chat_clients: Optional[dict] = field(default=None, repr=False)
+    # Plan F3: the run's PolyKV manager (runtime-only; settled in
+    # ``_run_with_state``'s ``finally``).
+    _polykv: Optional[Any] = field(default=None, repr=False)
     # Task #111: per-model raw ChatClients for the coder role's
     # failover chain. Same warm-reuse pattern as ``_chat_clients``
     # but keyed by Ollama model tag (not role). ``None`` on parents
@@ -237,6 +245,9 @@ class SessionState:
     # path for the WHOLE time the runner owns the graph. Set + cleared by
     # the runner under ``_inject_lock``.
     _adversary_checkpoint_active: bool = field(default=False, repr=False)
+    # Set once a checkpoint brief bought its one extra research round
+    # (``routed=rewound_extra_round``); a second brief cannot buy another.
+    _checkpoint_round_granted: bool = field(default=False, repr=False)
     # M-A approval channel: parked ``ask_human`` tool calls for this
     # session. Its own lock lives inside the broker — the runner's lane
     # threads open + wait, the POST /tool-ack handler resolves, exactly
@@ -523,6 +534,20 @@ DEFAULT_IDLE_TIMEOUT_S = 1800.0      # 30 minutes
 DEFAULT_REAPER_INTERVAL_S = 60.0     # check every minute
 
 
+def _apply_guards_override(cfg, body: dict) -> None:
+    """Plan §0.7: a run's ``guards`` sets the nudge profile for that run
+    (every role); 400 on a value that is not a profile."""
+    want = body.get("guards")
+    if not want:
+        return
+    from fastapi import HTTPException
+    try:
+        cfg.guards.profile = cc.check_guard_profile(want)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    cfg.guards.roles = {}
+
+
 def create_app(*, run_council: Optional[RunCouncilFn] = None,
                max_workers: int = 4,
                idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S,
@@ -627,6 +652,15 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         log.exception(
             "register_control_routes failed; M9 endpoints unavailable",
         )
+    # The council dashboard (GET /dashboard + /v1/dashboard/*), read-only
+    # over the councils' own records and the host-wide council index.
+    try:
+        from consultants.server.dashboard_routes import (
+            register_dashboard_routes,
+        )
+        register_dashboard_routes(app)
+    except Exception:  # pragma: no cover — defensive
+        log.exception("register_dashboard_routes failed; no dashboard")
 
     # ----------------------- health ------------------------------ #
     @app.get("/v1/health")
@@ -675,6 +709,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                             f"valid: {sorted(cc.EFFORT_BUDGETS)}"),
                 )
             cfg.effort = effort_override
+        _apply_guards_override(cfg, body)
 
         err = cc.validate_pipeline(cfg)
         if err:
@@ -717,6 +752,16 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             discovered_display[1:]
         )
 
+        from consultants.server import shell_enable
+        try:
+            shell = shell_enable.resolve_ask(cfg, body.get("shell"))
+        except shell_enable.ShellRequestError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from None
+        shell_err = shell_enable.preflight_error(cfg, shell, cwd=str(cwd_path))
+        if shell_err:
+            raise HTTPException(status_code=409, detail=shell_err)
+        shell_enable.prewarm(shell, cwd=str(cwd_path))
+
         sid = _new_sid()
         state = SessionState(
             sid=sid,
@@ -735,6 +780,10 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         state.root_sid = sid
         state.max_followups = cfg.max_followups
         state.consultancy_status = CONSULTANCY_IN_PROGRESS
+        if shell:
+            state.shell = shell
+            if shell.get("since") == "the ask":
+                state.shell_banked = shell
         with app.state.sessions_lock:
             app.state.sessions[sid] = state
         _persist_consultancy(state)
@@ -765,6 +814,12 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                 status_code=400,
                 detail="trace must be a bool",
             )
+        # Plan G5: what the asking assistant already tried, verbatim.
+        from consultants.engine.council import parse_tried
+        try:
+            tried = parse_tried(body.get("tried"))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from None
 
         runner_input = {
             "config": cfg,
@@ -780,6 +835,10 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             # tool sandbox still confines every read to the roots.
             "skip_preflight": bool(body.get("skip_preflight")),
         }
+        if shell:
+            runner_input["shell"] = shell
+        if tried:
+            runner_input["tried"] = tried
 
         inflight.register({
             "sid": sid, "kind": "consult",
@@ -791,6 +850,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             "skip_preflight": bool(body.get("skip_preflight")),
             "root_sid": sid, "parent_sid": None,
             "started_at": state.started_at,
+            **({"shell": shell} if shell else {}),
         })
         # Hand off to the executor. The runner mutates ``state`` and
         # writes the on-disk artifacts; we just track completion.
@@ -829,6 +889,60 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
     # planning + fan-out and the warm clients skip /api/show.
     @app.post("/v1/consult/{sid}/follow-up")
     def follow_up(sid: str, body: dict) -> dict:
+        return _start_follow_up(sid, body)
+
+    @app.post("/v1/consult/{sid}/retry-lanes")
+    def retry_lanes_route(sid: str, body: Optional[dict] = None) -> dict:
+        """Plan D9: run the parent's failed researcher lanes again — those
+        whose first-round exit (D7) is ``infra`` / ``model_missing`` /
+        ``context_overflow`` — asked what they were asked, then answer
+        the parent's question again from all of its research. Runs as a
+        child session (like a follow-up, without counting against the
+        follow-up cap). ``lanes`` narrows it to some of them."""
+        from consultants.engine import retry_lanes as rl
+        body = body or {}
+        parent = _resolve_parent_for_follow_up(app, sid, body.get("cwd"))
+        db = (storage.session_dir(Path(parent.cwd), sid)
+              / storage.TRANSCRIPT_DB_FILENAME)
+        stops = rl.lane_stops(db)
+        lanes = rl.failed_lanes(stops)
+        wanted = body.get("lanes")
+        if wanted is not None:
+            if not isinstance(wanted, list) or not all(
+                    isinstance(x, int) for x in wanted):
+                raise HTTPException(400, "lanes must be a list of integers")
+            refused = sorted(set(wanted) - set(lanes))
+            if refused:
+                raise HTTPException(400, (
+                    f"lanes {refused} did not fail in a retryable way; "
+                    f"retryable: {lanes}"))
+            lanes = sorted(set(wanted))
+        if not lanes:
+            return {"ok": False, "reason": "no_retryable_lanes",
+                    "sid": None, "parent_sid": sid,
+                    "retryable_classes": sorted(rl.RETRYABLE_CLASSES),
+                    "lanes": [r for r in stops if r.get("role") == "researcher"]}
+        cfg = cc.load_config(Path(parent.cwd))
+        cfg.effort = body.get("effort") or parent.effort
+        extras = (list(cfg.roles["researcher"].extra_models or [])
+                  if cc.extras_active(cfg.effort) else [])
+        primary = ((parent.models or {}).get("researcher")
+                   or cfg.roles["researcher"].model)
+        specs = rl.retry_specs(
+            lanes, plan=parent.plan or "",
+            plan_items=getattr(parent, "plan_items", None),
+            models_per_lane=[primary] + extras)
+        if not specs:
+            raise HTTPException(409, (
+                "the failed lanes could not be rebuilt from the parent's "
+                "plan (its items or the fan-out width changed)"))
+        out = _start_follow_up(sid, {**body, "message": parent.question},
+                               retry_lanes=specs)
+        out["retry_lanes"] = specs
+        return out
+
+    def _start_follow_up(sid: str, body: dict, *,
+                         retry_lanes: Optional[list] = None) -> dict:
         if app.state.run_follow_up is None:
             raise HTTPException(
                 status_code=503,
@@ -861,6 +975,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                         f"valid: {sorted(cc.EFFORT_BUDGETS)}"),
             )
         cfg.effort = effort_override
+        _apply_guards_override(cfg, body)
 
         # ---- consultancy review-loop cap enforcement --------------- #
         # Resolve the consultancy root (the chain anchor), then enforce
@@ -885,7 +1000,10 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             except (TypeError, ValueError):
                 allow_extra = 0
         effective_cap = croot.max_followups + croot.extra_granted
-        if croot.followup_count >= effective_cap and allow_extra <= 0:
+        # A retry-lanes run repairs the parent rather than iterating on
+        # it, so the follow-up cap does not apply to it (plan D9).
+        if (not retry_lanes and croot.followup_count >= effective_cap
+                and allow_extra <= 0):
             croot.consultancy_status = CONSULTANCY_AWAITING
             _persist_consultancy(croot)
             return {
@@ -902,6 +1020,18 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                 status_code=400,
                 detail="trace must be a bool",
             )
+
+        from consultants.server import shell_enable
+        try:
+            shell, shell_banked = shell_enable.resolve_follow_up(
+                cfg, body.get("shell"), croot.shell_banked,
+                croot.followup_count + (0 if retry_lanes else 1))
+        except shell_enable.ShellRequestError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from None
+        shell_err = shell_enable.preflight_error(cfg, shell, cwd=str(cwd_path))
+        if shell_err:
+            raise HTTPException(status_code=409, detail=shell_err)
+        shell_enable.prewarm(shell, cwd=str(cwd_path))
 
         child_sid = _new_sid()
         # Child session inherits cwd + topology from parent. Progress
@@ -970,6 +1100,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             # the child surfaces the full set.
             extra_roots=merged_extra,
             extra_roots_display=merged_display,
+            shell=shell,
         )
         with app.state.sessions_lock:
             app.state.sessions[child_sid] = child
@@ -981,8 +1112,10 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         # happens when this run completes). Persist the sidecar.
         if allow_extra > 0:
             croot.extra_granted += allow_extra
-        croot.followup_count += 1
+        if not retry_lanes:
+            croot.followup_count += 1
         croot.consultancy_children.append(child_sid)
+        croot.shell_banked = shell_banked
         croot.consultancy_status = CONSULTANCY_IN_PROGRESS
         croot.bump_activity()
         _persist_consultancy(croot)
@@ -1022,6 +1155,10 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             # tool sandbox still confines every read to the roots.
             "skip_preflight": bool(body.get("skip_preflight")),
         }
+        if retry_lanes:
+            runner_input["retry_lanes"] = list(retry_lanes)
+        if shell:
+            runner_input["shell"] = shell
         inflight.register({
             "sid": child_sid, "kind": "follow-up",
             "cwd": parent.cwd,
@@ -1033,6 +1170,8 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             "skip_preflight": bool(body.get("skip_preflight")),
             "root_sid": croot.sid, "parent_sid": sid,
             "started_at": child.started_at,
+            **({"retry_lanes": list(retry_lanes)} if retry_lanes else {}),
+            **({"shell": shell} if shell else {}),
         })
         _submit_run(app, app.state.run_follow_up, child, runner_input)
 
@@ -1070,6 +1209,9 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         root.consultancy_status = CONSULTANCY_ACCEPTED
         root.bump_activity()
         _persist_consultancy(root)
+        # Plan F3: what the consultancy held for a follow-up goes now.
+        from consultants.engine import polykv
+        polykv.release_held(root.sid, reason="accepted")
         return {
             "ok": True,
             "sid": sid,
@@ -1275,11 +1417,17 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                 status_code=404,
                 detail=f"artifacts missing for sid {sid}",
             )
-        return _attach_consultancy(app, sid, {
+        meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+        body = {
             "sid": sid,
             "summary_markdown": summary_path.read_text(encoding="utf-8"),
-            "metadata": json.loads(metadata_path.read_text(encoding="utf-8")),
-        }, cwd_hint=str(cwd))
+            "metadata": meta,
+        }
+        if isinstance(meta, dict) and meta.get("decision"):
+            # Plan H: the decision model's recommendation, for the
+            # review loop. Absent when the seam is off.
+            body["decision"] = meta["decision"]
+        return _attach_consultancy(app, sid, body, cwd_hint=str(cwd))
 
     # ----------------------- list -------------------------------- #
     @app.get("/v1/sessions")
@@ -1309,11 +1457,50 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         return _config_snapshot(cfg)
 
     if resume_inflight:
+        # Plan E4: write views of councils the last engine died under are
+        # frozen to patches before anything resumes (resuming ones keep
+        # theirs).
+        sweep_sandbox_views(app, force=True)
+        # Plan F3: holds a previous engine left keep their layers pinned
+        # on the engines; nothing in this process will release them.
+        try:
+            from consultants.engine import polykv
+            polykv.sweep_held()
+        except Exception:  # pragma: no cover — defensive
+            log.exception("releasing stale PolyKV holds failed")
         try:
             resume_inflight_councils(app)
         except Exception:  # pragma: no cover — defensive
             log.exception("resuming in-flight councils failed")
     return app
+
+
+_SANDBOX_SWEEP_EVERY_S = 3600.0
+
+
+def sweep_sandbox_views(app, *, force: bool = False) -> list[str]:
+    """Freeze the write views of councils that are not running and
+    expire held patches past ``[tools.shell] held_ttl_days``. Hourly from
+    the reaper, and at startup. Never raises."""
+    now = time.time()
+    last = getattr(app.state, "_sandbox_swept_at", 0.0)
+    if not force and now - last < _SANDBOX_SWEEP_EVERY_S:
+        return []
+    app.state._sandbox_swept_at = now
+    try:
+        from claude_hooks.sandbox import views
+        live = {r.get("sid") for r in inflight.load()}
+        with app.state.sessions_lock:
+            live |= {sid for sid, s in app.state.sessions.items()
+                     if s.status == "running"}
+        ttl = cc.load_config().tools.shell.held_ttl_days
+        did = views.sweep(live_sids=live, held_ttl_days=ttl, now=now)
+        for d in did:
+            log.info("sandbox views: %s", d)
+        return did
+    except Exception:  # pragma: no cover — defensive
+        log.exception("sandbox view sweep crashed")
+        return []
 
 
 # ----------------------- durable runs ---------------------------- #
@@ -1359,11 +1546,23 @@ def _settle_inflight(state: "SessionState") -> None:
     for human review (``review_before_synthesis``): its graph is waiting
     for ``/resume`` and the checkpoint is what that resumes from.
     """
+    try:
+        from consultants.server import council_index
+        council_index.finish(state.sid, state.status or "unknown")
+    except Exception:  # pragma: no cover — defensive
+        log.exception("council index: could not settle %s", state.sid)
     if state.status == "suspended":
         inflight.update(state.sid, state="suspended",
                         suspended_at=time.time())
         return
     inflight.remove(state.sid)
+    # Directories the run created and never used (a coder lane that
+    # wrote nothing); the records it did write are left alone.
+    try:
+        from consultants.server.session_gc import prune_empty, sessions_root
+        prune_empty(sessions_root(state.cwd) / state.sid)
+    except Exception:  # pragma: no cover — defensive
+        log.exception("empty-dir prune failed for %s", state.sid)
     compiled = getattr(state, "_compiled", None)
     parked = False
     if compiled is not None:
@@ -1419,11 +1618,22 @@ def suspend_running_councils(app, grace_s: Optional[float] = None) -> int:
         except Exception:
             pass
     left = [sid for sid, fut in futures.items() if not fut.done()]
+    by_sid = {s.sid: s for s in running}
     for sid in left:
         # Never reached a boundary; the record says running, which the
         # next engine treats exactly like suspended.
         inflight.update(sid, state="interrupted",
                         suspended_at=time.time())
+        # Its runner's finally never runs, so its PolyKV snapshot is
+        # written here: the resume takes back the pools this process
+        # pinned instead of leaving them on the engine
+        # (csl-2026-10-25-0559-4d81 was still inside the researcher
+        # node at the end of the grace).
+        s = by_sid.get(sid)
+        if s is not None and getattr(s, "_polykv", None) is not None:
+            from consultants.engine import polykv
+            polykv.settle_run(sid, cwd=s.cwd, status="suspended")
+            s._polykv = None
     if left:
         log.warning("engine shutdown: %d council(s) still inside a node "
                     "after %.0fs (%s); they resume from their last "
@@ -1454,6 +1664,7 @@ def _session_from_record(rec: dict, cfg) -> "SessionState":
         root_sid=rec.get("root_sid") or rec["sid"],
         extra_roots=list(rec.get("extra_roots") or []),
         extra_roots_display=list(rec.get("extra_roots_display") or []),
+        shell=rec.get("shell") or None,
     )
     if state.root_sid == state.sid:
         state.max_followups = cfg.max_followups
@@ -1492,6 +1703,25 @@ def resume_inflight_councils(app) -> list[str]:
     return resumed
 
 
+def _settle_unresumed(rec: dict, cwd: Path, status: str) -> None:
+    """Drop an in-flight record the engine will not resume, its
+    checkpoint with it, and index the run as ``status``."""
+    sid = rec.get("sid") or ""
+    inflight.remove(sid)
+    from consultants.engine.checkpointer import discard_sqlite_checkpoint
+    discard_sqlite_checkpoint(cwd, sid)
+    try:
+        sessions_index.append(cwd, sessions_index.SessionEntry(
+            session_id=sid,
+            created=time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(
+                float(rec.get("started_at") or time.time()))),
+            question=rec.get("question") or "",
+            topology="council", effort=rec.get("effort") or "",
+            status=status, duration_seconds=0.0))
+    except Exception:  # pragma: no cover
+        pass
+
+
 def _resume_one(app, rec: dict) -> bool:
     sid = rec.get("sid")
     cwd = Path(rec.get("cwd") or "")
@@ -1505,22 +1735,17 @@ def _resume_one(app, rec: dict) -> bool:
         return False
     if sid in app.state.sessions:
         return False
+    if isinstance(rec.get("cancel"), dict):
+        # The previous engine was asked to cancel this run: a cancelled
+        # run has no answer, so it is settled, never resumed.
+        log.warning("council %s was cancelled before the restart (%s); "
+                    "not resuming it", sid, rec["cancel"].get("reason"))
+        _settle_unresumed(rec, cwd, "cancelled")
+        return False
     if int(rec.get("resumes") or 0) >= inflight.MAX_RESUMES:
         log.error("council %s was already resumed %d times; giving up on "
                   "it", sid, rec.get("resumes"))
-        inflight.remove(sid)
-        from consultants.engine.checkpointer import discard_sqlite_checkpoint
-        discard_sqlite_checkpoint(cwd, sid)
-        try:
-            sessions_index.append(cwd, sessions_index.SessionEntry(
-                session_id=sid,
-                created=time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(
-                    float(rec.get("started_at") or time.time()))),
-                question=rec.get("question") or "",
-                topology="council", effort=rec.get("effort") or "",
-                status="failed", duration_seconds=0.0))
-        except Exception:  # pragma: no cover
-            pass
+        _settle_unresumed(rec, cwd, "failed")
         return False
 
     cfg = cc.load_config(cwd)
@@ -1538,14 +1763,26 @@ def _resume_one(app, rec: dict) -> bool:
         "skip_preflight": bool(rec.get("skip_preflight")),
         "resume": True,
     }
+    if rec.get("shell"):
+        runner_input["shell"] = rec["shell"]
     if kind == "follow-up":
         parent = _ensure_loaded(app, rec.get("parent_sid"), cwd)
         runner_input["parent_state"] = parent
+        if rec.get("retry_lanes"):
+            runner_input["retry_lanes"] = list(rec["retry_lanes"])
         if parent is not None and sid not in parent.follow_up_sids:
             parent.follow_up_sids.append(sid)
         # The ready-to-review flip on completion looks the root up in
         # memory; load it now so a resumed follow-up still makes it.
         _ensure_loaded(app, rec.get("root_sid"), cwd)
+    wrap = rec.get("wrap_up")
+    if isinstance(wrap, dict):
+        # Plan D9: the previous engine was asked to wrap this run up; the
+        # resumed run is still wrapping up, not a fresh run.
+        at = wrap.get("requested_at")
+        state.run_control.request_wrap_up(
+            str(wrap.get("reason") or "user-wrap-up"),
+            now=float(at) if isinstance(at, (int, float)) else None)
     with app.state.sessions_lock:
         app.state.sessions[sid] = state
     inflight.update(sid, state="running",
@@ -1590,6 +1827,22 @@ def _run_with_state(app,
                     "consultancy ready-flip failed for sid=%s", state.sid,
                 )
     finally:
+        if getattr(state, "_polykv", None) is not None:
+            # Plan F3: release every engine session and audit before the
+            # in-flight record goes; a suspended run keeps them for the
+            # resume.
+            # A completed run whose consultancy is still open is held for
+            # its follow-up (released on accept or after polykv.HOLD_S).
+            from consultants.engine import polykv
+            hold = None
+            if state.status == "completed":
+                root = app.state.sessions.get(_consultancy_root_sid(state))
+                if root is not None and \
+                        root.consultancy_status not in _CONSULTANCY_TERMINAL:
+                    hold = root.sid
+            polykv.settle_run(state.sid, cwd=state.cwd,
+                              status=state.status or "unknown", hold_root=hold)
+            state._polykv = None
         _settle_inflight(state)
         # Best-effort: refresh the index entry's status + duration so
         # /v1/sessions reflects terminal state without re-reading the
@@ -1872,6 +2125,7 @@ def _consultancy_dict(root: "SessionState") -> dict:
         "effective_cap": root.max_followups + root.extra_granted,
         "child_sids": list(root.consultancy_children),
         "updated_at": time.time(),
+        **({"shell": root.shell_banked} if root.shell_banked else {}),
     }
 
 
@@ -1903,6 +2157,8 @@ def _hydrate_consultancy(root: "SessionState") -> None:
     children = disk.get("child_sids")
     if isinstance(children, list):
         root.consultancy_children = [str(c) for c in children]
+    if isinstance(disk.get("shell"), dict):
+        root.shell_banked = disk["shell"]
 
 
 def _resolve_consultancy_root(
@@ -2070,9 +2326,17 @@ def _maybe_start_store_reaper(app, cfg, ollama_base_url: str) -> None:
     distiller = None
     if dist_enabled:
         try:
+            import functools
+            from claude_hooks.get_advice.chat_client import (
+                make_agent_chat_client,
+            )
             from consultants.engine.distillation import Distiller
+            # Cloud models go where the council's go ([cloud] route).
             distiller = Distiller(
                 store_cfg.distillation, ollama_base_url,
+                chat_client_factory=functools.partial(
+                    make_agent_chat_client,
+                    endpoints=cc.client_endpoints(cfg)),
             )
         except Exception:
             log.exception(
@@ -2157,6 +2421,16 @@ def _reaper_tick(app) -> None:
                 app.state.sessions.pop(sid, None)
         for sid in to_evict:
             log.info("evicted closed session %s after grace period", sid)
+    # Stale coder-out/ trees and empty dirs of the projects this engine
+    # has served, at most hourly per project. Sessions still in memory
+    # are skipped whatever their state.
+    try:
+        from consultants.server.session_gc import maybe_sweep
+        maybe_sweep([getattr(s, "cwd", "") for _sid, s in entries],
+                    skip_sids=[sid for sid, _s in entries], now=now)
+    except Exception:  # pragma: no cover — defensive
+        log.exception("session gc sweep crashed")
+    sweep_sandbox_views(app)
 
 
 def _load_session_from_disk(sid: str) -> Optional[dict]:

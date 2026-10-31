@@ -100,8 +100,12 @@ class TestToolsList:
         names = {t["name"] for t in tools}
         # Full parity with pgvector-mcp's catalog, task tools included
         # on both (they need no SQL store, so they are always offered).
+        from claude_hooks.findings.tools import TOOL_NAMES as FINDING_TOOLS
+        from claude_hooks.resources.tools import TOOL_NAMES as RESOURCE_TOOLS
         from claude_hooks.tasks.tools import TOOL_NAMES
-        assert names - set(TOOL_NAMES) == {
+        assert set(RESOURCE_TOOLS) <= names
+        assert names - set(TOOL_NAMES) - set(FINDING_TOOLS) - set(
+            RESOURCE_TOOLS) == {
             "sqlite-vec-find",
             "sqlite-vec-find-hybrid",
             "sqlite-vec-store",
@@ -122,6 +126,7 @@ class TestToolsList:
             "sqlite-vec-kg-relate",
         }
         assert set(TOOL_NAMES) <= names
+        assert set(FINDING_TOOLS) <= names
 
     def test_each_tool_has_required_fields(self, server):
         tools = server.handle(_request("tools/list"))["result"]["tools"]

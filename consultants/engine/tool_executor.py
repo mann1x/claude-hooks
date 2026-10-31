@@ -55,6 +55,8 @@ import time
 from typing import Any, Optional
 
 from consultants.engine.state_v2 import ToolPlanItem, ToolResult
+from consultants.engine.recorder import guard_sink
+from consultants.engine.council import _guard_profile
 
 log = logging.getLogger("consultants.engine.tool_executor")
 
@@ -124,12 +126,15 @@ def _emit_started(role: str, *, round: int, lane_idx: Optional[int],
 
 def _emit_finished(role: str, *, round: int, lane_idx: Optional[int],
                    duration_ms: int, ok: bool,
-                   error: Optional[str] = None) -> None:
+                   error: Optional[str] = None,
+                   stop_reason: Optional[str] = None,
+                   failure_class: Optional[str] = None) -> None:
     try:
         from consultants.engine.events import NodeFinished, emit
         emit(NodeFinished(role=role, round=round, lane_idx=lane_idx,
                            duration_ms=duration_ms,
-                           ok=ok, error=error))
+                           ok=ok, error=error, stop_reason=stop_reason,
+                           failure_class=failure_class))
     except Exception:  # pragma: no cover
         log.exception("emit NodeFinished raised; ignored")
 
@@ -152,6 +157,16 @@ def _emit_tool_call(role: str, *, round: int, lane_idx: Optional[int],
 # Node
 # ============================================================== #
 
+#: Plan D12: tools tool_executor lanes never called — 0 of 215 calls over
+#: 377 tool-bearing requests in 104 recorded councils (2026-10-15,
+#: benchmarks/consultants/tool_use_by_role.py). A lane
+#: runs one planned call; it neither surveys nor recalls. Dropping them
+#: saves their schema on every request. Re-measure before adding one back.
+UNUSED_TOOLS = frozenset({"survey_project", "recall_memory"})
+#: One prior result as the researcher's report prompt carries it.
+PRIOR_RESULT_MAX_CHARS = 32_000
+
+
 def tool_executor_node(state: dict,
                        *,
                        chat_client,
@@ -162,7 +177,8 @@ def tool_executor_node(state: dict,
                        cwd: str,
                        think: Any = False,
                        loop_runner=None,
-                       recorder=None) -> dict:
+                       recorder=None,
+                       wrap_up_check=None) -> dict:
     """Execute one ``ToolPlanItem`` from the per-lane state slice.
 
     Returns a state delta merging into ``tool_results``. Never
@@ -260,6 +276,11 @@ def tool_executor_node(state: dict,
     msgs = build_tool_executor_messages(
         item, grounding_msgs, question=state.get("question") or "",
     )
+    # Plan D12: tools this role never calls are not offered (measured).
+    if tool_specs is not None:
+        tool_specs = [t for t in tool_specs
+                      if (t.get("function") or {}).get("name")
+                      not in UNUSED_TOOLS]
     # The tool-plan prompt the researcher wrote against enumerates six
     # tools in prose (``TOOL_PLAN_*``), so a provider-supplied extra is
     # in the payload but absent from anything the executor was told
@@ -280,7 +301,12 @@ def tool_executor_node(state: dict,
             force_answer_after=5,
             tools_available=True,
             think=think,
-            force_first_tool_call=False,
+            # Plan §0.7: strict lanes open with a tool call.
+            force_first_tool_call=_guard_profile(state, "tool_executor") == "strict",
+            guard_profile=_guard_profile(state, "tool_executor"),
+            on_guard=guard_sink(recorder, role="tool_executor",
+                                 round=parent_round, lane_idx=lane_idx),
+            wrap_up_check=wrap_up_check,
         )
 
     # Recorder callbacks — exactly the researcher pattern, but
@@ -352,11 +378,18 @@ def tool_executor_node(state: dict,
         log.exception("tool_executor lane %s failed: %s",
                        lane_idx, e)
         dt_ms = int((time.monotonic() - t0) * 1000)
+        # Plan D7: the lane says how it ended.
+        from consultants.engine.council import _record_failed_exit
+        from consultants.engine.events import failure_class_of
+        failed_as = failure_class_of(e)
         _emit_finished(
             "tool_executor", round=parent_round,
             lane_idx=lane_idx, duration_ms=dt_ms,
             ok=False, error=f"{type(e).__name__}: {e}",
+            stop_reason=failed_as, failure_class=failed_as,
         )
+        _record_failed_exit(recorder, "tool_executor", parent_round,
+                            lane_idx, dt_ms, e, failed_as)
         return {
             "tool_results": [ToolResult(
                 intent=item.intent, content="",
@@ -371,18 +404,22 @@ def tool_executor_node(state: dict,
 
     final_text = _extract_final_content(result)
     dt_ms = int((time.monotonic() - t0) * 1000)
+    from consultants.engine.events import loop_stop
+    stop_reason, failure_class = loop_stop(result)
     if recorder is not None:
         try:
             recorder.record_node(
                 role="tool_executor", kind="node_exit",
                 round=parent_round, lane_idx=lane_idx,
                 duration_ms=dt_ms,
+                stop_reason=stop_reason, failure_class=failure_class,
             )
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
     _emit_finished("tool_executor", round=parent_round,
                     lane_idx=lane_idx,
-                    duration_ms=dt_ms, ok=True)
+                    duration_ms=dt_ms, ok=True,
+                    stop_reason=stop_reason, failure_class=failure_class)
 
     return {
         "tool_results": [ToolResult(
@@ -649,11 +686,12 @@ def build_tool_plan_user_appendix(prior_results: list[ToolResult]) -> str:
                 f"\n{i}. (intent: {r.intent!r} FAILED: {r.error})"
             )
             continue
-        # Truncate content to keep round-2 prompt bounded; the
-        # full text is in the recorder for post-mortems.
+        # Bounded as the history bounds one tool result
+        # (``history.tidy``'s tool_result_max_chars), not tighter: a
+        # cut result is evidence the researcher must re-fetch.
         snippet = (r.content or "").strip()
-        if len(snippet) > 2000:
-            snippet = snippet[:2000] + "... [truncated]"
+        if len(snippet) > PRIOR_RESULT_MAX_CHARS:
+            snippet = snippet[:PRIOR_RESULT_MAX_CHARS] + "... [truncated]"
         lines.append(
             f"\n{i}. INTENT: {r.intent}\n"
             f"   TOOLS: {r.transcript_summary or '(none)'}\n"

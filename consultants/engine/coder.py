@@ -47,8 +47,11 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from claude_hooks.test_reruns import nothing_written_check
 from consultants.engine.coder_defaults import language_from_path
 from consultants.engine.state_v2 import CoderArtifact, CoderTaskItem
+from consultants.engine.recorder import guard_sink
+from consultants.engine.council import _guard_profile
 
 log = logging.getLogger("consultants.engine.coder")
 
@@ -83,6 +86,19 @@ CODER_SYSTEM = (
 )
 
 
+#: Replaces rules 1-2 of :data:`CODER_SYSTEM` when the lane writes in
+#: its own worktree view (``--shell write``).
+CODER_WORKSPACE_NOTE = (
+    "\n\nWORKSPACE (this run overrides rules 1 and 2): you work in a "
+    "private git worktree of the repository — the user's tree is never "
+    "touched. ``write_file`` paths are relative to the repository root "
+    "and land in that worktree. ``run_command`` runs a command there (no "
+    "network): run the tests you write, and fix what fails. In your "
+    "final message say which commands you ran and what passed or failed; "
+    "a test you did not run must be called not run. Your files reach the "
+    "user as a held patch to review.")
+
+
 # Inserted into the planner's system prompt when ``cfg.roles.coder.enabled``.
 # Placed after the existing planner job description; the planner
 # emits its plan as usual, then appends a fenced ``json`` block when
@@ -102,7 +118,13 @@ PLANNER_CODER_GATE_BLOCK = (
     "```\n\n"
     "Rules: 1-4 tasks max; each task is self-contained (the coder "
     "lane will not see the other tasks); ``path`` is advisory — the "
-    "coder may rename. When code generation is NOT needed, OMIT the "
+    "coder may rename. When the question says what coder lanes write "
+    "(tests, fixes, patches), every task asks for all of it: if it asks "
+    "for fixes, each task writes the failing test AND the fix, never "
+    "the test alone. Together the tasks cover the whole set in scope — "
+    "every confirmed finding in KNOWN FINDINGS the question covers, and "
+    "the defects the plan expects — split across tasks, not a subset. "
+    "When code generation is NOT needed, OMIT the "
     "block entirely OR emit "
     "``{\"requires_code_generation\": false}``."
 )
@@ -137,7 +159,10 @@ def build_coder_messages(task: CoderTaskItem,
     msgs.append({"role": "system", "content": CODER_SYSTEM})
     parts: list[str] = []
     if question:
-        parts.append(f"USER QUESTION (context only):\n{question.strip()}")
+        # Run 7: "(context only)" let a tests-only task override the
+        # question's "write the failing tests and the fixes".
+        parts.append("USER QUESTION (what it asks of coder lanes applies to "
+                     f"you, together with TASK):\n{question.strip()}")
     if plan:
         parts.append(f"\nPLAN:\n{plan.strip()}")
     if research:
@@ -262,8 +287,13 @@ class CoderSandbox:
     def __init__(self, *, root: Path,
                  max_file_bytes: int,
                  max_total_bytes: int,
-                 max_files: int):
+                 max_files: int,
+                 owner: Optional[int] = None):
         self.root = root
+        #: The uid the lane's commands run as, given each file written
+        #: (a worktree view is theirs; files the engine makes as root
+        #: would be read-only to them).
+        self.owner = owner
         self.max_file_bytes = int(max_file_bytes)
         self.max_total_bytes = int(max_total_bytes)
         self.max_files = int(max_files)
@@ -326,6 +356,8 @@ class CoderSandbox:
             raise ValueError(msg) from None
         # Create parents + write atomically (temp file + rename) so a
         # partial write never lands on disk.
+        made = [d for d in reversed(target.parents)
+                if d.is_relative_to(self.root) and not d.exists()]
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(target.suffix + ".tmp")
         try:
@@ -340,6 +372,12 @@ class CoderSandbox:
             except OSError:  # pragma: no cover
                 pass
             raise ValueError(f"filesystem error writing {clean}: {e}") from e
+        if self.owner is not None:
+            for d in [*made, target]:
+                try:
+                    os.chown(d, self.owner, self.owner)
+                except OSError:  # pragma: no cover — not ours to give
+                    log.warning("could not chown %s", d)
         sha = hashlib.sha256(body_bytes).hexdigest()
         entry = {"path": clean, "bytes": n, "sha256": sha}
         self.writes.append(entry)
@@ -363,6 +401,28 @@ def make_coder_sandbox(*, cwd: str, sid: str,
         max_total_bytes=max_total_bytes,
         max_files=max_files,
     )
+
+
+def make_workspace_tool_executor(sandbox: CoderSandbox, shell_executor,
+                                 commands: list):
+    """``write_file`` into the view, ``run_command`` through the shell
+    under the coder's lane; each command and its exit code is kept in
+    ``commands`` for the artifact."""
+    write = make_sandbox_tool_executor(sandbox)
+
+    def _exec(name: str, args: str, cwd: str = "", **kw) -> str:
+        if name != "run_command":
+            return write(name, args, cwd, **kw)
+        out = shell_executor(name, args, cwd)
+        try:
+            cmd = json.loads(args).get("command") or json.loads(args).get("argv")
+        except (TypeError, ValueError, AttributeError):
+            cmd = args
+        m = re.match(r"exit=(\S+)", out or "")
+        commands.append({"command": str(cmd)[:200],
+                         "exit": m.group(1) if m else "?"})
+        return out
+    return _exec
 
 
 def make_sandbox_tool_executor(sandbox: CoderSandbox):
@@ -422,12 +482,15 @@ def _emit_started(role: str, *, round: int, lane_idx: Optional[int],
 
 def _emit_finished(role: str, *, round: int, lane_idx: Optional[int],
                    duration_ms: int, ok: bool,
-                   error: Optional[str] = None) -> None:
+                   error: Optional[str] = None,
+                   stop_reason: Optional[str] = None,
+                   failure_class: Optional[str] = None) -> None:
     try:
         from consultants.engine.events import NodeFinished, emit
         emit(NodeFinished(role=role, round=round, lane_idx=lane_idx,
                            duration_ms=duration_ms,
-                           ok=ok, error=error))
+                           ok=ok, error=error, stop_reason=stop_reason,
+                           failure_class=failure_class))
     except Exception:  # pragma: no cover
         log.exception("emit NodeFinished raised; ignored")
 
@@ -486,8 +549,20 @@ def coder_node(state: dict,
                max_files: int = 16,
                model_chain_resolver: Optional[Callable[
                    [Optional[str]], list[tuple[Any, str]]]] = None,
+               wrap_up_check: Optional[Callable[[], bool]] = None,
+               workspace: Optional[Callable[[], Optional[tuple]]] = None,
+               shell_executor: Optional[Callable[..., str]] = None,
+               shell_spec: Optional[dict] = None,
                ) -> dict:
     """Execute one ``CoderTaskItem`` from the per-lane state slice.
+
+    ``workspace`` (``--shell write``) returns ``(host view dir, owner
+    uid)`` for this lane's own worktree view, or None: the lane then
+    writes there instead of ``coder-out/`` and runs ``run_command``
+    through ``shell_executor`` (advertised as ``shell_spec``), so the
+    tests it writes are run and its files reach the user as a held
+    patch (csl-2026-10-18-1033-5a67: a coder's test file was never run
+    and was missing from the held changes).
 
     Returns a state delta merging into ``coder_artifacts``. Never
     raises — failures land as a tombstone ``CoderArtifact`` with the
@@ -620,6 +695,14 @@ def coder_node(state: dict,
     except Exception:  # pragma: no cover
         LoopConfig = None  # type: ignore[assignment]
 
+    ws = None
+    if workspace is not None and shell_executor is not None and shell_spec:
+        try:
+            ws = workspace()
+        except Exception:
+            log.exception("coder lane %s: no worktree view; writing to "
+                          "coder-out/", lane_idx)
+            ws = None
     msgs = build_coder_messages(
         item, grounding_msgs,
         question=state.get("question") or "",
@@ -630,17 +713,42 @@ def coder_node(state: dict,
         max_files=max_files,
     )
 
+    if ws is not None and msgs and msgs[0].get("role") == "system":
+        msgs = [dict(msgs[0], content=msgs[0]["content"] + CODER_WORKSPACE_NOTE),
+                *msgs[1:]]
     loop_cfg = None
     if LoopConfig is not None:
         loop_cfg = LoopConfig(
             # Coder is more iterative than tool_executor (write,
             # potentially revise after reading an error), but not as
-            # exploratory as researcher.
-            max_iterations=8,
-            force_answer_after=6,
+            # exploratory as researcher. Writing and running tests
+            # takes more turns than writing alone.
+            # Write a test, run it, fix it, run it again (runs 3/4 capped at
+            # 16; run 5 capped at 40 while still fixing and re-running).
+            max_iterations=60 if ws is not None else 12,
+            # The tools go 6 turns before the cap, as for a researcher;
+            # at 14 the run-6 coder lost them before writing anything.
+            force_answer_after=54 if ws is not None else 6,
+            # Writing is the coder's job: a nudge a fifth of the way in when
+            # it has written nothing (run 6: 60 turns, no test), repeated
+            # every 12 turns while it still has not (run 8: one nudge at 12
+            # was ignored for 42 turns).
+            turn_check=(nothing_written_check(12, every=12, strip=54, cap=60)
+                        if ws is not None
+                        else nothing_written_check(4, every=4, strip=6,
+                                                   cap=12)),
+            turn_check_repeat=True,
+            # The strip forces a report, never takes the coder's pen (run 8:
+            # write_file refused "tools are off" at turn 55).
+            keep_after_strip=("write_file",),
             tools_available=True,
             think=think,
-            force_first_tool_call=False,
+            # Plan §0.7: strict lanes open with a tool call.
+            force_first_tool_call=_guard_profile(state, "coder") == "strict",
+            guard_profile=_guard_profile(state, "coder"),
+            on_guard=guard_sink(recorder, role="coder",
+                                 round=parent_round, lane_idx=lane_idx),
+            wrap_up_check=wrap_up_check,
         )
 
     # Walk the failover chain. Each iteration is a fully-isolated
@@ -667,13 +775,26 @@ def coder_node(state: dict,
 
         # Fresh sandbox per attempt — a partial write from a failed
         # primary must not leak into the fallback's view of the world.
-        sandbox = make_coder_sandbox(
-            cwd=cwd, sid=sid,
-            max_file_bytes=max_file_bytes,
-            max_total_bytes=max_total_bytes,
-            max_files=max_files,
-        )
-        tool_executor = make_sandbox_tool_executor(sandbox)
+        commands: list[dict] = []
+        if ws is not None:
+            # A view persists across attempts (a fallback sees what the
+            # failed attempt wrote); the audit is per attempt.
+            sandbox = CoderSandbox(
+                root=Path(ws[0]), max_file_bytes=max_file_bytes,
+                max_total_bytes=max_total_bytes, max_files=max_files,
+                owner=ws[1])
+            tool_executor = make_workspace_tool_executor(
+                sandbox, shell_executor, commands)
+            specs = [CODER_WRITE_FILE_TOOL_SPEC, shell_spec]
+        else:
+            sandbox = make_coder_sandbox(
+                cwd=cwd, sid=sid,
+                max_file_bytes=max_file_bytes,
+                max_total_bytes=max_total_bytes,
+                max_files=max_files,
+            )
+            tool_executor = make_sandbox_tool_executor(sandbox)
+            specs = [CODER_WRITE_FILE_TOOL_SPEC]
 
         payload = {
             "model": model_name, "messages": list(msgs), "stream": False,
@@ -733,13 +854,14 @@ def coder_node(state: dict,
         attempt_failed = False
         failure_reason = ""
         failure_error: Optional[str] = None
+        failure_class: Optional[str] = None
         result: Any = None
         try:
             result = loop_runner(
                 payload,
                 cwd,
                 config=loop_cfg,
-                tool_specs=[CODER_WRITE_FILE_TOOL_SPEC],
+                tool_specs=specs,
                 chat_fn=_chat_fn,
                 tool_executor=tool_executor,
                 on_iter=on_iter_cb,
@@ -753,6 +875,8 @@ def coder_node(state: dict,
             attempt_failed = True
             failure_reason = "raised"
             failure_error = f"{type(e).__name__}: {e}"
+            from consultants.engine.events import failure_class_of
+            failure_class = failure_class_of(e)
 
         final_text = "" if attempt_failed else _extract_final_content(result)
 
@@ -775,6 +899,16 @@ def coder_node(state: dict,
                     f"primary {model_name} returned empty final message"
                 )
 
+        # Plan D7: how the attempt ended. A loop that stopped on a guard
+        # names the guard; a loop that finished but wrote nothing (or
+        # said nothing) is a task error named after the trigger.
+        from consultants.engine.events import TASK_ERROR, loop_stop
+        if failure_reason == "raised":
+            stop_reason = failure_class
+        else:
+            stop_reason, failure_class = loop_stop(result)
+            if attempt_failed and failure_class is None:
+                stop_reason, failure_class = failure_reason, TASK_ERROR
         dt_attempt_ms = int((time.monotonic() - t0_attempt) * 1000)
         if recorder is not None:
             try:
@@ -782,6 +916,8 @@ def coder_node(state: dict,
                     role="coder", kind="node_exit",
                     round=parent_round, lane_idx=lane_idx,
                     duration_ms=dt_attempt_ms,
+                    error=failure_error if attempt_failed else None,
+                    stop_reason=stop_reason, failure_class=failure_class,
                 )
             except Exception:  # pragma: no cover
                 log.exception("recorder.record_node raised; ignored")
@@ -794,6 +930,7 @@ def coder_node(state: dict,
             _emit_finished(
                 "coder", round=parent_round, lane_idx=lane_idx,
                 duration_ms=dt_attempt_ms, ok=True,
+                stop_reason=stop_reason, failure_class=failure_class,
             )
             return {
                 "coder_artifacts": [CoderArtifact(
@@ -803,6 +940,8 @@ def coder_node(state: dict,
                     lane_idx=lane_idx, parent_round=parent_round,
                     duration_ms=dt_lane_ms,
                     error=None,
+                    workspace="view" if ws is not None else "",
+                    commands=list(commands),
                 )],
             }
 
@@ -814,11 +953,19 @@ def coder_node(state: dict,
             "coder", round=parent_round, lane_idx=lane_idx,
             duration_ms=dt_attempt_ms, ok=False,
             error=f"{failure_reason}: {failure_error or ''}",
+            stop_reason=stop_reason, failure_class=failure_class,
         )
 
         # Decide: more attempts left, or chain exhausted?
         next_idx = attempt_idx + 1
-        if next_idx <= len(chain):
+        # Plan D9: a wrap-up starts no fallback model.
+        wrapping = False
+        if wrap_up_check is not None:
+            try:
+                wrapping = bool(wrap_up_check())
+            except Exception:  # pragma: no cover
+                log.exception("wrap_up_check raised; carrying on")
+        if next_idx <= len(chain) and not wrapping:
             next_model = chain[next_idx - 1][1]
             _emit_coder_failover(
                 round=parent_round, lane_idx=lane_idx,
@@ -1005,8 +1152,47 @@ def parse_coder_tasks(text: str, *,
                 parent_round=int(parent_round),
             ))
         if out:
-            return out
+            return split_coder_tasks(out)
     return []
+
+
+#: A ledger finding id as the planner writes it (``csf-7``).
+_FINDING_ID = re.compile(r"(?<![\w-])[a-z]{1,6}f-\d+(?![\w-])")
+CODER_FINDINGS_PER_TASK = 2
+CODER_MAX_TASKS = 4
+
+
+def split_coder_tasks(tasks: list[CoderTaskItem], *,
+                      per_task: int = CODER_FINDINGS_PER_TASK,
+                      max_tasks: int = CODER_MAX_TASKS) -> list[CoderTaskItem]:
+    """Split a task naming more than ``per_task`` finding ids into lanes of
+    at most that many, keeping at most ``max_tasks`` lanes in all (more ids
+    per lane when they would not fit). Council run 8: the planner asked
+    one coder for tests and fixes for six findings, which spent 54 turns
+    reading and wrote one file. Tasks naming none are left as they are."""
+    ids = [list(dict.fromkeys(_FINDING_ID.findall(t.task))) for t in tasks]
+    size = per_task
+
+    def lanes(k: int) -> int:
+        return sum(max(1, -(-len(x) // k)) for x in ids)
+    while size < max(map(len, ids), default=0) and lanes(size) > max(
+            max_tasks, len(tasks)):
+        size += 1
+    out: list[CoderTaskItem] = []
+    for t, own in zip(tasks, ids):
+        if len(own) <= size:
+            out.append(t)
+            continue
+        chunks = [own[k:k + size] for k in range(0, len(own), size)]
+        for chunk in chunks:
+            rest = [x for x in own if x not in chunk]
+            out.append(CoderTaskItem(
+                task=(f"{t.task}\n\nTHIS LANE: {', '.join(chunk)} only — "
+                      f"other coder lanes take {', '.join(rest)}."),
+                path="", why=t.why, parent_round=t.parent_round))
+    return [CoderTaskItem(task=t.task, path=t.path, why=t.why, lane_idx=i,
+                          parent_round=t.parent_round)
+            for i, t in enumerate(out)]
 
 
 # Block appended to the synthesizer's user message when
@@ -1040,19 +1226,32 @@ def build_coder_artifacts_block(artifacts: list[CoderArtifact]) -> str:
             ", ".join(f"{f['path']} ({f['bytes']} B)" for f in a.files)
             if a.files else "(no files written)"
         )
+        # Never cut (council run 6, mail #1648): coder-0's finding sat at
+        # character 875 of its report and a 600-character cut dropped it.
+        # The report is the lane's only handoff, as a researcher's is.
         summary = (a.summary or "").strip()
-        if len(summary) > 600:
-            summary = summary[:600] + "... [truncated]"
-        lines.append(
-            f"\n{i}. TASK: {a.task}\n"
-            f"   FILES: {files_summary}\n"
-            f"   SUMMARY: {summary}"
-        )
+        entry = (f"\n{i}. TASK: {a.task}\n"
+                 f"   FILES: {files_summary}\n")
+        if getattr(a, "workspace", "") == "view":
+            ran = getattr(a, "commands", None) or []
+            entry += ("   WHERE: the coder's worktree view (paths from the "
+                      "repo root; a held patch, listed under Sandbox "
+                      "changes)\n"
+                      "   RUN: " + ("; ".join(f"`{c['command']}` -> exit "
+                                            f"{c['exit']}" for c in ran[-6:])
+                                  if ran else "nothing — its code and tests "
+                                  "are NOT verified") + "\n")
+        else:
+            entry += ("   RUN: nothing (no shell) — its code and tests are "
+                      "NOT verified\n")
+        lines.append(entry + f"   SUMMARY: {summary}")
     return "\n".join(lines)
 
 
 __all__ = [
     "CODER_SYSTEM",
+    "CODER_WORKSPACE_NOTE",
+    "make_workspace_tool_executor",
     "CODER_WRITE_FILE_TOOL_SPEC",
     "CoderSandbox",
     "PLANNER_CODER_GATE_BLOCK",
@@ -1063,5 +1262,6 @@ __all__ = [
     "make_sandbox_tool_executor",
     "parse_coder_preamble",
     "parse_coder_tasks",
+    "split_coder_tasks",
     "sandbox_root_for",
 ]

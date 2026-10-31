@@ -1,0 +1,86 @@
+# gitleaks config for claude-hooks. Run through scripts/secret_scan.py
+# (pre-commit: --staged; CI and by hand: --history).
+#
+# The stock rules alone scanned all 1,034 commits clean while c2f2caa
+# (2026-05-07) had committed the pgvector DSN with its password in
+# config/claude-hooks.json.bak-*: no default rule matches a password in
+# a scheme://user:password@host URL. The rules below cover what
+# configuration files carry: credentials in URLs, secret-named keys in
+# TOML / JSON / YAML / INI / env files, and files that are copies of
+# local config or key material and must never be committed at all.
+# scripts/secret_scan.py adds a second check that no rule can do: the
+# host's own secrets, read from where they live, searched for verbatim.
+
+title = "claude-hooks"
+
+[extend]
+useDefault = true
+
+# --- credentials inside a URL: postgresql://user:PASSWORD@host ------------
+[[rules]]
+id = "url-credentials"
+description = "Password inside a URL (DSN, basic auth, broker URL)"
+regex = '''(?i)\b[a-z][a-z0-9+.\-]{1,24}://[^\s:/@'"<>`]{1,64}:([^\s@/'"<>`]{3,200})@'''
+secretGroup = 1
+keywords = ["://"]
+
+[[rules.allowlists]]
+description = "placeholders and references, not values"
+regexTarget = "secret"
+regexes = [
+  '''(?i)^(pass(word)?|passwd|pwd|pw|secret|changeme|change_me|example|dummy|test|user|redacted|none|null|xxx+|\*+|\.{3}|…)$''',
+  '''^<[^>]*>$''',            # <password>
+  '''^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$''',   # ${PGPASSWORD} / $PGPASSWORD
+  '''^%\([^)]*\)s$''',        # %(password)s
+  '''^\{[^}]*\}$''',          # {password}
+  '''^\[[^\]]*\]$''',         # [REDACTED]
+  '''(?i)^your[_\-]?[a-z_\-]*$''',   # YOUR_PASSWORD
+  '''(?i)(test[_\-]?only|not[_\-]?a[_\-]?real|fake[_\-]?(pass|secret|key|token)|placeholder)''',
+]
+
+[[rules.allowlists]]
+description = "the integration tests' throw-away local database (port 5433)"
+condition = "AND"
+paths = ['''(^|/)tests/test_pgvector_integration\.py$''']
+regexTarget = "secret"
+regexes = ['''^hooks$''']
+
+# --- secret-named keys in configuration files ------------------------------
+# A key whose last segment names a secret (password, token, api_key,
+# client_secret, ...), with a literal value, in a config-shaped file.
+# `max_tokens = 32768` does not match: the key must END in the word.
+[[rules]]
+id = "config-secret-value"
+description = "Secret-named key with a literal value in a configuration file"
+path = '''(?i)(\.(toml|json|jsonc|ya?ml|ini|cfg|conf|env|properties|service|timer|plist|xml|tfvars|npmrc|pypirc|netrc)$|(^|/)\.env(\.[^/]*)?$|(^|/)[^/]*\.(bak|orig|backup|old)([.-][^/]*)?$)'''
+regex = '''(?i)["']?(?:[a-z0-9]+[_.\-])*(password|passwd|passphrase|pwd|secret|token|api[_\-]?key|apikey|access[_\-]?key|secret[_\-]?key|private[_\-]?key|client[_\-]?secret|auth[_\-]?token|bearer|dsn)["']?\s*[:=]\s*["']?([^\s"',;#}\]]{8,})'''
+secretGroup = 2
+keywords = ["pass", "pwd", "secret", "token", "key", "bearer", "dsn"]
+
+[[rules.allowlists]]
+description = "references, paths and non-secret values"
+regexTarget = "secret"
+regexes = [
+  '''^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$''',  # env reference
+  '''^(~|\.{1,2})?/''',                    # a path (key_file = "~/.claude/...")
+  '''^[A-Za-z]:[\\/]''',                   # a Windows path
+  '''^%[A-Z_]+%''',                        # %USERPROFILE%...
+  '''^[0-9_.]+$''',                        # numbers
+  '''(?i)^(true|false|null|none|redacted|changeme|placeholder|example[-_a-z0-9]*|your[-_a-z0-9]*|xxx+|\*+)$''',
+  '''^<[^>]*>?$''',                        # <your-key>
+  '''^\{\{.*$''',                          # {{ template }}
+  '''(?i)^[a-z][a-z0-9+.\-]*://''',        # a URL: url-credentials judges it
+  '''(?i)(test[_\-]?only|not[_\-]?a[_\-]?real|fake[_\-]?(pass|secret|key|token)|placeholder)''',
+]
+
+# --- files that are copies of local config or key material ----------------
+# Path-only: committing one of these is the leak, whatever it contains.
+# The *.example.* templates are the shareable copies.
+[[rules]]
+id = "local-config-or-key-file"
+description = "Local config copy, backup or key file staged for commit"
+path = '''(?i)((^|/)config/claude-hooks\.json([.-][^/]*)?$|(^|/)\.claude-hooks/consultants\.toml([.-][^/]*)?$|(^|/)consultants-config\.toml([.-][^/]*)?$|(^|/)\.env(\.[^/]*)?$|(^|/)[^/]*\.(pem|p12|pfx|key|keystore|jks)$|(^|/)id_(rsa|dsa|ecdsa|ed25519)[^/]*$|(^|/)[^/]*-api-key$|(^|/)\.(netrc|pgpass|npmrc|pypirc)$)'''
+
+[[rules.allowlists]]
+description = "shareable templates"
+paths = ['''(?i)(\.example(\.[^/]*)?$|\.sample$|\.template$|(^|/)\.env\.example$)''']

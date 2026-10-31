@@ -1,0 +1,31 @@
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/gemma4-31b-cloud-2026-10-22c-r2/smoke.transcript.db
+
+sid: csl-2026-10-22-1927-9c6b
+status: completed
+total wall: 14.6s
+
+  planner       node=7.0s    (entries) llm=3x=6.8s    tool=2x=4ms     tok=p19757/c999
+      LLM round=1 model=gemma4:31b-cloud             4.0s  p=15697  c=785   
+      LLM round=1 model=gemma4:31b-cloud             1.6s  p=2857   c=108   
+      LLM round=1 model=gemma4:31b-cloud             1.2s  p=1203   c=106   
+      tool survey_project     x1       3ms chars=3779
+      tool read_file          x1       1ms chars=37814
+
+  researcher    node=7.9s    (2xentries) llm=4x=7.8s    tool=4x=0ms     tok=p83588/c540
+      LLM round=1 lane=0 model=gemma4:31b-cloud             3.0s  p=18302  c=219   
+      LLM round=1 lane=1 model=gemma4:31b-cloud             2.1s  p=18282  c=113   
+      LLM round=1 lane=0 model=gemma4:31b-cloud             1.5s  p=27263  c=61    
+      LLM round=1 lane=1 model=gemma4:31b-cloud             1.2s  p=19741  c=147   
+      tool read_file          x3       0ms chars=27301
+      tool survey_project     x1       0ms chars=3779
+
+  synthesizer   node=3.0s    (entries) llm=1x=3.0s    tool=0x=0ms     tok=p2171/c860
+      LLM round=1 model=gemma4:31b-cloud             3.0s  p=2171   c=860   
+
+totals
+  wall                  14.6s
+  sum of node spans     17.9s
+  sum of LLM call time  17.7s  (120.9% of wall)
+  sum of tool call time 4ms
+  total prompt tokens   105516
+  total completion tok  2399

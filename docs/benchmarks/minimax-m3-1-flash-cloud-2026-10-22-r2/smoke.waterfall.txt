@@ -1,0 +1,38 @@
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/minimax-m3-1-flash-cloud-2026-10-22-r2/smoke.transcript.db
+
+sid: csl-2026-10-22-0813-0e7f
+status: completed
+total wall: 39.1s
+
+  planner       node=7.3s    (entries) llm=3x=7.2s    tool=3x=54ms    tok=p26085/c508
+      LLM round=1 model=minimax-m3.1-flash:cloud     3.4s  p=16333  c=344   
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.4s  p=1586   c=58    
+      LLM round=1 model=minimax-m3.1-flash:cloud     1.5s  p=8166   c=106   
+      tool grep               x2      51ms chars=58901
+      tool survey_project     x1       3ms chars=3779
+
+  researcher    node=41.7s   (2xentries) llm=7x=41.6s   tool=12x=12ms    tok=p202690/c1971
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud    12.4s  p=41575  c=790   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     8.0s  p=27224  c=528   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     6.3s  p=18991  c=122   
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     5.6s  p=40508  c=131   
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     4.6s  p=40402  c=133   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     3.2s  p=16954  c=157   
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     1.5s  p=17036  c=110   
+      tool grep               x5      12ms chars=36886
+      tool survey_project     x1       0ms chars=3779
+      tool read_file          x6       0ms chars=82141
+
+  synthesizer   node=7.6s    (entries) llm=3x=7.6s    tool=4x=0ms     tok=p14367/c448
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.9s  p=4971   c=120   
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.6s  p=3749   c=134   
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.1s  p=5647   c=194   
+      tool read_file          x4       0ms chars=5847
+
+totals
+  wall                  39.1s
+  sum of node spans     56.6s
+  sum of LLM call time  56.4s  (144.5% of wall)
+  sum of tool call time 66ms
+  total prompt tokens   243142
+  total completion tok  2927

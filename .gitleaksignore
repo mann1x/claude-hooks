@@ -1,0 +1,13 @@
+# Findings already in public history, accepted by the owner on 2026-10-25
+# (internal LAN, single user). Listed so a history scan passes; any NEW
+# occurrence still fails. Never add a finding here to make a commit pass —
+# remove the secret from the commit instead.
+#
+# c2f2caa committed two config/claude-hooks.json backups, one with the
+# pgvector DSN password; 939a5cb deleted them two minutes later.
+c2f2caabd7f89ed6e67ca9d338363d59a38cf2f7:config/claude-hooks.json.bak-20260428-132749:local-config-or-key-file:0
+c2f2caabd7f89ed6e67ca9d338363d59a38cf2f7:config/claude-hooks.json.bak-hyde-disable-20260430-064322:local-config-or-key-file:0
+c2f2caabd7f89ed6e67ca9d338363d59a38cf2f7:config/claude-hooks.json.bak-hyde-disable-20260430-064322:url-credentials:24
+# 781ea3a used a 32-character prefix of that password as a test fixture
+# (replaced with a fake on 2026-10-25).
+781ea3a71e42854eb6737c2b7076f8ba5e2df865:tests/test_config.py:url-credentials:203

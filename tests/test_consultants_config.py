@@ -155,6 +155,33 @@ class TestRoundTrip:
         assert cfg.roles["planner"].model == "proj-pl"
         assert cfg.roles["researcher"].model == "user-rs"
 
+    def test_a_project_file_never_copies_an_inherited_credential(
+            self, isolated_home, tmp_path: Path):
+        """set-* --project wrote the merged config, the user's pgvector
+        DSN password included, into <project>/.claude-hooks/ — a tree
+        that may not ignore it. The merge still supplies it at load."""
+        import secrets
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        pw, key = secrets.token_urlsafe(18), secrets.token_urlsafe(24)
+        dsn = f"postgresql://claude:{pw}@127.0.0.1:5432/memory"
+        cc.set_store(pgvector_dsn=dsn, scope="user")
+        cc.set_endpoint("box", url="http://h:1", backend="opencoti",
+                        api_key=key, scope="user")
+        cc.set_role("planner", model="proj-pl", scope="project", cwd=proj)
+        text = cc.project_config_path(proj).read_text()
+        assert pw not in text and key not in text
+        assert "# pgvector_dsn: inherited from the user config" in text
+        cfg = cc.load_config(cwd=proj)
+        assert cfg.store.pgvector_dsn == dsn
+        assert cfg.endpoints["box"].api_key == key
+        assert cfg.roles["planner"].model == "proj-pl"
+        # a credential set for this project only is the operator's choice
+        own = f"postgresql://claude:{secrets.token_urlsafe(18)}@db:5432/p"
+        cc.set_store(pgvector_dsn=own, scope="project", cwd=proj)
+        assert own in cc.project_config_path(proj).read_text()
+        assert cc.load_config(cwd=proj).store.pgvector_dsn == own
+
     def test_corrupt_toml_falls_back_to_defaults(self, isolated_home):
         p = cc.user_config_path()
         p.parent.mkdir(parents=True, exist_ok=True)

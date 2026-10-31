@@ -89,6 +89,12 @@ def register(record: dict) -> None:
     except OSError:
         log.exception("could not record in-flight run %s; it will not "
                       "survive an engine restart", sid)
+    # The dashboard's host-wide list (never fails the registration).
+    try:
+        from consultants.server import council_index
+        council_index.record(rec)
+    except Exception:  # pragma: no cover — defensive
+        log.exception("council index: could not record %s", sid)
 
 
 def update(sid: str, **fields) -> None:

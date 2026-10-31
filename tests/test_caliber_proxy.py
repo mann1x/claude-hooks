@@ -94,7 +94,8 @@ class TestTools:
         big = "x" * (200 * 1024)  # 200 KB
         (tmp_path / "big.txt").write_text(big)
         out = tools.read_file({"path": "big.txt"}, str(tmp_path))
-        assert "truncated" in out
+        # Plan D5: one line past the cap is shown as its head, and says so.
+        assert "line 1 is longer than ~48 KB" in out.splitlines()[0]
 
     def test_glob_match(self, tmp_path: Path):
         (tmp_path / "a.py").write_text("")
@@ -538,8 +539,9 @@ class TestAgentLoop:
                 str(tmp_path),
                 max_iterations=4,
             )
-        # iters 0,1 have tools; 2,3 must NOT.
-        assert seen_tools == [True, True, False, False]
+        # iters 0,1 have tools; 2,3 must NOT. The 5th call is plan D6's
+        # tool-less report at the cap.
+        assert seen_tools == [True, True, False, False, False]
 
     def test_force_first_tool_call_pins_required(
         self, tmp_path: Path, monkeypatch,

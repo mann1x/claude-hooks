@@ -1,0 +1,9 @@
+{
+  "version": "0.1.0",
+  "toolchain": "1.89.0",
+  "source_sha256": "634540828e8943d07140e9d3375d22bae8f72d08e839eef54cdb728c0989ebd0",
+  "assets": {
+    "x86_64": "9c08ca5ebc9a48a507eededc2b17c26b0fd2d4adcdd4737110f9f2f63922f811",
+    "aarch64": "44999ad75c4d4f0dffadeba9b2b18a14668e0f26b4b74d8802cbe8322fbc1089"
+  }
+}

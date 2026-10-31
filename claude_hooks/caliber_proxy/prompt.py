@@ -236,9 +236,17 @@ def read_anchor_files(cwd: str, max_bytes: Optional[int] = None) -> dict[str, st
     """Read each file in ANCHOR_PATHS that exists under ``cwd``, stopping
     once the cumulative size reaches ``max_bytes``. Returns
     ``{rel_path: content}``."""
+    return _read_anchor_files(cwd, max_bytes)[0]
+
+
+def _read_anchor_files(cwd: str, max_bytes: Optional[int] = None
+                       ) -> tuple[dict[str, str], list[str]]:
+    """:func:`read_anchor_files` plus what the budget cost: one entry per
+    anchor cut short (``"CLAUDE.md (first N of M chars)"``) or left out."""
     if max_bytes is None:
         max_bytes = _default_anchor_bytes()
     out: dict[str, str] = {}
+    cut: list[str] = []
     used = 0
     for rel in ANCHOR_PATHS:
         abs_path = os.path.join(cwd, rel)
@@ -252,12 +260,14 @@ def read_anchor_files(cwd: str, max_bytes: Optional[int] = None) -> dict[str, st
             continue
         remaining = max_bytes - used
         if remaining <= 0:
-            break
+            cut.append(rel)
+            continue
         if len(content) > remaining:
+            cut.append(f"{rel} (first {remaining:,} of {len(content):,} chars)")
             content = content[:remaining] + "\n\n[truncated to fit grounding budget]"
         out[rel] = content
         used += len(content)
-    return out
+    return out, cut
 
 
 _SOURCE_GLOBS_DEFAULT = (
@@ -461,6 +471,7 @@ def build_grounding_messages(cwd: str,
                              extended_sources: bool = False,
                              max_extended_bytes: Optional[int] = None,
                              tools_available: bool = True,
+                             note_cut: bool = False,
                              ) -> list[dict[str, str]]:
     """Return the grounding system messages to prepend to the model's
     conversation. Always emits an addendum; anchor block is emitted
@@ -470,6 +481,10 @@ def build_grounding_messages(cwd: str,
         tools_available: when False, use the no-tools addendum that
             tells the model all grounding material is pre-loaded.
             Pairs naturally with ``extended_sources=True``.
+        note_cut: when the anchor budget cut a file short or left one
+            out, end the anchor block with their names and that
+            ``read_file`` reaches them (the council, ch-24). Off, the
+            block is as before.
         extended_sources: include a curated subset of project source
             files (capped at ``max_extended_bytes``, default 200 KB).
             Recommended when ``tools_available=False`` so the model
@@ -493,7 +508,7 @@ def build_grounding_messages(cwd: str,
                 "```\n" + structure_map + "\n```"
             ),
         })
-    anchors = read_anchor_files(cwd, max_anchor_bytes)
+    anchors, cut = _read_anchor_files(cwd, max_anchor_bytes)
     if anchors:
         body_parts = [
             f"### {rel}\n```\n{content}\n```"
@@ -503,6 +518,11 @@ def build_grounding_messages(cwd: str,
             "PROJECT ANCHOR FILES — included for immediate context. Use "
             "tools to read other files as needed.\n\n" + "\n\n".join(body_parts)
         )
+        if note_cut and cut:
+            block += ("\n\nLeft out to fit the context window: "
+                      + "; ".join(cut)
+                      + ". The files are complete on disk; read_file "
+                      "reaches them.")
         messages.append({"role": "system", "content": block})
     if extended_sources:
         sources = read_extended_sources(cwd, max_extended_bytes)

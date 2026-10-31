@@ -5,6 +5,7 @@ source: leetcode-42
 task: 'Total trapped rainwater given a bar-height array. O(N) — stdin: n, heights. Stdout: total water.'
 sandbox_path: solution.cs
 oracle: csharp-medium-01-trapped-rainwater-oracle.py
+spec: body
 ---
 
 # csharp-medium-01-trapped-rainwater

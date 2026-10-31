@@ -34,8 +34,12 @@ Exit code: 0 if every check passed, 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -476,6 +480,202 @@ def check_version(r: Results) -> None:
         r.add(FAIL, "claude_hooks importable", str(e))
 
 
+def check_ollama_upstream(r: Results) -> None:
+    """The Ollama server /consultants, /get-advice and the caliber proxy
+    resolve (plan §8): which URL, from where, and whether it answers.
+    A WARN, never a FAIL — a cloud-only host may have no Ollama."""
+    print("ollama upstream")
+    try:
+        from claude_hooks import ollama_upstream
+        from claude_hooks.config import load_config
+        cfg = load_config()
+    except Exception as e:
+        r.add(WARN, "ollama upstream", f"unavailable: {type(e).__name__}")
+        return
+    url, source = ollama_upstream.resolve(cfg)
+    if source == "default":
+        # Hooks that name a remote Ollama while the engines fall back to
+        # localhost: almost always an upgraded host that predates
+        # ollama.url. Say so; never copy the value over.
+        named = [u for u in (
+            ((cfg.get("hooks") or {}).get("user_prompt_submit") or {}).get("hyde_url"),
+            (cfg.get("reflect") or {}).get("ollama_url"),
+        ) if isinstance(u, str) and u and not re.search(
+            r"//(localhost|127\.0\.0\.1|\[::1\])[:/]", u)]
+        if named:
+            r.add(WARN, "ollama.url",
+                  f"unset, engines use {url} while hooks name {named[0]} "
+                  "— set ollama.url in config/claude-hooks.json")
+    try:
+        with urllib.request.urlopen(f"{url}/api/version", timeout=5) as resp:
+            version = json.loads(resp.read() or b"{}").get("version")
+        r.add(PASS, f"ollama {url}", f"{source}, version {version}")
+    except Exception as e:
+        r.add(WARN, f"ollama {url}", f"{source}, not answering ({type(e).__name__})")
+    check_ollama_cloud_key(r, cfg, url)
+
+
+def _council_cloud() -> tuple[bool, Optional[str]]:
+    """``(direct, key_file)`` from the consultants ``[cloud]`` section:
+    whether the council sends Ollama Cloud models to ollama.com itself.
+    ``(False, None)`` when the consultants package is not here."""
+    try:
+        from consultants.config import load_config
+        cloud = load_config().cloud
+    except Exception:
+        return False, None
+    return cloud.route == "direct", cloud.key_file
+
+
+def check_ollama_cloud_key(r: Results, cfg: dict, url: str) -> None:
+    """The Ollama Cloud key (ch-15): where it comes from, and that
+    ollama.com accepts it. Never prints the key. FAIL when no key
+    resolves and something sends to ollama.com itself: the engines'
+    server, or the council's ``[cloud] route = "direct"`` (the default)."""
+    from claude_hooks import ollama_upstream
+    direct, key_file = _council_cloud()
+    if direct and key_file:
+        key = ollama_upstream.read_key_file(key_file)
+        source = ("consultants [cloud] key_file" if key else
+                  f"consultants [cloud] key_file unreadable ({key_file})")
+    else:
+        key, source = ollama_upstream.api_key_source(cfg)
+    needed = ollama_upstream.is_cloud(url) or direct
+    if not key:
+        if needed:
+            who = (f"ollama.url is {url}" if ollama_upstream.is_cloud(url)
+                   else "the council sends cloud models to ollama.com "
+                        "([cloud] route = direct)")
+            r.add(FAIL, "ollama cloud key",
+                  f"{who} but no key ({source}) — set ollama.api_key_file "
+                  "in config/claude-hooks.json, or `claude-consultants "
+                  "config set-cloud local`")
+        elif source != "none":
+            r.add(WARN, "ollama cloud key", source)
+        return
+    req = urllib.request.Request(
+        "https://ollama.com/api/me", data=b"{}", method="POST",
+        headers={"Authorization": f"Bearer {key}",
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read() or b"{}")
+        plan = body.get("Plan") or body.get("plan") or "?"
+        r.add(PASS, "ollama cloud key", f"{source}, accepted (plan {plan})")
+    except urllib.error.HTTPError as e:
+        r.add(FAIL if needed else WARN,
+              "ollama cloud key", f"{source}, refused by ollama.com ({e.code})")
+    except Exception as e:
+        r.add(WARN, "ollama cloud key",
+              f"{source}, ollama.com not answering ({type(e).__name__})")
+
+
+def check_shell(r: Results) -> None:
+    """Whether this host can give a council the sandboxed shell (plan E).
+
+    Runs the backend's preflight, which runs one trivial command through
+    every layer. FAIL only when ``[tools.shell] default = "always"`` —
+    then every council asks for a shell the host cannot give and is
+    refused before it starts. Otherwise a missing layer is a WARN: the
+    shell is off until someone asks for it, and the ask is refused with
+    the same reason."""
+    print("council shell")
+    try:
+        from claude_hooks.sandbox import backend_for
+        from consultants import config as cc
+        sc = cc.load_config(cwd=REPO).tools.shell
+    except Exception as e:
+        r.add(WARN, "council shell", f"unavailable: {type(e).__name__}: {e}")
+        return
+    pre = backend_for(sc.backend).preflight(refresh=True)
+    if pre.ok:
+        optional = [k for k, v in pre.layers.items() if v.endswith("(optional)")]
+        r.add(PASS, f"shell sandbox ({pre.backend})",
+              f"default={sc.default}" + (f"; optional absent: {', '.join(optional)}"
+                                         if optional else ""))
+    else:
+        r.add(FAIL if sc.default == "always" else WARN,
+              f"shell sandbox ({pre.backend})",
+              f"default={sc.default}; {pre.reason()}")
+    try:
+        from claude_hooks.sandbox import views
+        from consultants.server import inflight
+        live = {x.get("sid") for x in inflight.load()}
+        rows = views.registered()
+    except Exception as e:
+        r.add(WARN, "sandbox views", f"unreadable: {type(e).__name__}: {e}")
+        return
+    orphans = [x["sid"] for x in rows if x.get("sid") not in live and any(
+        st in ("creating", "active") for st in (x.get("lanes") or {}).values())]
+    held = sum(1 for x in rows for st in (x.get("lanes") or {}).values()
+               if st == "held")
+    if orphans:
+        r.add(WARN, "sandbox views", f"{len(orphans)} orphaned (council not "
+              f"running): {', '.join(orphans[:5])} — the engine's next sweep "
+              "freezes them; or run `claude-consultants sandbox gc`")
+    else:
+        r.add(PASS, "sandbox views", f"{held} held patch(es), no orphans")
+
+
+def check_engine_hardening(r: Results) -> None:
+    """Plan E8: every installed engine unit carries the measured
+    hardening drop-in deploy writes (``scripts/engine_hardening.py``)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import engine_hardening
+    units = engine_hardening.installed_units()
+    if not units:
+        r.add(PASS, "engine hardening", "no consultants engine unit on this host")
+        return
+    bad = engine_hardening.problems()
+    if bad:
+        r.add(FAIL, "engine hardening", "; ".join(bad))
+    else:
+        r.add(PASS, "engine hardening",
+              f"{engine_hardening.DROPIN} on {len(units)} unit(s)")
+
+
+def check_sandbox(r: Results) -> None:
+    """The council-sandbox launcher (plan E2) and a real escape smoke.
+
+    An installed launcher must be the pinned one — a copy that no longer
+    matches (a pin moved and the deploy did not follow, or someone
+    swapped it) is a FAIL, since ``auto`` would then quietly fall back
+    to bwrap. Then :func:`launcher.escape_smoke` runs escape attempts
+    (root, ``/root``, writes outside scratch, network, host pids, new
+    namespaces, capabilities) through the backend councils will actually
+    use, and any attempt that is not refused is a FAIL."""
+    print("council sandbox")
+    if not sys.platform.startswith("linux"):
+        r.add(PASS, "council-sandbox", f"no launcher on {sys.platform} (plan E7)")
+        return
+    try:
+        from claude_hooks.sandbox import backend_for, launcher
+        from consultants import config as cc
+        backend = cc.load_config(cwd=REPO).tools.shell.backend
+    except Exception as e:
+        r.add(WARN, "council-sandbox", f"unavailable: {type(e).__name__}: {e}")
+        return
+    chk = launcher.verify()
+    if chk.ok:
+        r.add(PASS, "council-sandbox", f"{chk.reason}, sha256 {chk.sha256[:12]}… "
+              f"({chk.path})")
+    elif chk.reason == "not installed" or chk.reason.startswith("no "):
+        r.add(FAIL if backend == "launcher" else WARN, "council-sandbox",
+              f"{chk.reason} — council shells use the bwrap chain")
+    else:
+        r.add(FAIL, "council-sandbox", f"{chk.path}: {chk.reason}")
+    be = backend_for(backend)
+    if not be.preflight().ok:
+        return  # check_shell already reported why there is no shell
+    failed = launcher.escape_smoke(be)
+    if failed:
+        r.add(FAIL, f"escape smoke ({be.name})",
+              "NOT refused: " + "; ".join(failed))
+    else:
+        r.add(PASS, f"escape smoke ({be.name})",
+              f"{len(launcher.SMOKE)} escape attempts refused")
+
+
 # --------------------------------------------------------------------- #
 # Skills
 # --------------------------------------------------------------------- #
@@ -645,6 +845,53 @@ def check_tasks(r: Results) -> None:
           f"{len(projects)} project(s)")
 
 
+def check_secret_gate(r: Results) -> None:
+    """The commit secret gate is wired and can run: the pre-commit hook
+    calls scripts/secret_scan.py, and gitleaks is there for it (without
+    it every commit is refused)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import secret_scan
+    print("commit secret gate")
+    if not secret_scan.hook_installed():
+        r.add(FAIL, "secret gate", ".git/hooks/pre-commit does not run "
+              "scripts/secret_scan.py — run scripts/deploy.py")
+        return
+    exe = secret_scan.find_gitleaks()
+    if exe is None:
+        r.add(FAIL, "secret gate", "gitleaks not installed: commits are "
+              "refused (winget install Gitleaks.Gitleaks / apt gitleaks)")
+        return
+    r.add(PASS, "secret gate", f"pre-commit hook + {exe}")
+
+
+def check_resources(r: Results) -> None:
+    """The resource store answers a real read, and says which one it is:
+    the shared Postgres (every host) or a local file (this host only)."""
+    try:
+        from claude_hooks.resources.store import (
+            ResourceStore, backend_from_config,
+        )
+        from claude_hooks.resources.tools import resources_enabled
+        if not resources_enabled():
+            return
+        dialect, _ = backend_from_config()
+    except Exception as e:
+        r.add(WARN, "resources", f"config unavailable: {type(e).__name__}")
+        return
+    print("resources")
+    try:
+        outs, _, defs = ResourceStore.from_config().status()
+    except Exception as e:
+        r.add(FAIL, "resource store", f"{type(e).__name__}: {e}")
+        return
+    held = sum(1 for o in outs if o.granted)
+    scope = ("shared Postgres, every host" if dialect == "postgres"
+             else "local SQLite, this host only")
+    r.add(PASS if dialect == "postgres" else WARN, "resource store",
+          f"{scope}: {held} held, {len(outs) - held} queued, "
+          f"{len(defs)} defined")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--store", action="store_true", help="store checks only")
@@ -659,6 +906,10 @@ def main() -> int:
         check_skills(r)
     else:
         check_version(r)
+        check_ollama_upstream(r)
+        check_shell(r)
+        check_sandbox(r)
+        check_engine_hardening(r)
         check_providers(r)
         check_embedder(r)
         check_lsp_daemons(r)
@@ -666,7 +917,9 @@ def main() -> int:
         check_skills(r)
         check_mailbox_relay(r)
         check_cli_and_hooks(r)
+        check_secret_gate(r)
         check_tasks(r)
+        check_resources(r)
         check_store(r)
 
     failed = r.failed

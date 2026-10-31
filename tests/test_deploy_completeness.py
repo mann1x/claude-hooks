@@ -251,6 +251,120 @@ class TestEveryArtifactClassIsDeployed(unittest.TestCase):
         self.assertIn("linked_root", src)
 
 
+class TestCouncilSandboxLauncher(unittest.TestCase):
+    """``council-sandbox`` (plan E2) is a native binary no pip install
+    touches, and the engine runs it as root. The fork's launcher was
+    linked against a glibc newer than this host's and never started; a
+    stale or swapped binary here is either the same failure or a root
+    compromise. So deploy installs it from a sha256 pin (or a verified
+    static local build), before the engine restarts onto it, and the
+    verifier runs escape attempts through it."""
+
+    def test_deploy_installs_the_launcher_before_services(self):
+        src = _src(DEPLOY)
+        self.assertIn("def step_sandbox", src)
+        steps = src[src.index("steps = ["):]
+        self.assertLess(steps.index("step_sandbox("),
+                        steps.index("step_services("))
+
+    def test_deploy_checks_the_pin_and_static_linking(self):
+        src = _src(DEPLOY)
+        body = src[src.index("def step_sandbox"):]
+        body = body[:body.index("\ndef ", 1)]
+        self.assertIn("launcher.install", body)
+        lib = (REPO / "claude_hooks" / "sandbox" / "launcher.py").read_text(
+            encoding="utf-8")
+        self.assertIn("sha256", lib)
+        self.assertIn("def assert_static", lib)
+
+    def test_the_verifier_smoke_tests_the_launcher(self):
+        src = _src(VERIFY)
+        self.assertIn("def check_sandbox", src)
+        main = src[src.index("def main"):]
+        self.assertIn("check_sandbox(r)", main)
+        body = src[src.index("def check_sandbox"):]
+        body = body[:body.index("\ndef ", 1)]
+        self.assertIn("escape_smoke", body)
+
+
+class TestSecretGate(unittest.TestCase):
+    """The commit secret gate lives in .git/hooks, which git never
+    tracks: deploy installs it on every host and the verifier fails a
+    host where it is missing or cannot run (c2f2caa)."""
+
+    def test_deploy_installs_it_and_verify_checks_it(self):
+        body = _src(DEPLOY)
+        body = body[body.index("def step_repo"):]
+        body = body[:body.index("\ndef ", 1)]
+        self.assertIn("secret_scan.install_hook()", body)
+        src = _src(VERIFY)
+        self.assertIn("def check_secret_gate", src)
+        self.assertIn("check_secret_gate(r)", src[src.index("def main"):])
+
+    def test_the_config_and_ignore_file_are_tracked(self):
+        import subprocess
+        out = subprocess.run(["git", "-C", str(REPO), "ls-files", "--error-unmatch",
+                              ".gitleaks.toml", ".gitleaksignore",
+                              "scripts/secret_scan.py"],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+
+class TestEngineHardening(unittest.TestCase):
+    """Plan E8: the engine units get a measured hardening drop-in.
+    ``deploy.py`` never re-renders unit files, so the drop-in is its own
+    artifact: written before the restart, checked by the verifier, and
+    never carrying a property measured to break the council sandbox."""
+
+    def _mod(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_engine_hardening", REPO / "scripts" / "engine_hardening.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_deploy_writes_it_before_services_and_verify_checks_it(self):
+        body = _src(DEPLOY)
+        body = body[body.index("def step_sandbox"):]
+        body = body[:body.index("\ndef ", 1)]
+        self.assertIn("engine_hardening.ensure", body)
+        src = _src(VERIFY)
+        self.assertIn("def check_engine_hardening", src)
+        self.assertIn("check_engine_hardening(r)", src[src.index("def main"):])
+
+    def test_no_refused_property_and_never_strict(self):
+        mod = self._mod()
+        text = mod.dropin_text()
+        keys = [k for k, _ in mod.PROPERTIES]
+        for bad in mod.REFUSED:
+            self.assertNotIn(bad, keys)
+        self.assertNotIn("ProtectSystem=strict", text)
+        self.assertIn("ProtectSystem=full", text)
+        self.assertTrue(text.splitlines()[3] == "[Service]")
+
+    def test_ensure_writes_once_and_problems_clear(self):
+        import tempfile
+        from unittest import mock
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as d:
+            unit = pathlib.Path(d) / mod.UNITS[0]
+            unit.write_text("[Service]\n")
+            with mock.patch.object(mod, "unit_dirs",
+                                   return_value=[(pathlib.Path(d), "user")]), \
+                 mock.patch.object(mod.subprocess, "run") as run:
+                self.assertEqual(len(mod.problems()), 1)
+                self.assertTrue(mod.ensure(dry_run=True)[0].startswith("[dry-run]"))
+                self.assertFalse(mod.dropin_path(unit).exists())
+                self.assertEqual(len(mod.ensure()), 1)
+                self.assertEqual(run.call_args[0][0],
+                                 ["systemctl", "--user", "daemon-reload"])
+                self.assertEqual(mod.problems(), [])
+                self.assertEqual(mod.ensure(), [])        # already fresh
+                mod.dropin_path(unit).write_text("[Service]\nX=1\n")
+                self.assertEqual(len(mod.problems()), 1)  # stale is caught
+
+
 class TestEmbedderRespawn(unittest.TestCase):
     """The respawn must be advisory where the embedder isn't ours, and
     blocking where it is."""
@@ -806,6 +920,10 @@ class TestCliWrappersAndHookMatchers(unittest.TestCase):
         self.assertIn("def check_cli_and_hooks", src)
         self.assertIn("check_cli_and_hooks(r)", src)
         self.assertIn("def check_tasks", src)
+        self.assertIn("check_resources(r)", src)
+        self.assertIn("def check_resources", src)
+        self.assertTrue((REPO / "bin" / "claude-hooks-res").is_file())
+        self.assertTrue((REPO / "bin" / "claude-hooks-res.cmd").is_file())
 
     def test_stale_matcher_is_reconciled_and_others_left(self):
         sys.path.insert(0, str(REPO))

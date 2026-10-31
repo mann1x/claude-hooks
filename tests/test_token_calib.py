@@ -54,12 +54,12 @@ class TestCalibration(unittest.TestCase):
             self.assertEqual(tc.chars_per_token("m"), tc.CHARS_PER_TOKEN)
 
     def test_a_rejected_ratio_does_not_take_the_count_with_it(self):
-        """Only one of the two can be wrong. ``tokens`` is what the
-        provider counted; nothing about the character measurement can
-        make that untrue. Keeping them together froze the fork's
-        last-observed count fourteen turns stale."""
-        tc.observe_request_tokens(10, 1000, model="m")     # ratio rejected
-        self.assertEqual(tc.last_observed_request_tokens("m"), 1000)
+        """Above the ceiling only the pairing is suspect. ``tokens`` is
+        what the provider counted; keeping them together froze the
+        fork's last-observed count fourteen turns stale. (Below the
+        floor the count goes too — see test_token_calib_guards.)"""
+        tc.observe_request_tokens(1000, 1, model="m")      # ratio rejected
+        self.assertEqual(tc.last_observed_request_tokens("m"), 1)
         self.assertEqual(tc.chars_per_token("m"), tc.CHARS_PER_TOKEN)
 
     def test_reasoning_is_charged_at_its_own_rate_first(self):
@@ -111,24 +111,6 @@ class TestOutputCapAttribution(unittest.TestCase):
         for source in ("requested", "model-max-output", "default",
                        "uncapped"):
             self.assertFalse(tc.OutputCapReport(source=source).window_bound)
-
-    def test_cap_is_read_not_consumed(self):
-        """A standing fact about the last request, overwritten by the
-        next — a reader asking 'was that cap the window's?' wants the
-        answer to survive being asked."""
-        tc.note_output_cap(tc.OutputCapReport(source="requested"), "m")
-        self.assertIsNotNone(tc.last_output_cap("m"))
-        self.assertIsNotNone(tc.last_output_cap("m"))
-
-    def test_overflow_is_consumed_not_read(self):
-        """Consumed so a single overflow forces a single compaction;
-        left set it would force one on every following turn, including
-        the ones it had already made room for."""
-        tc.note_context_overflow(tc.ContextOverflowReport(
-            context_window=1000, estimated_input_tokens=999,
-            remaining_context=1, min_output_tokens=100), "m")
-        self.assertIsNotNone(tc.consume_context_overflow("m"))
-        self.assertIsNone(tc.consume_context_overflow("m"))
 
 
 class TestRequestMeasurement(unittest.TestCase):

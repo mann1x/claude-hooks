@@ -1,0 +1,291 @@
+# Council memory and a critic that can check
+
+Status: M1–M5 built (2026-10-18); M5 off by default until a graded run. Owner decisions are marked **(decided)**.
+
+## Why
+
+Five graded councils on the same question (cline-sync's tool surface,
+mails #1625–#1641) found real defects, then lost them. Every council
+starts cold:
+
+- run 3 found grep stamp laundering and the apply_patch move-onto
+  defect; neither came back in runs 4 or 5;
+- run 4 found the surrogate split; run 5 did not re-check it;
+- for four runs the critic ranked the read ledger "the biggest gap",
+  though it is unwired on purpose and says so in a comment no lane read;
+- run 5's critic called grep's full-file read credit a defect; it is
+  deliberate.
+
+The store's `("project", id)` namespace does not fix this. It holds
+summaries the distiller writes when old research expires: fuzzy,
+undated as to truth, never decided by anyone.
+
+The critic, meanwhile, can read code but not run it. When it doubts a
+report, the only move it has is "needs more research", which sends the
+whole council back for another round with nothing more than its prose.
+
+## Decisions
+
+1. **(decided)** The council gets memory: a ledger of findings per
+   project.
+2. **(decided)** A finding is settled only by a decision of the user or
+   the assistant reviewing the council, never by the council itself.
+3. **(decided)** No "deliberate, don't flag" list for the critic. A
+   finding settled *by design* is handed to the critic with its reason;
+   the critic may still challenge it, with evidence against that reason.
+4. **(decided)** The critic can run commands: if the lanes can, the
+   critic can, so it can check a doubt itself before it sends anyone
+   back.
+5. **(decided)** The critic may cross-examine a lane it is not convinced
+   by, instead of only sending everyone back.
+
+## The ledger (M1)
+
+A finding is a claim with a verdict. A task is work to do. Mixing them
+would blur both, so the ledger is its own record, built the way tasks
+are: the files are the record, an index is only for search.
+
+```
+<project>/.claude-hooks/findings/
+  config.toml      prefix = "csf", project = "cline-sync"
+  csf-1.md         one file per finding
+```
+
+The prefix is the project's task prefix plus `f`, derived once and
+written down (`derive_prefix`), so `csf-12` never collides with a task
+id.
+
+### A finding file
+
+```markdown
+---
+id: csf-3
+title: apply_patch create, then edit refused as unread
+status: confirmed
+severity: H
+paths: [sdk/packages/core/src/extensions/tools/executors/apply-patch.ts:412]
+symbols: [executeApplyPatch]
+councils: [csl-2026-10-18-1358-a02b, csl-2026-10-18-1458-cb89]
+task: ""
+commit: ""
+settled_by: user
+settled_at: 2026-10-18T15:02:11Z
+created: 2026-10-18T14:30:00Z
+updated: 2026-10-18T15:02:11Z
+---
+
+## Claim
+After apply_patch creates a file, the next editor call is refused as
+"not read".
+
+## Reproduce
+cd sdk/packages/core && bun x vitest run --configLoader runner src/…/audit3.test.ts
+
+## Evidence
+- 2026-10-18 csl-…-cb89 C212 (researcher lane 0): exit 1, "refused: read the file first"
+
+## Decision
+Confirmed by re-run on ac1ee35c56 (ollama's grade, mail #1641).
+
+## Log
+- 2026-10-18 15:02Z settled confirmed by user: …
+```
+
+### Statuses
+
+| status | meaning | who sets it |
+|---|---|---|
+| `candidate` | a council said so; nobody has decided | the council (recorded after a run), or anyone |
+| `confirmed` | the defect is real | user / assistant |
+| `refuted` | it is not; the decision names the run or reason | user / assistant |
+| `by_design` | the behaviour is intended; the decision says why and where | user / assistant |
+| `fixed` | was confirmed, now fixed; `commit` is required | user / assistant |
+
+`settle()` refuses a decision without a reason, a `by` other than
+`user` / `assistant`, or `fixed` without a commit. A settled finding
+returns to `candidate` only through `reopen()`, with a reason, by the
+same two parties. The engine has no code path that settles.
+
+### Matching
+
+A council's new claim is matched against the ledger before it becomes a
+new candidate: path overlap (same file, line within a window) plus
+claim-word overlap (stemmed content words, as `is_about_the_search`).
+A match adds evidence and the council's id to the existing finding
+instead of a duplicate file. `relevant(question, paths, k)` serves M2.
+
+A project ledger holds tens of findings, so M1 matches in Python over
+the files. An embedding index on the host store (as `tasks`) is added
+when a ledger outgrows that.
+
+### Surfaces
+
+- `claude_hooks/findings/` — model, ledger, matching (no engine import).
+- MCP tools on both memory servers (`finding-list`, `-show`, `-record`,
+  `-settle`, `-reopen`, `-merge`, `-note`), off with `hooks.findings.enabled:
+  false`.
+- `claude-consultants findings list|show|settle|reopen|merge|note`.
+- `merge <dup> --into <id>` (user / assistant, with a reason) folds a
+  duplicate into the finding it restates: the target keeps its status
+  and decision and gains the duplicate's evidence, councils and paths;
+  the duplicate moves to `findings/merged/` with `merged_into`, its id
+  never reused, and `resolve()` follows it (an answer tagging the old
+  id lands on the target).
+
+## M2 — the council reads and writes the ledger
+
+- The planner gets the relevant findings, by status:
+  - `confirmed` (not fixed): re-verify with its reproduction, do not
+    rediscover;
+  - `fixed`: check that the fix holds;
+  - `refuted`: do not re-raise without new evidence; here is the run;
+  - `by_design`: here is the intent; challenge it only with behaviour
+    that contradicts it.
+- The synthesizer tags each ranked item `known (csf-3, confirmed)` or
+  `new`.
+- After a council, its ranked items and matrix rows that cite a run
+  are recorded as candidates (or as evidence on a match), with C<n>,
+  printed lines and the command. Items that cite no run are not
+  recorded.
+- The review loop (skill) lists the run's candidates and proposes
+  settlements; the user decides.
+
+## M3 — the comment at the cited line
+
+Every `path:line` a report cites reaches the critic and meta-critic
+with the comment block around it (the contiguous comment lines above
+and at the line, and a docstring when the line is a definition),
+taken in code, no model call. The read ledger's "unwired on purpose"
+comment is what four critics missed.
+
+Built as `consultants/engine/cited_comments.py`: the contiguous comment
+lines above the cited line (decorators skipped), the line itself when
+it is or carries a comment (to the comment's end), and a Python
+docstring for a cited definition. Cites resolve like the CitationLinter
+(`_resolve_path`, short paths by suffix, never a bare name), blocks are
+de-duplicated, the most cited come first, and they fill
+`COMMENTS_WINDOW_SHARE` (0.15) of the critic's window, whole, the rest
+named. A cite with no comment adds nothing. On the frozen baseline the
+read-ledger cite (`executors/index.ts:163`) brings "The read ledger is
+NOT wired by default, deliberately".
+
+## M4 — the critic runs commands
+
+On a shell run the critic gets `run_command`, through the same sandbox
+backend, policy gate and session store mask as the lanes:
+
+- read-only shell: in the session's read-only view;
+- `--shell write`: its own view (lane `critic:<n>`), like the coder's,
+  so nothing it writes reaches a lane or the user unless held and
+  applied like any lane's patch;
+- its runs are in `transcript.db` as `tool_call` rows with role
+  `critic`, so they get C<n> ids and the claim audit and Dropped rules
+  apply to them as to any run;
+- the critic's own loop budget is bounded like a lane's
+  (`researcher_iters`-style shell bonus);
+- the evidence hold counts a critic run that reached the code as a run;
+  a critic `ready` still needs one.
+
+`LANE_ONLY_TOOLS` stops being "lanes only": the set of roles that may
+run commands becomes explicit (`SHELL_ROLES` = researcher,
+tool_executor, coder, critic), and the synthesizer and planner stay
+without.
+
+Built: `SHELL_ROLES` and `JUDGE_SHELL_ROLES` (critic, meta_critic) in
+`consultants/engine/graph.py`. On a shell run `_tools_for(deps, role,
+lane)` gives a judge every tool, the shell bound to `critic:<lane_idx>`
+(`meta_critic:0`), whether or not `[tools] all_roles` is on, so each
+judge has its own view (`critic-0`, held and applied like a lane's). Its
+loop is `judge_iters()` = the role caps 4/3 plus a lane's shell bonus
+(14/13), and `JUDGE_SHELL_NOTE` tells it to run the check itself before
+sending anyone back. Its runs are `tool_call` rows with role `critic`,
+so they get C<n> ids and count for the evidence hold. The meta-critic
+gets the same, since at x-tiers it is the judge that holds `ready`.
+
+## M5 — cross-examination
+
+When the critic is not convinced, it may issue challenges instead of a
+blanket `needs_more_research`:
+
+```
+CHALLENGE lane=7: S2e calls the edit of line 5 BLIND, but C58 shows
+line 5 read and unchanged. Settle with: a run that edits a read,
+unchanged line and shows whether it is refused.
+```
+
+- each challenge names the lane, the claim and what would settle it;
+- the challenged lane resumes its own conversation
+  (`load_role_messages`) with the challenge as a harness note, and must
+  answer with a run or a concession; one exchange, tools on, bounded
+  turns; challenged lanes run in parallel;
+- the critic rules on each, about the claim: `stands`, `narrowed`,
+  `falls` or `open` (run 9 replaced `upheld` / `withdrawn`, see below);
+- an `open` challenge falls back to today's reroute, so nothing is lost;
+- a lane re-raising a `refuted` or `by_design` finding is challenged
+  against the recorded decision.
+
+Behind `[critic] cross_examination = on|off` (default off) until a
+graded run shows it pays.
+
+Built: `consultants/engine/cross_exam.py`. The critic (and meta-critic)
+is told the format only when it is on (`CRITIC_NOTE`, via
+`runtime_control.cross_examination`, seeded only when on). A challenge
+names the report by the number the critic sees (`CHALLENGE report=N`),
+not a lane: `research_lanes` (filled beside `research` by
+`_with_lane_tags` in the researcher wrapper) maps it to the lane, and
+when the two lists differ in length nothing is cross-examined. The
+router after the critic (`_route_to_cross_exam`) sends one
+`cross_examine` lane per challenged lane (at most 4, 3 challenges
+each); it resumes the lane's last `llm_call` (`load_lane_thread`, one
+row) on the lane's model and view, recorded as
+`researcher:cross_exam`, 12 turns. `cross_exam_ruling` asks the critic
+for `RULING report=N: stands | narrowed | falls | open`; no ruling, or
+one with no answer (unless it falls), is open; any open one reroutes whatever
+the DECISION line says; with none open the DECISION line decides (and
+the evidence bar still holds a ready), and a ready refunds the reroute
+the critic counted. Once per round. The block (every answer whole)
+is appended to the critique, so the synthesizer reads the rulings.
+
+Found on the way: a critic reroute never showed the researcher the
+verdict — it was told to "address the gaps" without them.
+
+Run 9 (csl-2026-10-18-2314-4c0f, cross-examination on, graded best run
+yet) fixed:
+- rulings were `upheld` (the claim falls) / `withdrawn`; the critic read
+  "upheld" as "the claim is upheld" both times. Now each word is about
+  the claim (`stands` / `narrowed` / `falls` / `open`), the old words
+  rule nothing, and the lane's own `ANSWER report=N: settled | narrowed
+  | conceded` caps the ruling in code (`outcome()`): a conceded claim
+  falls, a narrowed one is at most narrowed;
+- lane 2 (minimax-m3) had `run_command` offered and said it had none —
+  its own earlier report said so after a cut turn — so it could only
+  concede, and it numbered its answers 1–3 for one `report=3`. The note
+  now names the exchange's tools and the report numbers to answer;
+- each ruling is recorded on `cross_exam_rulings` (declared in both
+  state classes), and the settled audit reads it: an item close to a
+  by_design / refuted finding that a cross-examination ruled stands or
+  narrowed against it gets the ruling (`EXAMINED_NOTE`), not "needs a
+  run against that reason" — the cross-examination was that run;
+- the round after the adversary brief could not reach the coder
+  patches (the views live under the masked session store; researchers
+  100–103 spent ~220 calls looking). A lane after the first round on a
+  shell run now gets every other lane's diff in its own
+  `/scratch/held/<lane>.patch` with a note naming files and overlaps and
+  how to apply and revert (`held_patches.hand_over()`, via
+  `graph._held_note()`; same-round siblings skipped), and hunks it
+  leaves applied are dropped from its own held patch
+  (`_drop_handed_copies()`). No mount or launcher change;
+- Held patches: a `fixes` list was read for its first ref only
+  ("coder-1: fixes #2 (C322), #4 (C322), #8 (C322)" audited #2), and
+  "Fixes known csf-2" not at all. `_fix_claims()` reads every ref with
+  its own cite and skips "addresses / not verified / leaves" ones;
+  `HeldAudit.elsewhere` flags a fix for a defect whose cited files the
+  lane's patch does not change (coder-1's #4 was grep.ts);
+- an item labelled "(new)" that the ledger already holds (csf-20) is
+  noted (`memory.note_known_new()`, `Ledger.match`, no write).
+`build_researcher_messages(critique=)` now carries it on a reroute.
+
+## Order and tests
+
+M1 → M2 → M3 → M4 → M5. Each milestone ships with tests and a mutation
+check per new rule, and is deployed only between graded runs.

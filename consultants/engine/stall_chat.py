@@ -31,6 +31,7 @@ interchangeably.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import threading
 import time
@@ -52,6 +53,23 @@ log = logging.getLogger("consultants.engine.stall_chat")
 ChatFn = Callable[[dict], dict]
 
 
+def scaled_hard_cap(hard_cap_s: float, payload: dict,
+                    reference_output: Optional[int]) -> float:
+    """``hard_cap_s`` stretched by the output this call may produce.
+
+    The production caps were measured on calls capped at
+    ``reference_output`` tokens; a call allowed three times the output
+    gets three times the wall clock, never less than the measured cap.
+    Without the stretch a long turn that used to be cut and continued
+    would be killed outright, and a hard cap is not retried."""
+    if not reference_output:
+        return hard_cap_s
+    n = ((payload or {}).get("options") or {}).get("num_predict")
+    if not isinstance(n, int) or n <= reference_output:
+        return hard_cap_s
+    return hard_cap_s * (n / reference_output)
+
+
 def make_stall_protected_chat_fn(
     chat_streamed: Callable[..., dict],
     *,
@@ -61,6 +79,7 @@ def make_stall_protected_chat_fn(
     check_interval_s: float = 5.0,
     retry_backoff_s: float = 2.0,
     on_event: Optional[Callable[[dict], None]] = None,
+    hard_cap_reference_output: Optional[int] = None,
 ) -> ChatFn:
     """Build a ``chat(payload) -> dict`` callable that routes each
     invocation through a :class:`StallMonitor`.
@@ -112,10 +131,17 @@ def make_stall_protected_chat_fn(
                   "cancel_check": controller.is_cancelled}
         if _accepts(chat_streamed, "on_admitted"):
             kwargs["on_admitted"] = controller.restart_clock
+        if on_event is not None and _accepts(chat_streamed, "on_wait"):
+            # Plan D9: a long wait on infrastructure lands in the lane's
+            # events as ``infra_wait``; informational only.
+            kwargs["on_wait"] = lambda ev: on_event({"kind": "infra_wait", **ev})
         return chat_streamed(payload, **kwargs)
 
     def chat_fn(payload: dict) -> dict:
-        monitor = StallMonitor(cfg, on_event=on_event)
+        hard = scaled_hard_cap(hard_cap_s, payload, hard_cap_reference_output)
+        call_cfg = cfg if hard == hard_cap_s else dataclasses.replace(
+            cfg, hard_cap_s=hard)
+        monitor = StallMonitor(call_cfg, on_event=on_event)
         return monitor.run(chat_streamed_fn, payload)
 
     return chat_fn
@@ -126,6 +152,7 @@ def make_hard_cap_only_chat_fn(
     *,
     hard_cap_s: float,
     on_event: Optional[Callable[[dict], None]] = None,
+    hard_cap_reference_output: Optional[int] = None,
 ) -> ChatFn:
     """Wrap a non-streaming ``chat(payload) -> dict`` callable in a
     worker thread + a hard-cap timer.
@@ -139,7 +166,11 @@ def make_hard_cap_only_chat_fn(
     researcher's fallback path; not the primary mechanism.
     """
 
+    base_cap_s = hard_cap_s
+
     def chat_fn(payload: dict) -> dict:
+        hard_cap_s = scaled_hard_cap(base_cap_s, payload,
+                                     hard_cap_reference_output)
         result_box: dict[str, Any] = {"result": None}
         error_box: dict[str, Optional[BaseException]] = {"error": None}
 
@@ -202,6 +233,7 @@ def stall_protected_chat_fn_for(
     check_interval_s: float = 5.0,
     retry_backoff_s: float = 2.0,
     on_event: Optional[Callable[[dict], None]] = None,
+    hard_cap_reference_output: Optional[int] = None,
 ) -> ChatFn:
     """Pick the right protector for ``chat_client``.
 
@@ -231,6 +263,7 @@ def stall_protected_chat_fn_for(
             check_interval_s=check_interval_s,
             retry_backoff_s=retry_backoff_s,
             on_event=on_event,
+            hard_cap_reference_output=hard_cap_reference_output,
         )
     # Streaming not available — hard-cap-only fallback.
     log.info(
@@ -242,6 +275,7 @@ def stall_protected_chat_fn_for(
         chat_client.chat,
         hard_cap_s=hard_cap_s,
         on_event=on_event,
+        hard_cap_reference_output=hard_cap_reference_output,
     )
 
 
@@ -250,6 +284,7 @@ __all__ = [
     "make_stall_protected_chat_fn",
     "make_hard_cap_only_chat_fn",
     "stall_protected_chat_fn_for",
+    "scaled_hard_cap",
     # Re-export so callers don't have to dual-import.
     "CancelledByOrchestrator",
     "HardCapExceeded",

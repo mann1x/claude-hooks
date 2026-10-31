@@ -36,6 +36,10 @@ class ToolProvider(ABC):
     #: Stable identifier, used in logs and config keys.
     name: str = "provider"
 
+    #: True when :meth:`execute` takes ``lane=`` — the calling lane's id,
+    #: from ``LaneBoundExecutor`` — for tools whose state is per lane.
+    accepts_lane: bool = False
+
     #: Prepended to every tool name as ``<prefix>__<tool>``. Empty means
     #: the provider owns its bare names (built-ins only).
     prefix: str = ""
@@ -75,6 +79,15 @@ class ToolProvider(ABC):
         unsure, say False.
         """
         return True
+
+    def call_level(self, tool: str, raw_args: str):
+        """This call's rung, when it depends on the arguments.
+
+        Return ``(level, reason)`` or ``None`` for "use
+        :meth:`default_level`". The operator's settings still win over
+        it (``PolicyGate`` resolution order). Default: ``None``.
+        """
+        return None
 
     def taints(self) -> bool:
         """Whether merely activating this provider taints the session.

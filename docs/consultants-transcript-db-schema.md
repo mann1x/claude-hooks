@@ -274,3 +274,30 @@ The whole reason we picked SQLite over JSONL is to keep the data
 opaque to incidental indexers (claudemem, RAG, ripgrep). It is
 not a security boundary — anyone with read access to the file has
 the data.
+
+## How a node ended (plan D7)
+
+`events` keeps its columns. A `node_exit` is mirrored into
+`runtime_events` (`payload` is a JSON object), and that payload carries
+`stop_reason` and `failure_class` when the node recorded them:
+
+| `stop_reason` | meaning |
+|---|---|
+| `completed` | the loop answered on its own |
+| `iteration_cap` | the cap ended it; one tool-less report was asked (D6) |
+| `loop_guard` / `mistake_limit` / `struggle` / `reasoning_loop` | a guard ended it with one forced report (D1, D2, D10, D14) |
+| a failure class | the node failed and the lane was tombstoned |
+
+Failure classes (`consultants.engine.events.failure_class_of`): `infra`
+(network, admission, stall), `model_missing`, `context_overflow`,
+`tool_call_unparsable`, `cancelled`, `task_error` (anything else).
+`claude-consultants show` lists them as `lanes`.
+
+```sql
+SELECT role, round, lane_idx,
+       json_extract(payload, '$.stop_reason')   AS stop_reason,
+       json_extract(payload, '$.failure_class') AS failure_class
+FROM runtime_events
+WHERE kind = 'node_exit' AND json_extract(payload, '$.stop_reason') IS NOT NULL
+ORDER BY ts;
+```

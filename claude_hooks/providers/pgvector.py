@@ -91,6 +91,7 @@ log = logging.getLogger("claude_hooks.providers.pgvector")
 
 class PgvectorProvider(Provider):
     name = "pgvector"
+    vector_distance = "cosine"  # embedding <=> (vector_cosine_ops)
     display_name = "Postgres pgvector"
 
     def __init__(self, server: ServerCandidate, options: Optional[dict] = None):

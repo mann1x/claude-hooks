@@ -5,6 +5,7 @@ source: cs-classic
 task: "Red-black tree insert with rebalancing. After all inserts: in-order traversal + 'ok'/'bad' invariants verifier."
 sandbox_path: solution.c
 oracle: c-very_hard-01-rbtree-insert-oracle.py
+spec: body
 ---
 
 # c-very_hard-01-rbtree-insert

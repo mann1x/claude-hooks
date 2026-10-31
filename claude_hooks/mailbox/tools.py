@@ -1,4 +1,4 @@
-"""The eight mailbox MCP tools.
+"""The nine mailbox MCP tools.
 
 Added to the existing memory MCP servers rather than shipped as a skill,
 so they are present in every client with no skill load and no slash
@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Optional, Sequence
+import re
+from datetime import timedelta
+from typing import Any, Optional
 
 from claude_hooks.mailbox.addressing import AddressError, describe_recipients
 from claude_hooks.mailbox.announce import ago
@@ -23,7 +25,7 @@ from claude_hooks.mailbox.filters import (
     page_number, page_size, parse_when,
 )
 from claude_hooks.mailbox.store import (
-    MailboxError, MailboxStore, describe_skipped, host_name,
+    MailboxError, MailboxStore, describe_skipped, host_name, utcnow,
 )
 
 log = logging.getLogger("claude_hooks.mailbox.tools")
@@ -31,7 +33,22 @@ log = logging.getLogger("claude_hooks.mailbox.tools")
 TOOL_NAMES = (
     "mailbox-send", "mailbox-list", "mailbox-read", "mailbox-ack",
     "mailbox-edit", "mailbox-cancel", "mailbox-sent", "mailbox-sessions",
+    "mailbox-durable",
 )
+
+#: The host of a durable alias given with no ``@host``: what a linked
+#: cloud thread is everywhere else.
+CLOUD_HOST = "cloud"
+
+#: Tools that act as one identity and so accept ``as`` (``from`` on
+#: send): a durable alias this session owns.
+AS_TOOLS = frozenset({"mailbox-list", "mailbox-read", "mailbox-ack",
+                      "mailbox-edit", "mailbox-cancel", "mailbox-sent"})
+
+_AS_PROPERTY = {"as": {
+    "type": "string",
+    "description": "act as a durable alias you registered with "
+                   "mailbox-durable (`osync` or `osync@cloud`)"}}
 
 
 def _listing_properties(party: str, party_desc: str, *,
@@ -51,6 +68,7 @@ def _listing_properties(party: str, party_desc: str, *,
                   "description": "older than, same forms; a bare date "
                                  "includes that day"},
         "order": {"type": "string", "enum": list(ORDERS)},
+        **_AS_PROPERTY,
     }
     if include_read:
         props = {"include_read": {"type": "boolean", "default": False},
@@ -84,6 +102,12 @@ def tool_catalog() -> list[dict]:
                                  "description": "0 normal, 1+ raises it in "
                                                 "the recipient's "
                                                 "announcement"},
+                    "from": {"type": "string",
+                             "description": "send as a durable alias you "
+                                            "registered with mailbox-durable "
+                                            "(`osync` or `osync@cloud`); "
+                                            "replies then reach that "
+                                            "alias's inbox"},
                 },
                 "required": ["to", "subject", "body"],
             },
@@ -113,6 +137,7 @@ def tool_catalog() -> list[dict]:
                 "type": "object",
                 "properties": {
                     "ids": {"type": "array", "items": {"type": "integer"}},
+                    **_AS_PROPERTY,
                 },
                 "required": ["ids"],
             },
@@ -131,9 +156,12 @@ def tool_catalog() -> list[dict]:
                 "type": "object",
                 "properties": {
                     "id": {"type": "integer"},
+                    "ids": {"type": "array", "items": {"type": "integer"},
+                            "description": "Several messages, one note."},
                     "note": {"type": "string"},
+                    **_AS_PROPERTY,
                 },
-                "required": ["id", "note"],
+                "required": ["note"],
             },
         },
         {
@@ -149,6 +177,7 @@ def tool_catalog() -> list[dict]:
                     "subject": {"type": "string"},
                     "body": {"type": "string"},
                     "priority": {"type": "integer"},
+                    **_AS_PROPERTY,
                 },
                 "required": ["id"],
             },
@@ -159,7 +188,7 @@ def tool_catalog() -> list[dict]:
                 "Withdraw an unread message you sent. Refused once read."),
             "inputSchema": {
                 "type": "object",
-                "properties": {"id": {"type": "integer"}},
+                "properties": {"id": {"type": "integer"}, **_AS_PROPERTY},
                 "required": ["id"],
             },
         },
@@ -191,11 +220,38 @@ def tool_catalog() -> list[dict]:
                 },
             },
         },
+        {
+            "name": "mailbox-durable",
+            "description": (
+                "Durable aliases: an address that lasts without a session "
+                "behind it — what a cloud thread linked to this machine uses "
+                "to be `osync@cloud` across days. `register` makes (or "
+                "renews) one you own; it stays until `remove` or its `ttl`. "
+                "Then pass `from` on mailbox-send and `as` on mailbox-list / "
+                "-read / -ack / -sent / -edit / -cancel to act as it; "
+                "replies land in its inbox. `list` shows yours. An alias "
+                "held by a live session, or live on another host, is "
+                "refused."),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string",
+                               "enum": ["register", "remove", "list"],
+                               "default": "list"},
+                    "alias": {"type": "string",
+                              "description": "`osync` (= osync@cloud) or "
+                                             "alias@host for this host"},
+                    "ttl": {"type": "string",
+                            "description": "how long it lasts: 30d / 12h "
+                                           "/ 2w; empty = until removed"},
+                },
+            },
+        },
     ]
 
 
 class MailboxTools:
-    """Dispatch for the eight tools.
+    """Dispatch for the nine tools.
 
     ``identity`` supplies who *this* session is. It is resolved once per
     server process rather than per call: a tool that had to be told its
@@ -261,7 +317,47 @@ class MailboxTools:
             self.session_id = sid
         return " ".join(n for n in (note, fresh) if n)
 
+    @property
+    def owner(self) -> str:
+        """Who owns the durable aliases this session registers."""
+        return f"{self.alias}@{self.host}"
+
+    def _as(self, name: str, args: dict) -> Optional[str]:
+        """The durable alias this call acts as (``from`` on send, ``as``
+        elsewhere), or None for this session's own identity."""
+        key = "from" if name == "mailbox-send" else "as"
+        if name != "mailbox-send" and name not in AS_TOOLS:
+            return None
+        raw = str(args.get(key) or "").strip()
+        return raw or None
+
+    def as_identity(self, raw: str) -> "MailboxTools":
+        """A dispatcher acting as durable alias ``raw``, which this
+        session must own. MailboxError otherwise."""
+        alias, host = split_alias(raw)
+        if (alias, host) == (self.alias, self.host):
+            return self
+        row = self.store.owned(alias, host, self.owner)
+        if row is None:
+            raise MailboxError(
+                f"{alias}@{host} is not a durable alias of {self.owner}. "
+                "Register it with mailbox-durable first (action register).")
+        view = MailboxTools(self.store, alias=alias,
+                            session_id=row["session_id"], host=host)
+        view._registered = True     # the durable row is the registration
+        return view
+
     def _call(self, name: str, args: dict, *, headless: bool) -> str:
+        raw = self._as(name, args)
+        if raw:
+            try:
+                view = self.as_identity(raw)
+            except (MailboxError, AddressError) as e:
+                return str(e)
+            if view is not self:
+                rest = {k: v for k, v in args.items()
+                        if k not in ("from", "as")}
+                return view._call(name, rest, headless=headless)
         if headless:
             if name in self.HEADLESS_REFUSED:
                 return (f"{name} is not available in a non-interactive run "
@@ -373,10 +469,11 @@ class MailboxTools:
             page=page, page_size=size, order=f.order or None)
         what = "message(s)" if f.include_read else "unread message(s)"
         scope = f.describe("from")
+        hint = self._durable_hint()
         if not pg.total:
             return (f"No messages for {self.alias}@{self.host}"
                     + ("" if f.include_read else " (unread)")
-                    + (f" {scope}" if scope else "") + ".")
+                    + (f" {scope}" if scope else "") + "." + hint)
         out = [_page_header(pg, what, f"{self.alias}@{self.host}", scope)]
         if not pg.rows:
             return _past_the_end(pg, out[0])
@@ -391,7 +488,28 @@ class MailboxTools:
         out.append("")
         out.append("Use mailbox-read with the ids to see the bodies.")
         out += _page_footer(pg, "mailbox-list", f)
-        return "\n".join(out)
+        return "\n".join(out) + hint
+
+    def _durable_hint(self) -> str:
+        """A line naming this session's durable aliases with unread mail:
+        their inbox is not this one, and a thread that forgot it owned
+        one would never look."""
+        try:
+            rows = self.store.durable_rows(owner=self.owner)
+            waiting = []
+            for r in rows:
+                n = self.store.inbox_count(alias=r["alias"],
+                                           session_id=r["session_id"],
+                                           host=r["host"])
+                if n:
+                    waiting.append(f"{r['alias']}@{r['host']} ({n})")
+        except Exception:
+            log.debug("mailbox: durable hint failed", exc_info=True)
+            return ""
+        if not waiting:
+            return ""
+        return ("\n\nUnread for your durable alias(es): "
+                + ", ".join(waiting) + " — list it with as=<alias@host>.")
 
     def _mailbox_read(self, args: dict) -> str:
         ids = _int_list(args.get("ids"))
@@ -418,28 +536,40 @@ class MailboxTools:
         return "\n".join(out)
 
     def _mailbox_ack(self, args: dict) -> str:
-        res = self.store.ack(
-            int(args["id"]), str(args.get("note") or ""),
-            session_id=self.session_id or "?", alias=self.alias,
-            host=self.host)
-        verb = "Attached" if res["action"] == "attached" else "Replaced"
-        return (f"{verb} the note on #{res['id']}. The sender will see it "
-                f"next time they check in.")
+        # ``ids`` too: mailbox-read takes a list, and a session that
+        # passed one here got a bare ``KeyError: 'id'`` (2026-10-24).
+        ids = _int_list(args.get("ids")) + _int_list(args.get("id"))
+        if not ids:
+            return "Pass id (or ids) — the message(s) the note answers."
+        note = str(args.get("note") or "")
+        out = []
+        for mid in dict.fromkeys(ids):
+            try:
+                res = self.store.ack(
+                    mid, note, session_id=self.session_id or "?",
+                    alias=self.alias, host=self.host)
+            except MailboxError as e:
+                out.append(f"#{mid}: {e}")
+                continue
+            verb = "Attached" if res["action"] == "attached" else "Replaced"
+            out.append(f"{verb} the note on #{res['id']}. The sender will "
+                       f"see it next time they check in.")
+        return "\n".join(out)
 
     def _mailbox_edit(self, args: dict) -> str:
         res = self.store.edit(
-            int(args["id"]), from_alias=self.alias, from_host=self.host,
+            _one_id(args), from_alias=self.alias, from_host=self.host,
             subject=args.get("subject"), body=args.get("body"),
             priority=(int(args["priority"])
                       if args.get("priority") is not None else None))
         if res["broadcast_group"]:
             return (f"Updated {res['updated']} unread copy/copies of that "
                     f"broadcast. Copies already read were left alone.")
-        return (f"Updated." if res["updated"]
+        return ("Updated." if res["updated"]
                 else "Nothing changed — it may have just been read.")
 
     def _mailbox_cancel(self, args: dict) -> str:
-        res = self.store.cancel(int(args["id"]), from_alias=self.alias,
+        res = self.store.cancel(_one_id(args), from_alias=self.alias,
                                 from_host=self.host)
         if res["broadcast_group"]:
             return (f"Withdrew {res['cancelled']} unread copy/copies of that "
@@ -498,7 +628,8 @@ class MailboxTools:
         for s in rows:
             out.append(f"  {s.alias}@{s.host} [{s.os}] — last seen "
                        f"{ago(s.last_seen)}"
-                       + (f", in {s.cwd}" if s.cwd else ""))
+                       + (f", in {s.cwd}" if s.cwd else "")
+                       + (f" [durable, {s.owner}]" if s.durable else ""))
         by_alias: dict[str, set] = {}
         for s in rows:
             by_alias.setdefault(s.alias, set()).add(s.host)
@@ -509,6 +640,74 @@ class MailboxTools:
                 out.append(f"  `{a}` spans {len(hosts)} hosts — a bare "
                            f"`{a}` will be refused; use {a}@<host> or {a}*.")
         return "\n".join(out)
+
+    def _mailbox_durable(self, args: dict) -> str:
+        action = str(args.get("action") or "list").strip().lower()
+        if action == "list":
+            rows = self.store.durable_rows(owner=self.owner)
+            if not rows:
+                return (f"{self.owner} owns no durable aliases. Register one "
+                        "with action register, alias osync.")
+            out = [f"{len(rows)} durable alias(es) of {self.owner}:"]
+            for r in rows:
+                n = self.store.inbox_count(alias=r["alias"],
+                                           session_id=r["session_id"],
+                                           host=r["host"])
+                until = r.get("durable_until")
+                out.append(f"  {r['alias']}@{r['host']} — "
+                           + (f"until {str(until)[:16]}" if until
+                              else "no expiry")
+                           + f", {n} unread")
+            out.append("")
+            out.append("Act as one with `from` on mailbox-send, `as` on the "
+                       "others.")
+            return "\n".join(out)
+        if action not in ("register", "remove"):
+            return "action is register, remove or list."
+        alias, host = split_alias(str(args.get("alias") or ""))
+        if not alias:
+            return "Pass alias — `osync` (osync@cloud) or alias@host."
+        if host not in (CLOUD_HOST, self.host):
+            return (f"A durable alias lives at {CLOUD_HOST} or at this "
+                    f"session's own host ({self.host}), not {host}.")
+        if action == "remove":
+            if not self.store.release_durable(alias, host, owner=self.owner):
+                return f"{alias}@{host} is not a durable alias."
+            return (f"Removed {alias}@{host}. Mail already sent to it stays "
+                    "and waits for whoever takes the alias next.")
+        ttl = parse_ttl(args.get("ttl"))
+        res = self.store.register_durable(
+            alias, host, owner=self.owner,
+            until=(utcnow() + ttl) if ttl else None)
+        verb = "Renewed" if res["renewed"] else "Registered"
+        last = (f"until {res['until'].strftime('%Y-%m-%d %H:%M')} UTC"
+                if res["until"] else "until you remove it")
+        return (f"{verb} {alias}@{host}, owned by {self.owner}, {last}. "
+                f"Send as it with from={alias}@{host}; read its mail with "
+                f"as={alias}@{host} on mailbox-list / mailbox-read.")
+
+
+def split_alias(raw: str) -> tuple[str, str]:
+    """``osync`` → (osync, cloud); ``osync@cloud`` → (osync, cloud)."""
+    alias, _, host = (raw or "").strip().partition("@")
+    return alias.strip(), (host.strip() or CLOUD_HOST)
+
+
+_DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([mhdw])\s*$", re.I)
+_UNIT_S = {"m": 60, "h": 3600, "d": 86400, "w": 7 * 86400}
+
+
+def parse_ttl(raw: Any) -> Optional[timedelta]:
+    """``30d`` / ``12h`` / ``90m`` / ``2w``; empty or ``never`` = None.
+    MailboxError for anything else."""
+    text = str(raw or "").strip().lower()
+    if text in ("", "never", "none", "0"):
+        return None
+    m = _DURATION.match(text)
+    if not m:
+        raise MailboxError(f"ttl {raw!r}: use a number and m / h / d / w "
+                           "(30d, 12h), or leave it empty for no expiry.")
+    return timedelta(seconds=float(m.group(1)) * _UNIT_S[m.group(2)])
 
 
 def _listing_args(args: dict, *, party_key: str, include_read: bool = True):
@@ -561,9 +760,22 @@ def _page_footer(pg, tool: str, f: ListFilter, *,
     return out
 
 
+def _one_id(args: dict) -> int:
+    ids = _int_list(args.get("id")) or _int_list(args.get("ids"))
+    if len(ids) != 1:
+        raise MailboxError("Pass id — one message id.")
+    return ids[0]
+
+
 def _int_list(value: Any) -> list[int]:
     if value is None:
         return []
+    if isinstance(value, str) and value.lstrip().startswith("["):
+        # A client that serialised the array: '["1882"]'.
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return []
     if isinstance(value, (int, str)):
         value = [value]
     out: list[int] = []

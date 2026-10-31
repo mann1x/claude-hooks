@@ -205,8 +205,25 @@ class TestMetaCriticNode:
 
 # ---------------------- critic_node multi-critic mode ----------- #
 
+class TestCriticNodeLaneIdxAlone:
+    """A follow-up seeds ``lane_idx = 0`` for its researcher lane; its
+    single critic must still decide (every follow-up critic's verdict
+    was dropped until 2026-10-27)."""
+
+    def test_a_follow_up_critic_writes_its_decision(self):
+        client = _StubChatClient(reply="DECISION: needs_more_research\nGap.",
+                                 prompt_tokens=1, completion_tokens=1)
+        state = council.initial_state(question="q", cwd="/p",
+                                      models={"critic": "primary"},
+                                      topology="council", effort="high")
+        state.update(plan="p", research=["r"], lane_idx=0)
+        update = council.critic_node(state, chat_client=client, model="primary")
+        assert update["critic_decision"] == "needs_more_research"
+        assert update["critic_reroutes_used"] == 1
+
+
 class TestCriticNodeMultiMode:
-    """When critic_node is invoked with ``lane_idx`` (the runner's
+    """When critic_node is invoked with ``critic_fanout`` (the fan-out's
     multi-critic-mode signal), it must NOT write critic_decision,
     critique, or critic_reroutes_used — meta-critic is the sole
     writer. The recorder still gets the per-lane row for audit."""
@@ -232,7 +249,8 @@ class TestCriticNodeMultiMode:
             )
             state["plan"] = "p"
             state["research"] = ["r"]
-            # multi-critic mode signaled by lane_idx + model_override.
+            # multi-critic mode signaled by critic_fanout (lane_idx names it).
+            state["critic_fanout"] = True
             state["lane_idx"] = 1
             state["model_override"] = "extra-model:cloud"
             update = council.critic_node(
@@ -610,3 +628,55 @@ class TestGraphTopologyMultiCritic:
             f"expected >= 6 (>= 3 plan items × 2 models). If this "
             f"fails, the test setup is wrong, not Phase 10a."
         )
+
+
+def test_the_fanout_flag_is_declared_and_sent():
+    """LangGraph drops a Send key the state does not declare; the flag
+    must reach each parallel critic or all C would write a decision."""
+    import inspect
+    from consultants.engine import graph
+    from consultants.engine.state_v2 import CouncilStateV2
+    for cls in (graph.CouncilState, CouncilStateV2):
+        assert "critic_fanout" in cls.__annotations__
+    assert '"critic_fanout": True,' in inspect.getsource(graph)
+
+
+def test_parallel_critics_write_no_decision_on_the_graph():
+    """End to end: three fanned critics ask for more research, the
+    meta-critic says ready. Only the meta-critic's verdict counts, so no
+    reroute is spent — which holds only if ``critic_fanout`` reaches
+    each parallel critic through its Send."""
+    pytest.importorskip("langgraph.graph")
+    from consultants.engine import council
+    from consultants.engine.graph import GraphDeps, build_council_graph
+
+    class _Chat:
+        def __init__(self, role):
+            self.role = role
+
+        def chat(self, payload):
+            sys_msg = next((m["content"] for m in payload.get("messages", [])
+                            if m.get("role") == "system"), "")
+            if self.role == "critic":
+                meta = "meta-critic" in sys_msg.lower()
+                text = ("DECISION: ready" if meta
+                        else "DECISION: needs_more_research\nGap.")
+            elif self.role == "planner":
+                text = "1. step a\n2. step b"
+            else:
+                text = "x"
+            return {"choices": [{"message": {"content": text},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    roles = ("planner", "researcher", "critic", "synthesizer")
+    deps = GraphDeps(
+        chat_clients={r: _Chat(r) for r in roles},
+        models={r: f"{r}:cloud" for r in roles}, enabled_roles=roles,
+        cwd="/p", tool_executor=lambda *a, **k: "",
+        extra_models_by_role={"critic": ["c-extra-1:cloud", "c-extra-2:cloud"]})
+    initial = council.initial_state(question="q", cwd="/p", models=deps.models,
+                                    topology="council", effort="xmax")
+    out = build_council_graph(deps).invoke(initial)
+    assert out["critic_decision"] == "ready"
+    assert int(out.get("critic_reroutes_used") or 0) == 0

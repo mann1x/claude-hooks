@@ -16,6 +16,22 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Changed
+
+- **The mail badge appears within ~15 s instead of ~50 s.** The unread
+  count is cached for 5 s (was 20; `MAIL_CACHE_SECONDS`, also the
+  `--mail-ttl` default now), and the documented `refreshInterval` is 10
+  (was 30). A working session reads its own mail within a turn or two,
+  so the badge is only visible between arrival and that read: opencoti
+  read #763 66 s after it arrived, before the old badge had reliably
+  shown it. The lookup measures ~120 ms.
+- **The process guard's self-match message covers `! pgrep`.** It said
+  "the test is always true: a `while` on it never ends", which only
+  describes `while pgrep`. opencoti's Monitor waited with
+  `until [ -s out ] || ! pgrep -f "gate.sh kld …"` over ssh, where the
+  negated test is the crash check, and it is that check which can never
+  fire. The message now names both polarities.
+
 ## [1.20.2] — 2026-10-04
 
 ### Fixed

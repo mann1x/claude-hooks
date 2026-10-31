@@ -64,6 +64,10 @@ class RoleTurn:
     duration_seconds: float = 0.0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # Plan D7: how the turn's loop ended, and the failure class when it
+    # failed or a guard stopped it (``consultants.engine.events``).
+    stop_reason: Optional[str] = None
+    failure_class: Optional[str] = None
 
 
 @dataclass
@@ -123,6 +127,14 @@ class ConsultationResult:
     extra_roots: list[str] = field(default_factory=list)
     cwd_display: Optional[str] = None
     extra_roots_display: list[str] = field(default_factory=list)
+    # Plan H: the decision model's recommendation on the final answer
+    # (``{"choice": accept|followup|research, "confidence", "confident",
+    # "probabilities", "model"}``); ``None`` when the seam is off.
+    decision: Optional[dict] = None
+    # Plan D9: set when the operator wrapped the run up early —
+    # ``{"reason": "wrap_up", "requested_by", "requested_at",
+    # "skipped_roles"}``. The answer stands on partial research.
+    partial: Optional[dict] = None
 
 
 # ----------------------- YAML front-matter writer -------------------- #
@@ -168,6 +180,9 @@ def _yaml_front_matter(result: ConsultationResult) -> str:
         lines.append("truncated: {}".format(_yaml_str(", ".join(
             f"{role}={n}"
             for role, n in sorted(result.truncations_by_role.items())))))
+    if result.partial:
+        # Plan D9: the answer below was written from partial research.
+        lines.append(f"partial: {_yaml_str(result.partial.get('reason') or 'wrap_up')}")
     if result.cwd:
         lines.append(f"cwd: {_yaml_str(result.cwd)}")
     if result.parent_sid:

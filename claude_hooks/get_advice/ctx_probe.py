@@ -11,27 +11,24 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import urllib.error
 import urllib.request
+
+from claude_hooks import ollama_upstream
 from typing import Optional
 
 log = logging.getLogger("claude_hooks.get_advice.ctx_probe")
 
-DEFAULT_BASE_URL = "http://192.168.178.2:11433"
 PROBE_TIMEOUT_S = 10.0
 
 _cache: dict[tuple[str, str], Optional[int]] = {}
 
 
 def base_url_default() -> str:
-    """Same env var the caliber proxy reads. One knob per host."""
-    raw = os.environ.get("CALIBER_GROUNDING_UPSTREAM", "").strip()
-    if not raw:
-        return DEFAULT_BASE_URL
-    if raw.endswith("/v1"):
-        raw = raw[: -len("/v1")]
-    return raw.rstrip("/")
+    """The host's Ollama URL, as the caliber proxy and the consultants
+    engine resolve it (:mod:`claude_hooks.ollama_upstream`)."""
+    from claude_hooks import ollama_upstream
+    return ollama_upstream.url()
 
 
 def probe_max_ctx(model: str, base_url: Optional[str] = None,
@@ -48,14 +45,20 @@ def probe_max_ctx(model: str, base_url: Optional[str] = None,
     body = json.dumps({"name": model}).encode()
     req = urllib.request.Request(
         url, data=body, method="POST",
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json",
+                 **ollama_upstream.auth_headers(base)},
     )
     try:
         with urllib.request.urlopen(req, timeout=PROBE_TIMEOUT_S) as resp:
             data = json.loads(resp.read())
-    except (urllib.error.URLError, OSError, ValueError) as e:
+    except urllib.error.HTTPError as e:
+        # A definite answer (unknown model): kept.
         log.warning("probe %s: %s", model, e)
         _cache[key] = None
+        return None
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        # Could not ask: never cached, or the default window sticks.
+        log.warning("probe %s: %s", model, e)
         return None
     ctx = _extract_context_length(data)
     _cache[key] = ctx

@@ -79,8 +79,10 @@ def main(argv=None) -> int:
     )
     ap.add_argument("--no-mail", action="store_true",
                     help="omit the unread-mail segment")
-    ap.add_argument("--mail-ttl", type=float, default=20.0,
-                    help="seconds an unread count is reused (default 20)")
+    from claude_hooks.statusline import MAIL_CACHE_SECONDS
+    ap.add_argument("--mail-ttl", type=float, default=MAIL_CACHE_SECONDS,
+                    help="seconds an unread count is reused "
+                         f"(default {MAIL_CACHE_SECONDS:g})")
     ap.add_argument("--stale-seconds", type=int, default=None,
                     help=argparse.SUPPRESS)
     add_legacy_flags(ap)

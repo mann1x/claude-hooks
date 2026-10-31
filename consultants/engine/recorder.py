@@ -317,6 +317,11 @@ class MessageRecorder:
                 "completion_tokens": completion_tokens,
                 "error": error,
                 "truncated": trunc.kind if trunc else None,
+                # Per-call timings the chat client measured (queue,
+                # TTFT, prefill/decode, granted window), plan A5. The
+                # full record is in ``response_json``.
+                "timings": (response.get("timings")
+                            if isinstance(response, dict) else None),
             },
         )
 
@@ -461,8 +466,12 @@ class MessageRecorder:
         lane_idx: Optional[int] = None,
         duration_ms: Optional[int] = None,
         error: Optional[str] = None,
+        stop_reason: Optional[str] = None,
+        failure_class: Optional[str] = None,
     ) -> None:
-        """Append a node-boundary event. Cheap to skip if a caller
+        """Append a node-boundary event. ``stop_reason`` /
+        ``failure_class`` (plan D7) ride on the ``runtime_events`` row,
+        whose payload is JSON, so the ``events`` schema is unchanged. Cheap to skip if a caller
         doesn't care; debugging tools query these to render the graph
         timeline.
 
@@ -498,6 +507,8 @@ class MessageRecorder:
                 "ts": now,
                 "duration_ms": duration_ms,
                 "error": error,
+                **({"stop_reason": stop_reason} if stop_reason else {}),
+                **({"failure_class": failure_class} if failure_class else {}),
             },
         )
         # Per-role INFO log on node_enter — single source of truth
@@ -740,6 +751,78 @@ class MessageRecorder:
 # disk-loaded and warm code paths symmetric).
 # ---------------------------------------------------------------- #
 
+def guard_sink(recorder: Optional["MessageRecorder"], *, role: str,
+               round: Optional[int] = None,
+               lane_idx: Optional[int] = None):
+    """``LoopConfig.on_guard`` for a role (plan D): each guard trip and
+    stop lands as a ``kind="guard"`` event carrying the quantity it fired
+    on. ``None`` without a recorder — the guards still act, unrecorded."""
+    if recorder is None:
+        return None
+
+    def _sink(event: dict) -> None:
+        recorder.record_event(kind="guard", role=role, round=round,
+                              lane_idx=lane_idx, payload=dict(event))
+    return _sink
+
+
+def _collapse_thread(req: Optional[dict],
+                     resp: Optional[dict]) -> Optional[list[dict]]:
+    """Collapse (request, response) into a flat message list: the
+    request's prior messages + the final assistant message from the
+    response. None if the request is missing the expected shape."""
+    if not isinstance(req, dict):
+        return None
+    msgs = req.get("messages") or []
+    if not isinstance(msgs, list):
+        return None
+    out = list(msgs)
+    if isinstance(resp, dict):
+        choices = resp.get("choices") or []
+        if choices and isinstance(choices, list):
+            msg = (choices[0] or {}).get("message")
+            if isinstance(msg, dict):
+                out.append(msg)
+    return out
+
+
+def load_lane_thread(db_path: Path | str, role: str,
+                     lane_idx: Optional[int]) -> Optional[tuple[str, list[dict]]]:
+    """``(model, thread)`` of one lane's last ``llm_call`` — the lane's
+    conversation as it stands, its final assistant message included —
+    or None when there is none. ``lane_idx`` None is the solo lane.
+    Reads one row, read-only, so it is safe mid-run (plan
+    council-memory M5: a challenged lane resumes its own conversation)."""
+    p = Path(db_path) if db_path else None
+    if p is None or not p.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=5.0,
+                               check_same_thread=False)
+        try:
+            lane_sql = "lane_idx IS NULL" if lane_idx is None else "lane_idx = ?"
+            args = (role,) if lane_idx is None else (role, int(lane_idx))
+            row = conn.execute(
+                "SELECT request_json, response_json FROM events WHERE kind = "
+                f"'llm_call' AND role = ? AND {lane_sql} ORDER BY event_id "
+                "DESC LIMIT 1", args).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    try:
+        req = json.loads(row[0]) if row[0] else None
+        resp = json.loads(row[1]) if row[1] else None
+    except (json.JSONDecodeError, TypeError):
+        return None
+    thread = _collapse_thread(req, resp)
+    if not thread:
+        return None
+    return str((req or {}).get("model") or ""), thread
+
+
 def load_role_messages(
     db_path: Path | str,
 ) -> tuple[Optional[dict[str, list[dict]]],
@@ -824,29 +907,9 @@ def load_role_messages(
         if lane_idx is not None:
             last_by_lane.setdefault(role, {})[int(lane_idx)] = (req, resp)
 
-    def _thread(req: Optional[dict],
-                resp: Optional[dict]) -> Optional[list[dict]]:
-        """Collapse (request, response) into a flat message list:
-        the request's prior messages + the final assistant message
-        from the response. None if either side is missing the
-        expected shape."""
-        if not isinstance(req, dict):
-            return None
-        msgs = req.get("messages") or []
-        if not isinstance(msgs, list):
-            return None
-        out = list(msgs)
-        if isinstance(resp, dict):
-            choices = resp.get("choices") or []
-            if choices and isinstance(choices, list):
-                msg = (choices[0] or {}).get("message")
-                if isinstance(msg, dict):
-                    out.append(msg)
-        return out
-
     role_messages: dict[str, list[dict]] = {}
     for role, (req, resp) in last_by_role.items():
-        thread = _thread(req, resp)
+        thread = _collapse_thread(req, resp)
         if thread is not None:
             role_messages[role] = thread
 
@@ -854,7 +917,7 @@ def load_role_messages(
     for role, lanes in last_by_lane.items():
         per_lane: dict[int, list[dict]] = {}
         for lane_idx, (req, resp) in lanes.items():
-            thread = _thread(req, resp)
+            thread = _collapse_thread(req, resp)
             if thread is not None:
                 per_lane[lane_idx] = thread
         if per_lane:

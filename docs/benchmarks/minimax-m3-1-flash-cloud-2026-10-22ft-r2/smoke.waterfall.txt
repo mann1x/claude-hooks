@@ -1,0 +1,42 @@
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/minimax-m3-1-flash-cloud-2026-10-22ft-r2/smoke.transcript.db
+
+sid: csl-2026-10-22-2049-1cba
+status: completed
+total wall: 31.2s
+
+  planner       node=11.7s   (entries) llm=4x=11.4s   tool=6x=83ms    tok=p38399/c728
+      LLM round=1 model=minimax-m3.1-flash:cloud     4.2s  p=14962  c=216   
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.6s  p=13687  c=242   
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.5s  p=1586   c=134   
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.0s  p=8164   c=136   
+      tool grep               x3      80ms chars=37264
+      tool survey_project     x1       3ms chars=3779
+      tool read_file          x2       0ms chars=9942
+
+  researcher    node=25.4s   (2xentries) llm=9x=25.4s   tool=12x=4ms     tok=p207754/c1599
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     4.3s  p=27501  c=557   
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     4.2s  p=30756  c=550   
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     3.3s  p=16924  c=52    
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     3.1s  p=16896  c=77    
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     2.7s  p=28542  c=88    
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     2.2s  p=26648  c=55    
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     2.2s  p=18400  c=53    
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     1.8s  p=18443  c=108   
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     1.6s  p=23644  c=59    
+      tool grep               x3       4ms chars=61859
+      tool survey_project     x2       0ms chars=7558
+      tool list_files         x4       0ms chars=628
+      tool read_file          x3       0ms chars=26156
+
+  synthesizer   node=3.2s    (entries) llm=2x=3.2s    tool=2x=0ms     tok=p7258/c185
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.2s  p=3408   c=136   
+      LLM round=1 model=minimax-m3.1-flash:cloud     1.0s  p=3850   c=49    
+      tool read_file          x2       0ms chars=1150
+
+totals
+  wall                  31.2s
+  sum of node spans     40.3s
+  sum of LLM call time  39.9s  (128.0% of wall)
+  sum of tool call time 87ms
+  total prompt tokens   253411
+  total completion tok  2512

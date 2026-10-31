@@ -660,17 +660,18 @@ class TestBuildToolPlanUserAppendix(unittest.TestCase):
         self.assertIn("FAILED", out)
         self.assertIn("upstream down", out)
 
-    def test_truncates_long_content(self):
-        big = "Z" * 3000
-        r = ToolResult(intent="x", content=big)
-        out = build_tool_plan_user_appendix([r])
+    def test_long_content_is_kept_up_to_the_history_bound(self):
+        from consultants.engine.tool_executor import PRIOR_RESULT_MAX_CHARS
+        kept = "Z" * 20_000
+        out = build_tool_plan_user_appendix(
+            [ToolResult(intent="x", content=kept)])
+        self.assertIn(kept, out)
+        self.assertNotIn("truncated", out)
+        big = "Z" * (PRIOR_RESULT_MAX_CHARS + 5000)
+        out = build_tool_plan_user_appendix(
+            [ToolResult(intent="x", content=big)])
         self.assertIn("truncated", out)
-        # Content body is capped at 2000 chars + the REPORT-NOW
-        # instructions and source-listing-fabrication block — total
-        # length bounded to ~4 KB. The 2026-05-18 (#207) source-
-        # listing-anti-fabrication block bumped the appendix tail
-        # from ~500 to ~1000 chars; cap raised accordingly.
-        self.assertLess(len(out), 4000)
+        self.assertLess(len(out), PRIOR_RESULT_MAX_CHARS + 4000)
 
     def test_multiple_results_numbered(self):
         a = ToolResult(intent="a", content="found A")

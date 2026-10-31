@@ -69,6 +69,8 @@ after `/consultants`:
 | `accept`     | accept     | Drop the verb; mark the consultancy (rest = sid) ACCEPTED.     |
 | `grant`      | grant      | Drop the verb; rest = `[sid] [N]`; raise that consultancy's cap by N now. |
 | `config`     | config     | Drop the verb; run **config** flow with the rest as sub-args.  |
+| `gc`         | gc         | Run `claude-consultants gc [--days N] [--dry-run]`: remove `coder-out/` trees untouched for N days (default 30) and empty session dirs. Use `--dry-run` first and show the list. |
+| `account`    | account    | Run `claude-consultants account [--model M ...]`; show the plan and, per cloud model, window / max output / thinking values, flagging `plan_ok: false`. |
 | anything else (incl. empty) | ask | Implicit ask: treat the **entire** arg as the question. |
 
 Examples:
@@ -181,6 +183,13 @@ claude-consultants consult --message "<your framing>" --cwd "$(pwd)"
 Optional `--effort low|medium|high|max|xmedium|xhigh|xmax` to
 override the configured tier for this call.
 
+**What you already tried.** When you ran checks before asking (tests,
+greps, a repro), pass them with `--tried <file.json>` —
+`[{"what": "ran pytest tests/test_x.py", "output": "<verbatim output>"}]`
+(at most 20). Every role gets them under ALREADY TRIED, verbatim, so the
+council builds on them instead of redoing them. Paste outputs as they
+were; never summarise them.
+
 **Reaching files outside cwd.** The council's tools are sandboxed
 to `cwd` plus whatever Claude Code's
 `permissions.additionalDirectories` (auto-discovered from
@@ -203,6 +212,35 @@ tools try `--cwd` first, then each `--add-dir` in order — so you do not
 need to rewrite `eval/scorers.py` as an absolute path before asking.
 Do still pass the root: a path with no root that contains it is what
 pre-flight refuses on.
+
+**Running things: `--shell`.** The council can only read unless a run
+asks for the sandboxed shell. Pass `--shell` when the answer needs
+execution — "does the test pass", "reproduce this", "what does the
+script print", "profile it". The research lanes then get `run_command`:
+the project and the roots read-only at their real paths, a private
+`/scratch`, no network, no host home directory, limits on time, memory
+and processes. It cannot change the user's files, so enabling it needs
+no confirmation, but **tell the user in one line that you did**. On a
+host that cannot sandbox it the engine refuses the run before it starts
+(HTTP 409, naming the missing layer): ask the user whether to run
+without it (`--no-shell`) or fix the host (`claude-consultants
+shell-preflight`). Never drop `--shell` silently and present the answer
+as if the council had run anything.
+
+`--shell write` goes further: each research lane gets a **private git
+worktree** of the user's tree (uncommitted and untracked files included)
+at the repo's real path, so it can edit, build, run the tests and even
+commit — to try a fix rather than only describe one. The user's files
+are still never changed. Use it when the question is "fix it and show me
+it passes" or "would this change break the tests"; it needs a git root
+(the engine refuses the run otherwise). Say in one line that you used it.
+
+For a tree that is **not a git repo** (or a huge one), name what the
+council may change: `--shell write --write-scope scripts` (repeatable).
+Each lane gets a reflink clone of only those directories, writable at
+their real paths, and everything else stays read-only. Pick the
+smallest scope that covers the fix. The engine refuses a scope outside
+the root, and a big one on a filesystem that cannot reflink.
 
 Returns:
 
@@ -301,6 +339,11 @@ you**, and either one means "answer me":
 - `cancel_requested` — the run is draining. Every remaining node skips
   and the run ends with status `cancelled` and **no final answer**.
   Don't wait for one.
+- `wrap_up_requested` — the run is finishing on what it has: running
+  lanes are writing one report each, nothing new starts, and the
+  synthesizer answers next. Wait for that answer; the result carries
+  `partial` (and `summary.md` front matter says `partial: wrap_up`),
+  so tell the user the research was cut short.
 
 Each carries the wall-clock at which the engine gives up, and the three
 deadlines resolve differently — check which one you are looking at
@@ -437,7 +480,14 @@ claude-consultants follow-up <parent_sid> --message "<follow-up text>" --cwd "$(
 ```
 
 Optional `--effort ...` to override the tier for this follow-up
-(defaults to parent's). Returns:
+(defaults to parent's). `--shell` adds the sandboxed shell from this
+follow-up on — the fix when a council came back unsure because it could
+not run the tests. It stays on for the rest of the consultancy (every
+later answer ends with `shell: enabled since follow-up #k`) until a
+follow-up sends `--no-shell`. In an auto-issued follow-up of the review
+loop, add `--shell` only if the user turned on `[tools.shell] default =
+"always"` or already approved a shell in this consultancy; otherwise ask
+first. Returns:
 
 ```json
 {"ok": true, "sid": "csl-...-NEW", "parent_sid": "...",
@@ -499,6 +549,29 @@ Read it as a skeptical engineer, not a stenographer. Look for:
   cheaply check, a risky suggestion that needs a second pass.
 
 If you have no material concern, the answer is good enough → **accept**.
+
+**Decision model (when configured).** If the `result` JSON has a
+top-level `decision` block, a decision model (TypeSafe's Jev or a local
+`/v1/systemone` model) already scored the answer:
+
+```json
+"decision": {"choice": "followup", "confidence": 0.71, "confident": true,
+  "probabilities": {"accept": 0.1, "followup": 0.81, "research": 0.09},
+  "model": "jev-1.13.0",
+  "answer_confidence": {"p": 0.38, "model": "jev-1.13.0",
+    "meaning": "on real councils it ranked answers well (AUC 0.85) but runs low: …"}}
+```
+
+Treat it as one input, never the verdict. A **confident** `followup` or
+`research` is a reason to look harder for the gap before accepting; name
+it in your rationale ("decision model: followup 0.81 — …"). A confident
+`accept` does not excuse skipping your own review. When `confident` is
+false, ignore it. `answer_confidence` (only with the `confidence` seam;
+it may come without `choice`) is the model's raw p that the answer is
+right and complete, with what that server's scores mean: read p against
+`meaning`, not against 0.5 — Jev's accepted answers averaged 0.46. Cites the engine marked `[unsupported — the cited code
+does not show this]` are claims the decision model found the cited code
+did not support — verify those first.
 
 ### 2. Decide: accept or follow up
 
@@ -563,6 +636,54 @@ consultancy (and persisted, so it survives compaction). Never tell the
 user the cap "can only be raised on the next follow-up" — that is what
 `grant` is for.
 
+### 2b. Settle what the council found (the findings ledger)
+
+On a run with the shell, every ranked item and matrix row that cites a
+run that reached the code is recorded in the project's findings ledger
+(`<project>/.claude-hooks/findings/`) as a **candidate**, or as new
+evidence on the finding it restates. Councils read the ledger: a
+confirmed finding is re-verified instead of rediscovered, a refuted or
+by-design one is not re-raised without a run against the recorded
+decision. A finding is settled **only** by the user or by you (any
+assistant session, the one driving the council included) — never by
+the council.
+
+After you accept (or the loop stops), list what this consultancy left:
+
+```
+claude-consultants findings list --status candidate --cwd "$(pwd)"
+```
+
+Settle yourself (`--by assistant`) what a run decides: `confirmed` when
+you have read the cited run's output and it shows the defect, `refuted`
+when a run shows the opposite. Tell the user what you settled and why.
+For the rest, propose a settlement with its reason and ask the user to
+decide (one question, all of them):
+
+- `confirmed` — the cited run shows it and you re-checked the output;
+- `refuted` — a run shows the opposite (name it);
+- `by_design` — the behaviour is intended (name the comment, doc or
+  decision that says so);
+- `merge into <id>` — it restates a finding the ledger already has (a
+  council can record the same defect twice under other words); the
+  target keeps its status and gains this one's evidence;
+- leave it `candidate` when nothing settles it yet.
+
+Apply the user's decisions (`--by user`); a `by_design` call or a
+merge is the user's unless they told you to make it:
+
+```
+claude-consultants findings settle <id> --status confirmed --reason "<run / re-check>" --by user --cwd "$(pwd)"
+claude-consultants findings settle <id> --status fixed --reason "<what fixed it>" --commit <sha> --by user --cwd "$(pwd)"
+claude-consultants findings reopen <id> --reason "<new evidence>" --by user --cwd "$(pwd)"
+claude-consultants findings merge <dup-id> --into <id> --reason "<why it is the same finding>" --by user --cwd "$(pwd)"
+```
+
+A merged finding leaves the list but keeps its file under
+`findings/merged/` and its id: a later tag of it lands on the target.
+
+The `finding-*` MCP tools do the same from either memory server.
+
 ### 3. Stop conditions (mirror /get-advice)
 
 Stop the loop when **any** of:
@@ -618,17 +739,26 @@ synthesizer's `self_confidence`. React like this:
 1. **Subscribe** to the stream — `claude-consultants events <sid>` (or
    `--since <id>` to replay across a reconnect / compaction). The
    `awaiting_adversary` block is durable, so a missed SSE is recoverable.
-2. **Author + inject** the brief at the role the critique should re-run
-   through: `inject <sid> --role critic -m "<brief>"` to re-run the
-   fanned critics against it, or `--role synthesizer` to just sharpen the
-   final write-up. These checkpoint/control verbs (`events`, `inject`,
+2. **Read what you are judging** — `state <sid>` carries each lane's
+   `research_previews` and the `critique`; `events <sid> --milestones`
+   names the role and lane of every node.
+3. **Author + inject** the brief at the role the critique should re-run
+   through: `inject <sid> --role researcher|critic -m "<brief>"` rewinds
+   for one more research pass with the critic after it, or
+   `--role synthesizer` just sharpens the final write-up. Every brief
+   also reaches the synthesizer, labelled with the role it named. Read
+   `routed` in the reply: `rewound_to_researcher` (a round was left),
+   `rewound_extra_round` (the cap was spent and your brief bought the one
+   extra round a checkpoint allows), `best_effort_cap_reached` (no round
+   left — only the synthesizer sees it; tell the user the challenge was
+   not researched), `in_place` (synthesizer). These checkpoint/control verbs (`events`, `inject`,
    `adversary-ack`, `resume`) address the run by **`sid`** through the
    engine — they take **no `--cwd`** (unlike `consult` / `follow-up` /
    `config`).
-3. **Ack to resume** — `claude-consultants adversary-ack <sid>` (or
+4. **Ack to resume** — `claude-consultants adversary-ack <sid>` (or
    `resume <sid>` during the checkpoint window, which delegates to the
    ack). The council resumes immediately with your brief in the prompt.
-4. **Or do nothing** — the checkpoint **auto-proceeds at the deadline**
+5. **Or do nothing** — the checkpoint **auto-proceeds at the deadline**
    (default 10 min) so a lost SSE / missed poll never hangs the run. If
    you have no challenge worth making, just let it lapse.
 
@@ -646,6 +776,30 @@ claude-consultants accept <sid> [--note "..."] --cwd "$(pwd)"
 Sets the consultancy (resolved to its root) to the terminal `accepted`
 state. Normally the Review loop calls this for you; a user can also
 invoke it directly to close out a consultancy. Idempotent.
+
+### Held sandbox changes (after a `--shell write` run)
+
+An answer from a write-mode run may end with **"## Sandbox changes"**:
+each lane's changes, held as a patch. The user's files are UNCHANGED.
+After you accept (or whenever the user wants to act on them):
+
+1. Show them: `claude-consultants changes <sid> --cwd "$(pwd)"` (add
+   `--diff` for the patches, `--lane <lane>` for one).
+2. Ask the user, per lane: **apply**, **discard**, or **keep for now**.
+   Never apply without an explicit yes — applying edits their tree.
+3. Apply: `claude-consultants apply <sid> --lane <lane> --cwd "$(pwd)"`.
+   It checks first and refuses when the patch no longer fits their tree
+   (it was made against the tree as the council found it); then offer
+   `--3way` (stages the result, may leave conflict markers) or a manual
+   review — never retry silently. `--dry-run` only checks. A
+   `--write-scope` run holds files, not a patch: apply refuses when any
+   of them changed in the user's tree since the clone (no `--3way`);
+   tell the user which ones, and offer a manual review.
+4. Discard: `claude-consultants discard <sid> --lane <lane>` (or `--all`).
+5. Keeping is fine, but tell the user when it expires: held patches move
+   to the session's `expired/` after `[tools.shell] held_ttl_days`
+   (default 7) — kept, not deleted. `claude-consultants sandbox ls` lists
+   every held one on this host.
 
 ---
 
@@ -778,7 +932,7 @@ per-language entry the same way. The routes only matter when
 
 ### 2. Top-level menu (loop until Done)
 
-The menu has eight areas; AskUserQuestion caps at 4 options, so
+The menu has eleven areas; AskUserQuestion caps at 4 options, so
 present it in rounds — round 1 offers the first three plus **More…**,
 and **More…** opens the next batch (ending with **Done**):
 
@@ -797,6 +951,82 @@ and **More…** opens the next batch (ending with **Done**):
    per-project `override_user_global` directive — see Subflow H
 8. **Tool surface** — which tools the council can reach and what each
    one needs before it runs — see Subflow I
+9. **Endpoints** — named opencoti / llama.cpp / xOllama / Ollama
+   servers a role can use as `@name` or `@name/<model>` — see Subflow J
+10. **Typed messages** — `claude-consultants config set-protocol
+    --typed on|off`: planner, researcher, critic and adversary hand in
+    typed records (rendered back to their usual text); the synthesizer
+    stays prose. Experimental, off by default until benched.
+11. **Output cap, window & sampling** — the per-call output ceiling,
+    the context window each role is budgeted against, and the per-instance
+    seed / temperature jitter, globally, per role or per (role, model) —
+    see Subflow K
+12. **Compaction** — how a role's history is folded when it outgrows the
+    window (reduced or full flow, placement, review, ledger, history
+    truncation), globally, per role or per (role, model) — see Subflow L
+13. **Decision model** — a scorer (TypeSafe's Jev, or a local
+    `/v1/systemone` model such as tev1) the council asks at four seams:
+    review recommendation, confidence, struggle, citations — see Subflow M
+14. **Guard profile** — `claude-consultants config set-guards --profile
+    standard|strict [--role planner|researcher|tool_executor|coder]`.
+    `strict` is for councils on small models: lanes must open with a tool
+    call (a report after none is re-asked once), the planner is re-asked
+    once when its plan does not parse, thinking-only turns are re-asked 3
+    times instead of 2, and the cap warning comes at least 2 turns early.
+    Critic, meta-critic, adversary, refuter and synthesizer are never
+    nudged. Per run: `ask` / `follow-up --guards strict`. Not the same
+    knob as `adversary_strictness` (that tunes the critic's judgement,
+    not lane behaviour). The loop guards are always on in both profiles.
+15. **xauto lane retry** — `claude-consultants config set-xauto-retry
+    on|off` (default on). An xauto run reruns, once and before the
+    critic, the first-round lanes that failed on infrastructure. Other
+    tiers never do; after any run, `retry-lanes <sid>` does it by hand.
+16. **Cross-examination** — `claude-consultants config
+    set-cross-examination on|off|shell` (default `shell`: on for runs
+    with the sandboxed shell, off otherwise). A critic not convinced
+    challenges the claims it doubts (`CHALLENGE report=N: … Settle with:
+    …`); each challenged lane resumes its own conversation and answers
+    with a run, a narrowed claim or a concession, then the critic rules
+    on each claim (stands / narrowed / falls / open). An open challenge falls back to the usual
+    reroute. Council run 10b (2026-10-26) graded it on a shell run: a
+    lane answered with 12 runs, one claim narrowed and one fell, for 4%
+    of the run's prompt tokens. In a follow-up only its own lanes
+    answer; a challenge to an earlier run's report reroutes.
+17. **Lane escalation** — `claude-consultants config set-escalation
+    --model <expert> [--max N]` (`--model ''` = off, the default). A
+    first-round lane a guard ended (struggle, loop guard, mistake limit,
+    reasoning loop) or that failed on its task reruns once on the expert
+    model, given a brief of the failed attempt; at most N (default 2) per
+    council. Ask which model; never pick one for the user.
+18. **Shell** — `claude-consultants config set-shell --default
+    off|always` (default off: only runs started with `--shell` get it),
+    plus limits (`--timeout`, `--max-timeout`, `--memory-mib`, `--pids`,
+    `--cpu-pct`, `--lane-disk-gib`) and `--ro-bind <dir>` for a
+    toolchain the jail should see (its `bin/` goes first on PATH). Show
+    `tools.shell` from `config show` first, and run `claude-consultants
+    shell-preflight` so the user sees whether this host can sandbox it
+    at all (each layer, and what is missing). `--mode write` (git
+    roots: a private worktree per lane, changes held as patches) and
+    `--held-ttl-days` are here too; only `net=none` exists so far.
+19. **PolyKV** — `claude-consultants config set-polykv on|off
+    [--mode auto|affinity|pooled|assured|off] [--layout shared|as-built]`
+    (default off, mode `auto`, layout `shared`). On opencoti endpoints
+    and xOllama models with client-pool seats, each conversation gets its
+    own engine session and the council's shared prompt head is pooled,
+    prefilled once; `affinity` keeps only the sessions. `shared` sends
+    each role's prompt with the common blocks first (question, plan,
+    reports) and the role's own instructions last, one layer per block,
+    so the judges share the reports too; `as-built` sends what the roles
+    build. Cloud and
+    plain Ollama are never touched. The run's `show` reports the shared
+    tokens and any leak.
+20. **Cloud route** — `claude-consultants config set-cloud direct|local
+    [--key-file <path>]` (default `direct`). `direct` sends every Ollama
+    Cloud model (`<m>:cloud`, `<m>:<tag>-cloud`) to ollama.com itself
+    with the account key, under its bare name, so a cloud council holds
+    no host's Ollama; `local` has this host's Ollama relay them. The
+    config keeps the cloud names either way. Without a key, `direct`
+    fails every cloud call: `scripts/verify_deploy.py` says so.
 
 Loop back to step 1 after each successful change; exit on **Done**.
 
@@ -810,7 +1040,10 @@ AskUserQuestion the role (`planner`/`researcher`/`critic`/
   researcher (validation error on next consult).
 - **Change model** → `claude-consultants config list-models`,
   pick up to 3 candidates + `Other (custom)`, then
-  `set-role <role> --model <chosen>`.
+  `set-role <role> --model <chosen>`. For a cloud pick, run
+  `claude-consultants account --model <chosen>` first and warn the
+  user when it reports `plan_ok: false` (the account's plan does not
+  cover the model).
 - **Manage extra models** — researcher + critic only. Sub-action:
   add / remove / clear / back. Forward to
   `set-role <role> --add-model|--remove-model|--clear-extras ...`.
@@ -821,6 +1054,15 @@ AskUserQuestion the role (`planner`/`researcher`/`critic`/
 - **Pin context length** — AskUserQuestion `8192` / `32768` /
   `131072` / `Other`. Then `set-role <role> --ctx <chosen>`.
 - **Clear context pin (auto)** — `set-role <role> --ctx auto`.
+- **Thinking** — `config show` lists each role's effective `think`.
+  Offer `off` / `auto` (the model's own budget) / a level
+  (`minimal`, `low`, `medium`, `high`, `max`; `xhigh` = `max`) / a
+  token count. Then `claude-consultants config set-think <role> <value>`,
+  or `--model <m>` for one model only (a role's lanes may run several),
+  `--clear` to go back to the default. Thinking is never derived from
+  effort. A cloud model's thinking values are listed by
+  `claude-consultants account --model <m>`; a level outside them is sent
+  as plain `on`. On opencoti a level becomes a token budget.
 - **Back**.
 
 ### Subflow B — Service mode
@@ -834,6 +1076,14 @@ user consent.
 
 If smart-start, offer idle timeout: `5min` / `30min (default)` /
 `2h` / `Other`. Then `set-idle-timeout <seconds>`.
+
+Then offer the LAN dashboard: `loopback only (default)` / `all
+interfaces (0.0.0.0)` / `Other` (this host's LAN address). Then
+`set-dashboard-host <addr|off>`. The engine then also serves the
+read-only council dashboard (`/dashboard`) on that address. A client
+that is not on loopback gets 403 on every other route, so the LAN can
+never start or steer a council. Surface the CLI's `follow_up` (an
+engine restart is needed).
 
 ### Subflow C — Effort tier
 
@@ -1045,6 +1295,151 @@ Always surface which scope a change landed in — read
 `active_config.scope` from the JSON and relay the CLI's stderr notice.
 
 ---
+
+### Subflow J — Endpoints
+
+Read the `endpoints` block from `config show` (keys are never shown,
+only `api_key_set` and the `key_file` path). Sub-actions:
+
+- **Add / edit** — ask for the name, URL and backend (`opencoti`,
+  `llamacpp`, `xollama`, `ollama`), optionally a served model and a key
+  file, then `claude-consultants config set-endpoint <name> --url <u>
+  --backend <b> [--model <m>] [--key-file <path>]`. Never ask the user to
+  paste a key into the chat, and never pass `--api-key` (it writes the key
+  into the config); ask for the path of a file holding it.
+- **Ollama Cloud, no local Ollama** — `--url https://ollama.com --backend
+  ollama`, models named as ollama.com lists them (`@cloud/gemma4:31b`, no
+  `-cloud` suffix: there the bare name is the cloud model). With no
+  `--key-file` it uses the host's key: `ollama.api_key_file` in
+  `config/claude-hooks.json`, else `OLLAMA_API_KEY`
+  (`python -m claude_hooks.ollama_upstream --explain` says which is set,
+  never the key). A PolyKV server
+  (opencoti) runs `--window dynamic` (the default): no fixed context,
+  each lane its own allocation up to the engine's `session_ctx_max`.
+  `assured` is refused until Milestone F; say so if the user asks for a
+  booked window.
+- **Use it for a role** — Subflow A's **Change model**, with
+  `@<name>` (the endpoint's served model) or `@<name>/<model>`. A role's
+  extra models may mix endpoints and Ollama tags; each lane goes to its
+  own server.
+- **Remove** — `claude-consultants config remove-endpoint <name>`.
+  Warn first if a role still names `@<name>`.
+
+### Subflow K — Output cap & window
+
+Read `budget` (global) and each role's `budget` / `models` blocks from
+`config show`. Only keys that were set appear; anything else is the
+shipped default: `output_ceiling` 96000, `output_window_share` 0.75,
+`reserve_min` 1024, `reserve_share` 0.12, `num_ctx` `"model"` (the
+backend's own window), `announce` on (the cap is stated in the role's
+prompt). Ask the scope first: **all roles**, **one role**, or **one
+role on one model** (the model exactly as the role names it, e.g.
+`glm-5.3:cloud` or `@bs2`). Then:
+
+- **Output ceiling** — `claude-consultants config set-budget
+  [--role R [--model M]] --output-ceiling N`. Calls ask for
+  `min(share × window, ceiling, the model's own max)`.
+- **Context window** — `--num-ctx model` or `--num-ctx N`. On a local
+  Ollama the window is also sent as `num_ctx` (a different value reloads
+  the model, so warn when another tool shares it); cloud, xOllama and
+  opencoti are only budgeted against it.
+- **State the cap in the prompt** — `--announce on|off`.
+- **Reset** — `--clear <key>` (repeatable) drops a setting back to the
+  default.
+
+A legacy explicit `ctx_max` on a role still pins that role's window.
+
+**Sampling diversity** (`sampling` / each role's `sampling` and `models`
+in `config show`). Defaults: every role instance (each lane, each role
+turn) gets its own random seed, never shared by same-model instances in a
+run, and a ±2 % jitter around the model's own temperature (none when the
+model declares none). Same scope question, then:
+
+- **Seed** — `claude-consultants config set-sampling [--role R
+  [--model M]] --seed random|off|<n>` (an integer gives the i-th
+  same-model instance `n + i`).
+- **Temperature** — `--temperature <t>` sets the base; the jitter still
+  applies.
+- **Jitter** — `--temperature-range-pct <p>` (0 = none, max 10).
+- **Reset** — `--clear <key>`.
+
+`claude-consultants show <sid>` lists the realized `samplers`.
+
+### Subflow L — Compaction
+
+Read `compaction` (global) and each role's `compaction` / `models`
+blocks from `config show`. Only set keys appear; the shipped defaults
+are `flow` `full`, `placement` `system`, `review` on, `target_share`
+0.25, `writer_attempts` 3, `ledger` on, `tool_result_max_chars` 32000,
+`file_result_max_chars` 50000, `stale_read_share` 0.4,
+`reasoning_replay` `none`, `continuation` `off`. Every compaction step runs on the role's own
+model, one call after another; nothing here changes that. Ask the scope
+first (all roles, one role, one role on one model), then:
+
+- **Flow** — `claude-consultants config set-compaction [--role R
+  [--model M]] --flow reduced|full|basic`. `reduced`: a present-tense
+  replay writer, a retrospective and one reviewer (3 calls). `full`: the
+  writer marks a halfway point, two critics each rewrite a half, a
+  synthesizer joins them (5 calls) — the default.
+  `basic`: no model call, only the elision note.
+- **Placement** — `--placement system|user`: the role of the message
+  that replaces the folded span.
+- **Reviewer** — `--review on|off` (reduced flow only).
+- **Target** — `--target-share <0.05-0.6>`: fold to this share of the
+  free window.
+- **Tool record** — `--ledger on|off`: the numbered `[#N]` call record
+  the replay cites.
+- **History truncation** — `--tool-result-max-chars N`,
+  `--file-result-max-chars N`, `--stale-read-share <s>`.
+- **Past reasoning on the wire** — `--reasoning-replay none|all|inline`.
+- **Continuation** — `--continuation auto|on|off`: the writer and the
+  half-critics run as the lane's next turn, sharing the prefix the server
+  already holds instead of reading the transcript again as text. `off`
+  (default) always as text; `auto` only under PolyKV pooled / assured;
+  `on` on any backend. Off since the 2026-10-24 bench: the continuing
+  writer kept 26% of what the lane had read against 97% as text, and the
+  answer lost about half its rows — say so before turning it on.
+- **Reset** — `--clear <key>` (repeatable).
+
+The trigger itself is a budget knob: `set-budget --trigger-ratio <r>`
+(default 0.9) and `--output-room-min N` (default 8000).
+
+### Subflow M — Decision model
+
+Read `decision` from `config show`. Off by default. Then ask:
+
+- **Backend** — TypeSafe's Jev (no `--url`; needs a key file) or a local
+  `/v1/systemone` server (`--url http://host:11434`, no key).
+  `claude-consultants decision-models [--url …]` lists what a server has
+  (`jev-latest`, `jev-preview` on TypeSafe; decision-capable tags on
+  Ollama/xOllama).
+- **Key** — `--key-file <path>`: the file holding the key. Never put the
+  key itself in config; the engine reads the file at call time.
+- **Seams** — `--seams review,confidence,struggle,citations` (any
+  subset). `review`: accept / followup / research on the answer, shown
+  as `decision` in `result`; `confidence`: advice, never an override — the
+  critic, meta-critic and synthesizer get the scored p with what the
+  server's scores mean before they rate, their own `CONFIDENCE` stays on
+  the channel, and the answer's score goes to `result` as
+  `decision.answer_confidence`; `struggle`: one nudge to a researcher
+  lane that repeats itself; `citations`: flags cites whose code does not
+  show the claim.
+- **Shadow** — `--shadow confidence` (any subset of the seams): asked
+  and recorded as `decision` events, never acted on. For collecting live
+  scores before a seam is trusted; with `--seams ''` nothing acts at all.
+- **Floors / timeout** — `--floor` (0.6), `--high-stakes-floor` (0.85,
+  the struggle nudge), `--timeout-s` (15).
+
+```
+claude-consultants config set-decision --enabled on --key-file ~/jev.key \
+    --model jev-latest --seams review,confidence,struggle,citations
+claude-consultants config set-decision --enabled on --key-file ~/jev.key \
+    --seams '' --shadow confidence      # record scores, act on nothing
+claude-consultants config set-decision --enabled off
+```
+
+State sent to TypeSafe leaves the machine (zero retention is
+enterprise-only); say so when the user picks Jev for a private repo.
 
 ### Subflow I — Tool surface
 
@@ -1331,6 +1726,12 @@ the researcher to also check the staging branch" or "remind the
 synthesizer to call out latency cost". ``--role any`` is the safe
 default if you don't know which role should see it.
 
+An inject **binds**: its instructions are orders, not context. An auditor
+holds the final answer to each one, a violation gets one re-ask, and
+whatever the delivered answer still breaks (or could not be checked) is
+listed under `## Operator directives not met`. Read that section before
+accepting. A fact stated in an inject is not thereby verified.
+
 ### control — mutate runtime_control mid-flight
 
 ```
@@ -1374,8 +1775,8 @@ claude-consultants resume <sid> --value '{"approve": true}'
 node entry calls ``interrupt()``. ``resume`` clears the interrupt
 and schedules a ``Command(resume=value)`` re-invoke. ``--value``
 is forwarded as the resume payload (JSON-decoded if parsable,
-otherwise a literal string). A dynamic interrupt set by the
-synthesizer's low-confidence policy returns the same way.
+otherwise a literal string). ``review_before_synthesis`` (opt-in,
+``[runtime]``) parks before the synthesizer the same way.
 
 ### cancel — abort with cleanup
 
@@ -1387,6 +1788,36 @@ claude-consultants cancel <sid> --discard-partial
 Cooperative drain. ``--discard-partial`` also deletes the
 checkpointer file. Use when the user has changed their mind about
 the question. Idempotent on completed sessions (200, no-op).
+
+### wrap-up — stop and answer with what it has
+
+```
+claude-consultants wrap-up <sid> [--reason "..."]
+```
+
+The graceful stop: running lanes end on one report each, lanes not yet
+started are skipped, the critic, coder and adversary are passed by, and
+the synthesizer writes the answer from the partial research. The result
+carries `partial: {"reason": "wrap_up", ...}`. Refused (409) on a
+cancelled run. Use this, not `cancel`, when the user wants an answer now
+("that's enough, tell me what you have").
+
+### retry-lanes — rerun the lanes that failed on infrastructure
+
+```
+claude-consultants retry-lanes <sid> [--lanes 1,3] [--effort ...]
+```
+
+After a run finished with tombstoned researcher lanes (`show <sid>` →
+`lanes` with `failure_class` `infra`, `model_missing` or
+`context_overflow`): starts a child session that runs only those lanes,
+asked what they were asked, and answers the original question again
+from the parent's surviving reports plus the new ones. It does not count
+against the follow-up cap. Answers `no_retryable_lanes` (exit 1) when no
+lane failed that way. A lane that failed on its task (`task_error`) is
+not retried: the same question to the same model would fail the same
+way. Offer it when an answer was written around missing lanes because
+the backend flapped.
 
 ### events — live monitor (SSE stream)
 
@@ -1442,6 +1873,8 @@ mid-flight intervention.** Examples:
   branch" → ``inject --role researcher -m "..."``.
 - User says "cancel that, I want to ask something different"
   → ``cancel --discard-partial`` then start the new ask.
+- User says "that's enough, tell me what you have so far"
+  → ``wrap-up <sid>``, then wait for the (partial) answer.
 - User says "show me what the council has so far" → ``state``;
   pretty-print the partial_synthesis + research[].
 

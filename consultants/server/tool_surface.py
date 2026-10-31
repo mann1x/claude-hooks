@@ -19,23 +19,45 @@ from typing import Any, Callable, Optional
 log = logging.getLogger("consultants.tool_surface")
 
 
-def _shared(executor, read_only=frozenset()):
+def _shared(executor, read_only=frozenset(), runtime_permissions=None):
     """Put the run's read cache in front of ``executor`` — one per
     ``build_tool_surface`` call, i.e. one per council run, shared by
-    all of its lanes (see ``tool_cache``)."""
+    all of its lanes (see ``tool_cache``).
+
+    A tool the operator pinned to anything but ``auto`` through
+    ``POST /control`` skips the cache, so the gate sees every call."""
     from consultants.server.tool_cache import SharedReadCache
-    return SharedReadCache(executor, read_only=frozenset(read_only))
+    uncached_when = None
+    if runtime_permissions is not None:
+        def uncached_when(name: str) -> bool:
+            level = (runtime_permissions() or {}).get(name)
+            return level is not None and level not in ("auto", "allow")
+    return SharedReadCache(executor, read_only=frozenset(read_only),
+                           uncached_when=uncached_when)
 
 
 def build_tool_surface(cfg: Any, *, extra_roots: tuple[str, ...] = (),
-                       approval_fn: Optional[Callable] = None):
+                       approval_fn: Optional[Callable] = None,
+                       runtime_permissions: Optional[Callable[[], dict]] = None,
+                       shell: Optional[dict] = None, sid: str = ""):
     """Build ``(tool_specs, tool_executor, registry)`` for one session.
+
+    ``runtime_permissions`` is read on every tool call (normally
+    ``RunControl.tool_permissions``), so ``POST /control`` reaches the
+    gate of a council that is already running. Without it the gate
+    never sees ``runtime_control.tool_permissions`` at all.
 
     ``approval_fn`` is the hook the interrupt wiring plugs into. Until
     it is supplied the registry refuses any ``ask_*`` tool rather than
     running it — which costs nothing today, since every tool in the
     default surface is ``auto``, and is the right failure direction the
     moment an effectful provider lands.
+
+    ``shell`` (plan E5: ``{"mode", "net", ...}`` or None) adds the
+    sandboxed ``run_command``, its lanes stored under session ``sid``.
+    The engine refuses a shell request before a run starts when the
+    host cannot sandbox it (``shell_enable.preflight_error``), so a
+    shell asked for here is one the host can give.
 
     Falls back to the pre-M-A fixed surface when ``[tools] enabled =
     false``, or when anything here raises: a council with the builtin
@@ -59,6 +81,13 @@ def build_tool_surface(cfg: Any, *, extra_roots: tuple[str, ...] = (),
         providers = [BuiltinToolProvider(extra_roots)]
         if tools_cfg is not None and getattr(tools_cfg, "git", False):
             providers.append(GitToolProvider(extra_roots))
+        if shell:
+            from claude_hooks.tool_registry.shell_provider import (
+                ShellToolProvider)
+            from consultants.server.shell_enable import settings_for
+            providers.append(ShellToolProvider(
+                sid=sid, settings=settings_for(cfg, shell),
+                extra_roots=tuple(extra_roots)))
 
         gate = PolicyGate(
             default_level=getattr(tools_cfg, "default_level", "auto")
@@ -97,8 +126,10 @@ def build_tool_surface(cfg: Any, *, extra_roots: tuple[str, ...] = (),
         log.info("tool surface: %d tools from %d provider(s): %s",
                  len(registry.tool_names()), len(providers),
                  ", ".join(p.name for p in providers))
-        return registry.specs(), _shared(registry.as_executor(),
-                                          registry.gate.read_only_tools), registry
+        return registry.specs(), _shared(
+            registry.as_executor(runtime_permissions=runtime_permissions),
+            registry.gate.read_only_tools,
+            runtime_permissions=runtime_permissions), registry
     except Exception:
         log.exception(
             "tool registry construction failed; falling back to the "

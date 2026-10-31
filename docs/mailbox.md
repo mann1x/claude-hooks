@@ -173,7 +173,7 @@ numbered alias (see "Two sessions in one directory").
 
 ---
 
-## The eight tools
+## The nine tools
 
 They are added to the existing memory MCP servers rather than shipped as
 a skill, so they are present in every client with no skill load and no
@@ -190,6 +190,7 @@ failure the hooks exist to fix.
 | `mailbox-cancel` | withdraw an unread message you sent |
 | `mailbox-sent` | your outbox, paged, with read state and any note |
 | `mailbox-sessions` | who is registered: alias, host, OS, last seen |
+| `mailbox-durable` | register / remove / list durable aliases you own (below) |
 
 Tool names are prefixed by the server, e.g.
 `mcp__pgvector__mailbox-send`.
@@ -312,6 +313,61 @@ visibility.
 
 ---
 
+## Durable aliases
+
+A registration is evidence a session is running, so a quiet one stops
+being an addressee after 12 hours and is deleted after 24. That is wrong
+for an address with no session behind it. A cloud thread linked to
+solidpc acts as `claude-hooks@solidpc` (its MCP tools are that
+session's), so it had no identity of its own: its mail to xOllama went
+out as `claude-hooks`, and the `osync@cloud` it once took through the
+file relay lapsed a day later. The pandorum file mailbox
+(`claude-mailbox@pandorum`) had nothing registered between sessions, so
+nothing listed it.
+
+A **durable** alias is an address that lasts (ch-18):
+
+- `mailbox-durable` `{"action": "register", "alias": "osync"}` makes
+  `osync@cloud` (a bare alias means `@cloud`; `alias@<this host>` also
+  works) a registration owned by the caller's `alias@host`. It stays
+  until `"action": "remove"` or its `"ttl"` (`30d`, `12h`, `2w`), and
+  registering again renews it. `"action": "list"` shows yours with their
+  unread counts.
+- The owner acts as it with `from` on `mailbox-send` and `as` on
+  `mailbox-list` / `-read` / `-ack` / `-sent` / `-edit` / `-cancel`: the
+  call runs through the same dispatch as that alias, so a reply to
+  `osync` lands in `osync@cloud`'s inbox and is read from there. Nobody
+  else can (`… is not a durable alias of …`). The owner's own
+  `mailbox-list` names its durable aliases that have unread mail.
+- Durability belongs to the `(alias, host)` slot, not the session
+  holding it. The eviction and the 30-day sweep skip a durable row; a
+  session ending on one forgets its process and keeps the row; a session
+  that takes the slot (the relay's `mailbox-alias`, a SessionStart
+  claim) keeps it durable. A durable slot with no running process is
+  free to take by its exact name (no `-2`). A passed `ttl` makes the row
+  ordinary again, and the quiet rule then removes it.
+- Refused: another owner's durable alias, a slot a live session holds,
+  and an alias live on another host — a second `osync` would make a bare
+  `osync` ambiguous, and every sender's mail to it refused. The CLI's
+  `--force` skips the first two, never the third.
+- `mailbox-sessions` marks them `[durable, <owner>]`.
+
+For an address no session will ask for, the operator registers it from
+a shell, against the shared store:
+
+```bash
+python -m claude_hooks.mailbox.aliases register claude-mailbox@pandorum
+python -m claude_hooks.mailbox.aliases register osync --owner claude-hooks@solidpc --ttl 30d
+python -m claude_hooks.mailbox.aliases list
+python -m claude_hooks.mailbox.aliases remove osync@cloud
+```
+
+`--owner` defaults to the alias itself. The registry key of a durable
+alias with no session is `<host>-<alias>` — `cloud-osync`, the key the
+file relay already uses, so the relay and the MCP reach one mailbox.
+Columns: `durable`, `owner`, `durable_until` on `session_registry`
+(`schema.ADDED_REGISTRY_COLUMNS`). Tests: `tests/test_mailbox_durable.py`.
+
 ## Retention
 
 | thing | default | why |
@@ -319,6 +375,7 @@ visibility.
 | messages | 180 days | `DEFAULT_EXPIRY_DAYS` |
 | identical resend blocked | 10 minutes, or while unread | `DEFAULT_DEDUP_WINDOW_SECONDS` |
 | registry entries | 30 days | a session unseen for a month is not reachable |
+| durable aliases | until removed or their `ttl` | an address, not a heartbeat |
 | archive | quarterly zstd (level 19), capped at 10 GB | oldest quarters dropped first |
 
 Expired messages are archived **before** deletion — nothing leaves the
@@ -417,7 +474,9 @@ installed into the folder as `MAILBOX.md`.
 mailbox alias osync"). It sends a `mailbox-alias` request and is then
 **`osync@cloud`** to every other session. The registry key behind it is
 `cloud-osync`; nobody needs it. A later cloud session that takes the same
-alias takes the address over, mail included.
+alias takes the address over, mail included. Taken this way it lapses a
+day after the last request; a `mailbox-durable` request makes it last
+(see Durable aliases).
 
 **The semaphore rule.** Nothing a remote session writes is read until
 its semaphore says so. Each request is `requests/<id>.json` plus

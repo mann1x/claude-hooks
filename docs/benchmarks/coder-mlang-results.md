@@ -1,4 +1,65 @@
-# Coder skill-eval — per-language results (`coder_mlang` v1.0.1)
+# Coder skill-eval — per-language results (`coder_mlang`)
+
+## v1.1.0 — 2026-10-24 (current)
+
+The first run in which the coder is shown the spec it is graded on
+(06b8c21). 18 questions (3 per language: c, cpp, csharp, go, python,
+rust) × 5 models = 90 trials, 0 errors, git `209185b`, suite hash
+`16a0f6d3`, judge panel glm-5.3-flash + deepseek-v4.1-flash (synth
+deepseek-v4.1-flash), host solidpc through its Ollama proxy, 2 concurrent
+cloud calls, 07:26–08:34 UTC. Reports:
+[`report.md`](../../benchmarks/consultants/results/2026-10-24/coder_mlang-v1.1.0/report.md),
+[`report-by-language.md`](../../benchmarks/consultants/results/2026-10-24/coder_mlang-v1.1.0/report-by-language.md).
+
+| Model | Pass | Avg quality | Median tokens |
+|---|---|---|---|
+| `deepseek-v4-pro:cloud` | 18/18 | 4.78 | 8902 |
+| `deepseek-v4.1-flash:cloud` | 16/18 | 4.94 | 6298 |
+| `minimax-m3:cloud` | 16/18 | 4.61 | 9146 |
+| `glm-5.3:cloud` | 15/18 | 4.33 | 5590 |
+| `glm-5.3-flash:cloud` | 13/18 | 4.00 | 5358 |
+
+| Model | c | cpp | csharp | go | python | rust |
+|---|---|---|---|---|---|---|
+| `deepseek-v4-pro` | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 |
+| `deepseek-v4.1-flash` | 2/3 | 3/3 | 3/3 | 3/3 | 3/3 | 2/3 |
+| `minimax-m3` | 3/3 | 2/3 | 3/3 | 3/3 | 3/3 | 2/3 |
+| `glm-5.3` | 2/3 | 3/3 | 3/3 | 3/3 | 3/3 | 1/3 |
+| `glm-5.3-flash` | 2/3 | 2/3 | 2/3 | 2/3 | 3/3 | 2/3 |
+
+What it says:
+
+- **The suite is fixed.** Every question was passed by at least one model
+  (v1.0.1: 10 of 13 passed by none). Every failure is a test failure on
+  code that the model wrote: no constraint or oracle-load failures.
+- **rust-hard-01-iter-window-pairs is the hardest question** (4 of 5
+  models fail), and the failures are real Rust errors. deepseek-v4.1-flash
+  and minimax-m3 hit E0277: the extension trait's method needs
+  `where Self: Sized`. glm-5.3 hit a use-after-move, and glm-5.3-flash's
+  program compiled but printed nothing.
+- **Routes stay as they are.** n = 3 per language cannot overturn
+  coder_med's n = 10 per language, which is where
+  [`coder_defaults.py`](../../consultants/engine/coder_defaults.py)
+  comes from. One cell to watch: csharp's primary, glm-5.3-flash, failed
+  `csharp-medium-01-trapped-rainwater` outright (every test), while its
+  fallback, deepseek-v4.1-flash, went 3/3. glm-5.3-flash is the weakest
+  model here in five of six languages.
+- **Judge caveat:** both panel judges are also candidates. Their quality
+  scores for themselves are not independent; the pass column is.
+- **Cost:** coder 0.50 M prompt + 0.26 M completion; judges 0.43 M prompt +
+  0.82 M completion (the synth judge's reasoning dominates).
+
+---
+
+## v1.0.1 — 2026-05-17 (invalid)
+
+> **Invalid (2026-10-24).** Every number below comes from a run in
+> which the coder was never shown the question's spec: the harness sent
+> only the one-line `task`, and this suite kept its API, constraints and
+> output format in the body. Two oracles also could not load. "10 of 13
+> questions defeat every model" is that, not difficulty. Fixed in suite
+> v1.1.0, above. The shipped per-language routes come from coder_med,
+> not from this page.
 
 > ↟ [Benchmark index](index.md) · suite design:
 > [`consultants-skill-eval-mlang-suite.md`](../consultants-skill-eval-mlang-suite.md) ·

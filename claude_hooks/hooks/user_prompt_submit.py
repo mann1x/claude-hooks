@@ -104,6 +104,9 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     from claude_hooks.tasks.hook import PromptRecall
     task_recall = PromptRecall(event=event, config=config,
                                providers=providers).start()
+    # Keep this host's resource leases fresh (throttled, soft-fail).
+    from claude_hooks.resources.hook import touch as _touch_resources
+    _touch_resources(event=event, config=config)
 
     additional_context = recall_block(event=event, config=config,
                                       providers=providers)

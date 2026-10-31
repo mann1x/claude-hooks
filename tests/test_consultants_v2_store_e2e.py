@@ -86,7 +86,10 @@ class TestStoreE2ERecall(unittest.TestCase):
                 # 1 plan item -> 1-lane research (no fanout, so
                 # state.lane_idx is None -> peer-findings dedup
                 # doesn't filter our seed out).
-                return _resp("1. audit auth flow")
+                # Plan D11: an in-memory store has no similarity, so the
+                # gate is shared content words; the item names what it
+                # audits (auth, CSRF) as a real plan item does.
+                return _resp("1. audit auth flow for the CSRF vector")
 
         class _CriticStub:
             def chat(self, payload, *, think=True):

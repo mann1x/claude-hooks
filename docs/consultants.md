@@ -254,9 +254,12 @@ machinery beneath the store.
 ## Prerequisites
 
 - An **Ollama backend** reachable from the install host. The
-  engine reads its endpoint from
-  `~/.claude/consultants-config.toml` (which install.py seeds from
-  `CALIBER_GROUNDING_UPSTREAM` if present).
+  engine resolves it as /get-advice and the caliber proxy do
+  (`claude_hooks/ollama_upstream.py`): `CALIBER_GROUNDING_UPSTREAM`,
+  a URL-shaped `OLLAMA_HOST`, `ollama.url` in
+  `config/claude-hooks.json` (asked by `install.py`), else
+  `http://localhost:11434`. `python -m claude_hooks.ollama_upstream
+  --explain` and `scripts/verify_deploy.py` say which applies.
 - The `claude-consultants` CLI on PATH. install.py drops it as a
   POSIX-shell wrapper at `~/.local/bin/claude-consultants` (Linux
   / macOS) or `%LOCALAPPDATA%\claude-hooks\bin\claude-consultants[.cmd]`
@@ -441,6 +444,24 @@ session start (`runner._seed_runtime_control`).
   - errors are never kept.
 
   A follow-up starts with an empty cache.
+
+**Tool turns of the other roles.** A planner, critic, meta-critic,
+synthesizer or adversary with tools gets 3 tool turns and a fourth to
+answer (`ROLE_TOOL_MAX_ITERATIONS` / `ROLE_TOOL_FORCE_ANSWER_AFTER` in
+`consultants/engine/council.py`); a critic with the shell gets 10 more.
+At the limit the role is asked for its own answer — the plan, the
+`DECISION:` verdict, the final answer (`ROLE_DELIVERABLES`) — with
+tools and thinking off. In recorded councils up to 2026-10-22 the planner
+used all three turns in ~90% of runs on every model; the critic in 17%
+of gemma4 runs and 86% on other models; the synthesizer never on gemma4
+and in 61% on others. `CONSULTANTS_ROLE_TOOL_TURNS=N` gives these roles
+N tool turns for one engine process — the measurement arm for changing
+the default. It is read when the engine starts.
+`CONSULTANTS_FORCED_THINK=graceful` keeps the role's own thinking on that
+last call when the role ran out of turns, had its tools taken away or was
+wrapped up (`LoopConfig.forced_think`, `GRACEFUL_STOPS`); a loop a guard
+ended (reasoning loop, repeated call, mistakes, struggle) always answers
+with thinking off. It is the A/B arm for the think-off default.
 
 ### Engine restarts — councils are suspended and resumed
 
@@ -629,7 +650,100 @@ and a node added later cannot forget it.
 like any other, and running it would be spending after you said stop.
 Terminal status is `cancelled`, not `completed`, and partial state is
 kept unless you pass `--discard-partial`. "Stop and synthesize what you
-have" would be a different verb; it does not exist yet.
+have" is the other verb, `wrap-up` (below).
+
+### Wrap-up: stop and answer with what you have
+
+`POST /v1/consult/{sid}/wrap-up` (`claude-consultants wrap-up <sid>`)
+is the graceful stop (plan D9). It rides the same out-of-band
+`RunControl` (`request_wrap_up()`), and nothing raises:
+
+- a researcher, tool_executor or coder loop already running asks
+  `LoopConfig.wrap_up_check` before each turn and ends on one tool-less
+  report (`WRAP_UP_FINAL`, `_stop_reason = wrap_up`); a coder starts no
+  fallback model;
+- the gate skips work not yet started (`wrap_up_skips()`: planner,
+  critic, meta-critic, escalator, adversary, tool_executor and coder
+  lanes, and any researcher that is not a REPORT re-entry holding its
+  round's tool results); each skip is a `node_wrap_up_skipped` event;
+- the routers send the run straight to the synthesizer, which is told
+  its research is partial (`WRAP_UP_SYNTHESIS_NOTE`);
+- the result carries `partial` (`reason`, `requested_by`,
+  `requested_at`, `skipped_roles`) and `summary.md` says
+  `partial: wrap_up`.
+
+It is refused (409) on a cancelled run and a no-op on one not running.
+Cancel arriving after a wrap-up still wins. A wrap-up survives an engine
+restart: the route writes it into the run's in-flight record (`wrap_up`:
+reason and time), and the next engine resumes the council already
+wrapping up — its result still says who asked and when.
+
+### retry-lanes: run the failed lanes again
+
+`POST /v1/consult/{sid}/retry-lanes` (`claude-consultants retry-lanes
+<sid> [--lanes 1,3]`) is the other half of plan D9. A lane whose
+first-round exit (D7) failed with `infra`, `model_missing` or
+`context_overflow` failed for a reason the question did not cause;
+`consultants/engine/retry_lanes.py` finds them (`failed_lanes`), rebuilds
+what each was asked the way the planner fan-out did (lane `i` is plan
+group `i // n_models` on model `i % n_models`, `retry_specs`), and the
+route starts a child session through the follow-up machinery with
+`runner_input["retry_lanes"]`. `build_follow_up_graph(retry_lanes=)`
+fans those lanes out from START; the researcher state is seeded with the
+parent's surviving reports (`surviving_reports` drops the tombstones),
+and the synthesizer answers the parent's question afresh, not as a
+follow-up turn. The retry is a consultancy child but does not count
+against `max_followups`; it survives an engine restart (the in-flight
+record carries `retry_lanes`).
+
+Limits: only first-round lanes (a critic re-route's lane was asked the
+critic's gaps, which are not stored); the groups and models are rebuilt
+from today's `FANOUT_MAX_LANES` and config, so a change between the run
+and the retry moves lanes — the response lists exactly what it runs.
+
+**xauto does it on its own, once.** On an xauto run
+(`[runtime] xauto_retry_infra_lanes`, default on;
+`claude-consultants config set-xauto-retry on|off`) a `lane_retry` node
+sits between the first research round and the critic. It reads this
+session's D7 rows (the recorder commits each), so it picks lanes by the
+same rule — but only `infra`: a missing model or an overflow would fail
+the same way again inside the same run. The lanes are rebuilt by the
+same `retry_specs` and sent with the same `Send` as the child above
+(`graph._retry_lane_send`), come back through the node, and the run goes
+on to the critic with their reports beside the tombstones. Once per run:
+a lane that fails again stays failed. A retry is not a research round —
+the node takes back the rounds the retried lanes add, so the critic's
+re-route budget is unchanged. Not done when the run is wrapping up,
+cancelled or past its deadline, and never on another tier (the node is
+not wired). Each retry is a `lane_retry` row in `runtime_events`. Not
+with `tool_executor` lanes, where the researcher routes itself.
+
+**Per-lane model escalation.** With `[escalation] expert_model` set
+(`claude-consultants config set-escalation --model <tag|@endpoint/model>
+[--max N]`; empty, the default, is off and leaves the graph unchanged),
+the same node also hands a first-round lane to the expert model when a
+guard ended it (`struggle`, `loop_guard`, `mistake_limit`,
+`reasoning_loop`) or it failed on its task (`task_error`,
+`context_overflow`, `tool_call_unparsable`, `model_missing`) — never for
+`infra`, which the same model on a working server fixes. The rerun gets
+the lane's plan item led by a brief (`retry_lanes.attempt_brief`): why
+the attempt ended and its last calls, failed ones marked, read from this
+session's `tool_call` rows — never its transcript. At most
+`max_per_council` lanes (default 2), once each, a lane already on the
+expert skipped; any tier, as the harness decides. Each pass is a
+`lane_escalation` row in `runtime_events` naming the lane, both models
+and the reason. The researcher's client gets the expert added to its
+models so an `@endpoint` expert routes.
+
+**Routers must not loop on a stopped run.** A skipped node writes
+nothing, so a router that reads its last verdict (a critic's "needs more
+research", an unconsumed tool plan) would send the run back round the
+same skipped nodes. Before D9 this is what a cancel during a critic
+asking for more research did: about 2 s of spinning to LangGraph's
+recursion limit, then `graph crashed` instead of `cancelled`. The
+critic, tool and coder routers now go to the synthesizer whenever the
+run is wrapping up or cancelled (`_stopping()` in
+`consultants/engine/graph.py`).
 
 **Cancel skips, it never raises.** An exception would abort the stream
 mid-superstep and lose exactly the partial state `--keep-partial` exists
@@ -884,9 +998,304 @@ poll never hangs the run.
 
 The runner is the **sole resumer** (a deadline-bounded park-poll), so
 there's no double-resume race with `POST /resume`. The assistant reacts
-by subscribing to `events`, `inject`-ing the brief at the `critic` (re-run
-the fanned critics) or `synthesizer` (just sharpen) role, and
+by subscribing to `events`, reading `state` (each lane's
+`research_previews` and the `critique`), `inject`-ing the brief, and
 `adversary-ack`-ing — see the SKILL's **Dynamic adversary** subsection.
+
+An inject binds. Every role is told so in its prompt, and the final answer
+is audited against each one (`synthesizer:directive-audit`): a violation gets
+one re-ask, and what the delivered answer still breaks, or what could not be
+checked, is listed under `## Operator directives not met`. A fact stated in
+an inject is not thereby verified.
+
+Where a checkpoint brief goes (the inject reply's `routed`):
+
+| brief for | round left | routed | what runs |
+|---|---|---|---|
+| researcher / critic | yes | `rewound_to_researcher` | one more research pass, the critic after it |
+| researcher / critic | no, first such brief | `rewound_extra_round` | the cap is raised by exactly one, once per council, and the run rewinds |
+| researcher / critic | no | `best_effort_cap_reached` | nothing re-runs; the synthesizer reads it |
+| synthesizer / any | — | `in_place` | the synthesizer reads it |
+
+Every brief also reaches the synthesizer, labelled with the role it
+named — the synthesizer is the only node certain to run from the
+checkpoint. (Until 2026-10-18 a critic brief there said `in_place` and
+reached no prompt, and a researcher brief with the cap spent reached
+none either.)
+
+**What a rewind runs.** The run re-enters at the graph's `rewind` node,
+not at `START` (which leads to the planner). From there one research
+pass runs on the existing plan, with every report so far and the brief.
+On an x-tier it fans out one lane per council model (lane ids from 100),
+otherwise it is one full-state pass like a critic reroute. Then the
+researcher's own edges run, so the critic follows on high/max. A
+researcher brief also gets a labelled critic copy when a rewind will
+run, so the critic can judge whether the new reports checked it. Every
+fan-out `Send` carries `additional_context`; before this, no fanned-out
+lane ever saw an injected brief. (Council csl-2026-10-18-1120-95ce
+reported `rewound_extra_round`, then re-planned from scratch, and the
+brief was in 0 of 226 prompts.)
+
+**The findings ledger** (`claude_hooks/findings/`, plan
+[`PLAN-council-memory.md`](PLAN-council-memory.md), M1). Councils
+started cold and lost what they found; the ledger is the project's
+memory of claims about the code and what was decided about them. One
+Markdown file per finding under `<project>/.claude-hooks/findings/`
+(ids `<task prefix>f-<n>`, e.g. `chf-3`), with `Claim`, `Reproduce`,
+`Evidence` (newest first), `Decision` and `Log`. A new claim that
+restates an existing finding (same file within 40 lines and shared
+words, or mostly the same words where neither names a place) adds
+evidence to it instead of a new file. Statuses: `candidate` (a council
+said so), then `confirmed` / `refuted` / `by_design` / `fixed`, set
+**only** by `--by user` or `--by assistant`, always with a reason, and
+`fixed` with the commit; `reopen` returns one to `candidate` the same
+way. Nothing the council runs can settle. Tools: `finding-list`,
+`-show`, `-record`, `-settle`, `-reopen`, `-note` on both memory
+servers (off with `hooks.findings.enabled: false`), and
+`claude-consultants findings list|show|settle|reopen|note`.
+
+The council uses it (M2, `consultants/engine/memory.py`). The planner,
+critic, meta-critic and synthesizer get **KNOWN FINDINGS**: the ledger
+entries relevant to the question (shared place first, then shared
+words, up to 12), each with its decision and what that role should do —
+the planner re-verifies a confirmed one with its reproduction instead of
+spending a lane rediscovering it, the critic may challenge a `by_design`
+one only with a run that contradicts the recorded reason, the
+synthesizer tags each ranked item `(known: <id>)` or `(new)`. With no
+ledger the prompts are byte-identical. On a run with the shell, the
+final answer's ranked items and matrix rows that cite a run that reached
+the code are recorded as candidates (or as evidence on the finding they
+restate, the council id added). The `/consultants` review loop lists
+the new candidates and asks the user to settle them.
+
+**The evidence bar** (`consultants/engine/evidence.py`). Prompts were not
+enough, so on a run with the shell:
+
+- A critic or meta-critic `ready` is held at `needs_more_research`, with
+  a `[harness]` note, when it says the tests were not run, **or** when
+  the record shows no command the lanes ran that reached the code (run
+  4: ready was read off reports none of whose runs had loaded). An
+  unreadable `transcript.db` decides nothing. The round caps still
+  bound the loop.
+- The synthesizer, the critic and the meta-critic get **COMMANDS THE
+  LANES RAN**, built from `transcript.db`. Only these were executed,
+  whatever the reports say. Each command has an id (`C1`, `C2`, …).
+  Each distinct test or probe run (a test runner, or code run with
+  `node` / `bun` / `python` …) that **reached the code** is shown with
+  what the test printed and the runner's summary. Run 3's best finding
+  sat in the log lines of an "11 passed" run, below a tail that kept
+  only the count. A run that never got to the code (a config that does
+  not load, a missing module, a bad `cd`) is listed on one line with
+  its first error. It is not evidence. Other commands are one line each.
+  The critic is told to check every "verified" claim against that
+  lane's own runs.
+- The synthesizer's answer is audited in code (`audit_answer()`). Three
+  things are checked:
+  - **A ranked defect must cite a run that shows it** (`(C41)`). Items
+    are table rows and top-level list items under a defect / finding /
+    issue heading. A defect that was only read goes under `## Read, not
+    run` and is never ranked.
+  - **Every run that reached the code must be cited somewhere**, or
+    listed under `## Dropped` with a reason. Ranges count (`C3–C9`).
+  - **There must be an `Unverified` section**, even an empty one. This
+    also applies when a checkpoint brief exists.
+
+  An answer that fails gets one re-ask naming exactly what is owed
+  (`revision_note()`). Whatever the revision still owes is enforced by
+  `enforce()`:
+  - unbacked ranked items move to `Unverified` with a harness note;
+  - runs the answer never mentions are listed under `## Dropped by
+    omission`;
+  - an answer with no section gets the stub.
+
+  Then **the claim audit** (`_claim_audit()`, calls recorded as
+  `synthesizer:audit`, thinking off). Citing a run is not the run
+  showing it: run 4's #2 cited a run that reached the code and passed
+  the audit above, but its output did not show the defect. The auditor
+  gets a fresh conversation with only `CLAIM_AUDIT_SYSTEM`: RUN OUTPUTS,
+  each cited run once with its **whole** output (`commands_ran()` keeps
+  it as `output`; the shell already bounds it at 20,000 characters),
+  then each ranked item (up to 12) and matrix cell (up to 40) naming
+  the runs it cites (up to 6). Run 6 rendered a run under every claim
+  citing it and cut each copy at 1,500 characters. When the outputs do
+  not fit one call — `AUDIT_WINDOW_SHARE` (0.6) of the window
+  `resolve_window()` gives — `claim_audit_batches()` splits the items
+  over several calls, each holding the runs its items cite; a run is
+  never cut. It answers `A<k>: SHOWN | NOT SHOWN | CONTRADICTED |
+  PARTLY — <line>`. Code moves
+  every `NOT SHOWN` / `CONTRADICTED` item to `Unverified` with the
+  auditor's reason (`apply_claim_audit()`). An item with no verdict, an
+  unreadable reply or a failed call leaves the answer as it is.
+
+  **The matrix too** (run 5: "Multibyte ✓" was wrong and cited a line
+  read, not a run). A table row outside the ranked and unranked sections
+  that marks a case ✓ / ⚠ / ✗ (`matrix_rows()`) must cite a run that
+  reached the code, or its mark becomes `not tested (read, not run)` /
+  `not tested (no run cited)` (`mark_untested_cells()`, in code, before
+  and whatever the audit call does) — every mark in the row, not only
+  the first (run 6: the Restore / Scan / Bash columns kept their ✓ on
+  the same missing run). A row that cites one is audited cell by cell
+  (up to 40 cells), each against the runs it cites or else its row's,
+  and a `not shown` / `contradicted` verdict becomes `not tested
+  (audit: … by C<n>)` in that cell only. The synthesizer is told the
+  rule in `EVIDENCE_RULES`. The critic is told to check the label a
+  report gives each case (BLIND, refused, ✓ …) against what the run
+  printed.
+
+  **Every clause** (run 6: ranked #2 said apply_patch launders *and*
+  clobbers concurrent writers; C372 showed the first). The auditor
+  answers `PARTLY` for a claim its runs show only part of; the item
+  stays ranked with what is not shown noted on it, and that part is
+  listed under `Unverified`.
+
+  **Dropped needs a reason** (run 6: "General test run", "Not needed for
+  final result" for ~25 runs). A reason that names no other run and no
+  rerun / setup / harness cause in under 8 words, or one reason copied
+  to 5 runs or more, is thin (`thin_dropped()`); with 3 or more the
+  re-ask lists them, and what is still thin afterwards is marked on its
+  line.
+
+  **Held patches** (write mode; run 6, mail #1648). Patches are frozen
+  only after the answer, so the synthesizer used to write without
+  seeing them: a comment claimed a lock its hunk did not add, nobody
+  said which ranked defects a patch fixed, and two lanes rewrote one
+  function differently with nobody choosing. Now, before it writes,
+  `held_patches.held_changes()` reads every live view's diff
+  (`preview()` on both view kinds, writing nothing) and the synthesizer
+  gets HELD CHANGES: each lane's source hunks, and OVERLAPS computed in
+  code. The answer owes `## Held patches`, one entry per lane that
+  changed source (test-only lanes owe none): `fixes #n (C<k>)` only
+  when C<k> is a green run of that lane, else `addresses #n, not
+  verified`; `does not fix #m` for what it leaves; an overlap chosen
+  with a reason or written `conflict: <lane> vs <lane>`. The same
+  re-ask carries what is missing, and `held_patches.enforce()` writes
+  in what is still owed (a lane not assessed, an overlap not
+  adjudicated, a fix with no green run). Then one more auditor call
+  (`synthesizer:patch-audit`, thinking off) puts every comment a patch
+  adds (8 words or more, every patched file reached before any gets a
+  second, up to 24) beside all the code its hunk adds and removes, never
+  cut, batched like the claim audit (`comment_audit_batches()`); a comment claiming
+  code the diff does not contain is noted under `## Held patches`.
+
+  A coder lane's report reaches the synthesizer whole: run 6 cut it at
+  600 characters and lost coder-0's `showTaskWithId` finding at
+  character 875.
+
+  **Run 8** (mail #1672) was the best answer of the eight, but the
+  checks around the patches let it down:
+  - **The patch audit judges a comment against the whole file.** All
+    four ⚠ in run 8 were false: the auditor saw each hunk alone and
+    called a default parameter "unreachable", and a join and two calls
+    "missing" that sat in other hunks of the same patch. Each item now
+    comes with FILES: the lane's every hunk to that file and the file
+    as patched (read from the live view, up to 400,000 characters),
+    each given once per call.
+  - **A lane's sub-heading is its entry.** `` **lane `coder-0`** `` under
+    `### Held Patches` was read as a heading of its own, so the answer's
+    assessment was not found and the harness wrote "not assessed".
+    Sub-sections that name a lane now belong to the held section, and
+    `fixes #csf-1` counts like `fixes #1`.
+  - **Known findings a patch touches.** Every known finding within 40
+    lines of a lane's source hunk is listed under that lane. The entry
+    must say, by id, whether the patch fixes it, leaves it as it is, or
+    widens it. Run 8's coder widened csf-8 and the answer counted the
+    patch as fixing csf-7.
+  - **Options no caller passes.** An option a hunk adds (a TypeScript
+    `name?:` member, a Python keyword parameter) that no other source
+    file the patch changes mentions is listed with where the tree
+    already names it. The entry must name the caller that passes it, or
+    say the fix is not wired. Run 8's csf-6 fix added `forgetReads` to
+    the controller; `session-protocol.ts:383` builds it without, so the
+    green test proved nothing about the product.
+  - **A second look before a claim moves.** A ranked item the audit
+    finds not shown, which names a ledger finding, is checked again
+    against the other runs that name that finding (tests first). If one
+    shows it, the item stays, noted `shown by C<k>, not by the cited
+    C<j>`. Run 8 moved csf-2 to Unverified on C419 while the coder's
+    C280 ran it red to green.
+  - **The ledger takes defect cells only, one per cell**, titled `<row>
+    — <column>: <meaning>`. ✓ cells and cells marked `not tested` are
+    never recorded: run 8 recorded two matrix rows titled by their
+    "not tested" cells. A run is never recorded twice as evidence, and
+    "seen again" is logged once per council.
+  - **Settled findings are not listed again.** When the ledger holds
+    by_design or refuted findings relevant to the question, one auditor
+    call (`synthesizer:settled-audit`) names every item of the answer,
+    in any section but Unverified, Dropped, Held patches and Sandbox,
+    that restates one. The item is kept, with the recorded reason noted
+    on it. Run 8 ranked by_design csf-12 first among the improvements.
+  - **A brief's findings are owed.** A finding an injected brief names,
+    which no run after the brief that reached the code mentions, is
+    listed under Unverified as not re-verified. Run 8's brief asked for
+    csf-8 on the patched tree and nothing ran it.
+  - **A drop superseded by a dropped run is thin.** "C49: superseded by
+    C49" and "C64, C65: superseded by C64" now count.
+  - **The confidence cap names the critic's own rating** ("capped at 0.6
+    by the evidence bar (the critic rated it 0.95)"). The cap did work
+    in run 8, but the CONFIDENCE line is stripped from the critique and
+    the raw reply still said 0.95.
+
+  Who settles a finding: the user, or any assistant session (`by:
+  assistant`), including the one driving the council. The engine only
+  records candidates.
+
+  **Run 7** (mail #1659): the research was the best yet and the answer
+  lost it. What changed:
+  - COMMANDS THE LANES RAN is sized by the reader's window
+    (`COMMANDS_WINDOW_SHARE` 0.35 of `resolve_window()`, at least
+    24,000 characters) for the synthesizer, critic and meta-critic. A
+    fixed 24,000 hid 53 runs, the coder's decisive ones among them, from
+    a synthesizer whose window held all 104,000.
+  - A matrix cell goes to the auditor as `<tool> on <case>: <what the
+    mark means>` with the row's note: the answer's own legend when it
+    gives one (it is asked to), else ✓ = handled correctly, ⚠ = partly
+    wrong or a risk, ✗ = a defect. Bare "the column says ✓" came back
+    "no such table printed" for every cell.
+  - A doubled heading (`### ## Unverified`) is read as its section; the
+    harness had added "no Unverified section" beside the one given, and
+    the thin-Dropped check never saw `### ## Dropped`.
+  - Dropped: a run "superseded by" something that is not a run (a file,
+    "static analysis"), or one run said to supersede 5 or more, is thin.
+  - A held test's "last run failed" counts only the part of a command
+    that runs tests (`test_reruns._test_segments`): a `sed` reading the
+    file into a copy is not a run of it.
+  - The ledger reads an item's id tag (`(known: csf-7)`, an ID cell
+    `**csf-7**`) as the match (`Ledger.record(known=)`), takes a new
+    finding's title from the defect column, and does not add a bare
+    name of a path it has.
+  - The planner's coder tasks carry what the question asks of coder
+    lanes (the failing test AND the fix) over the whole set in scope,
+    and the coder sees the question as applying to it, not "context
+    only".
+  - A critic `ready` is held when more than half of the round's lanes
+    (`round_lanes()`: researcher exits after the last critic exit) ran
+    nothing that reached the code; with fewer, it stands but names them
+    and its confidence is capped at 0.6.
+
+  A claim taken from a checkpoint brief must be marked `(from the
+  checkpoint brief, not re-verified)` unless a report checks it.
+- A lane that is about to report with a test file it wrote that never
+  ran green is asked once to run it (`claude_hooks/test_reruns.py`,
+  `unrun_tests()` over its own `write_file` / `run_command` calls; a
+  `guard` event `unrun_tests`). The lane is told to fix the test, not
+  the code under test, when the test does not load. Only loops that have
+  `run_command` are asked. The test-file match follows a file copied
+  into place (`cp` / `mv` / `install`), and a run whose own output shows
+  failing tests counts as failed even when a pipe (`| tail`) made it
+  exit 0.
+- A researcher on a shell run that is about to report when **none of
+  its own runs reached the code** (or it ran nothing) is asked once to
+  run the test or probe for its top finding, or to say why it cannot
+  (`LoopConfig.report_check` = `evidence.no_run_report_check`; a
+  `guard` event `report_check`). The loop owns "once"; the engine owns
+  the rule.
+- In write mode, **Sandbox changes** flags a held test file that was
+  never run after its last write, or whose last run failed
+  (`held_test_notes()`), so a held patch of broken tests is not mistaken
+  for evidence.
+
+Without the shell or a brief, none of this runs and prompts are
+unchanged.
 Toggle + timeout:
 
 ```
@@ -927,6 +1336,212 @@ claude-consultants control <sid> --strictness adversarial \
 Boot-time it's seeded from `adversary_strictness`; `adversarial` is
 reachable only via `POST /control`. Default `normal` + empty focus
 appends nothing (byte-identical to the pre-M4 critic).
+
+### Cross-examination (`[critic] cross_examination`, on for shell runs)
+
+```
+claude-consultants config set-cross-examination shell   # default; or on / off
+```
+
+`shell` turns it on for a run that has the sandboxed shell, where a
+challenged lane can answer with a run. Council run 10b (2026-10-26, the
+ac1ee35c56 baseline) graded it: after the adversary brief a lane
+answered with 12 runs, one claim narrowed and one fell, for 4% of the
+run's prompt tokens. `on` forces it for every run, `off` for none.
+In a follow-up only the follow-up's own lanes answer: a challenge to a
+report carried over from the earlier run stays open and goes back as
+the ordinary reroute, since that lane's conversation and shell view
+ended with the earlier run.
+
+A critic not convinced by a claim challenges it instead of sending the
+whole round back:
+
+```
+CHALLENGE report=3: the edit of line 5 is called blind, but C58 shows
+line 5 read and unchanged. Settle with: a run that edits a read line.
+```
+
+The lane that wrote report 3 resumes its own conversation, on its own
+model and in its own shell view, told which tools it has, and answers
+`ANSWER report=N: settled | narrowed | conceded` (one exchange, 12
+turns; challenged lanes run in parallel, at most 4). The critic then
+rules on each claim: `stands` (the answer shows it), `narrowed` (part
+of it stands, restated), `falls` (conceded, or not shown) or `open`; a
+claim the lane conceded falls and one it narrowed is at most narrowed,
+whatever the critic wrote. Each ruling is kept for the synthesis
+audits: an item close to a settled finding that was cross-examined
+against it carries the ruling instead of a demand for a run. An open challenge falls
+back to the ordinary reroute, and the rerouted researcher sees the
+rulings in the critic's verdict. With nothing open the critic's own
+DECISION line decides. The exchanges and rulings are appended to the
+critique the synthesizer reads. Once per round. With the setting off,
+nothing is added to the graph.
+
+### PolyKV placement (`[polykv]`, off by default)
+
+```
+claude-consultants config set-polykv on [--mode auto|affinity|pooled|assured|off] [--layout shared|as-built]
+```
+
+On an opencoti endpoint (`[endpoints.X] backend = "opencoti"`), or an
+xOllama model with client-pool seats (`/api/show`
+`xollama.session.client_pools` ≥ 2, not a council model), a run's
+manager (`consultants/engine/polykv.py`) places every role call:
+- **`affinity`:** each conversation gets its own engine session.
+  The session id is `<sid>~<role>~<hash>`, and the hash covers role,
+  model, the system turns and the first user turn, so a tool loop's
+  turns land on their warm slot.
+- **`pooled`:** also makes the leading system run (grounding, role
+  prompt, tools) a shared root pool. It is rendered the way the
+  inference path renders it (`PolykvClient.render_chat()`: the engine's
+  `/apply-template` direct, xOllama's own `/api/chat`
+  `_debug_render_only` behind xOllama, whose template trims each turn —
+  an engine render shared 1,050 of 16,557 tokens there), cut at a
+  sentinel turn, and byte-prefix-checked against the full render. Every
+  lane with the same head attaches to it, so the grounding is prefilled
+  once rather than once per lane. The layer is pinned while the run uses
+  it (the engine sweeps an unpinned, unreferenced pool during any pause).
+  A call that attaches it states a private window (`num_ctx` = its
+  prompt past the layer, estimated at the layer's chars per cell × 1.3,
+  plus its `num_predict`), so the engine charges only private tokens;
+  with no window it charged the whole prompt again on top of the pool.
+- **`auto`:** pools where the engine advertises pools and shared
+  roots, and falls back to affinity elsewhere.
+- **`assured`:** one owner window per run and root, on engines with
+  owned pools (`polykv_subpools_v1`). The first pooled call opens the
+  owner with a 1-token request booking `num_ctx` for the layer plus 4
+  lanes and `num_ctx_min` for the layer plus one, both capped by what
+  `/kv` admits now; the layer is created inside it, and every lane is a
+  worker (its own session, `pool_id`, no `num_ctx`), charged only its
+  private part against the owner. A worker refused as its owner is full
+  (429 `worker of …`) grows the owner when the engine has room, else
+  waits for a sibling lane to end, then is resent. The owner is touched
+  every 60 s while idle (the engine's idle TTL is 300 s). An owner that
+  does not fit, or an engine without owned pools, runs as `pooled`.
+
+Cloud and plain Ollama calls in the same council are never touched.
+
+**Shared layout** (`--layout shared`, the default; plan F4). Every role
+opens with its own system prompt, so on an engine that shares prefixes
+the critic, meta-critic, synthesizer and adversary each prefilled the
+same question, plan and reports behind a different first turn. Under
+`pooled` / `assured` the manager sends each council role's conversation
+as `consultants/engine/prompt_layout.py:role_last()` lays it out:
+- the system turn is the council preamble every role prompt opens with
+  (plus one line saying where the role's job is written), then the
+  grounding turns as they were;
+- the role's own text, and the `# Output Budget` section wherever it was
+  appended, go to the end of the first user turn, under `# Your role in
+  the council`. Nothing else moves, so a tool loop keeps one prefix.
+
+A conversation whose system turn does not open with the preamble
+(compaction steps, audits, tool_executor, coder) is sent as built, and
+so is everything under `affinity` / `off` / `--layout as-built`. The
+layout is applied at the wire: the recorder, compaction and every reader
+see the messages as the roles built them.
+
+The first user turn then gets a **layer per shared block**, each a fork
+(`/polykv/pools/{id}/fork`) of the one before, and a call attaches the
+deepest: after the question, after the plan and before the last report,
+from the headers the builders write (`block_cuts()`), and the end of the
+longest prefix two calls of the run share, snapped to a paragraph end —
+that is how the last report's end is found, since reports hold blank
+lines of their own. A block under 1,024 characters joins the next one.
+A refused fork shares what the chain already has, and the next block
+forks from the last layer that exists. In the tests a critic
+makes the layer up to its last report, the synthesizer forks it through
+that report and attaches it. A call's private window leaves out what
+its layer covers. Settle releases forks before their parents (the engine
+refuses a parent with children).
+
+Lanes of one run queue on each other for room. Before a call that states
+a window, the manager reads `/kv`; if the engine has fewer free cells
+than the window, it closes the run's idle sessions (a finished lane keeps
+its window booked), and if that is not enough while sibling lanes are
+mid-call it waits for one to end, up to 240 s (below the 300 s stall
+threshold). A 429 for room gets the same treatment and one resend.
+
+Failures never fail a call; the call is sent with less sharing:
+- A layer the engine refuses is skipped.
+- A head that is not a byte prefix of the full render is never pooled.
+- A pool the engine lost is rebuilt up to 3 times, including one found
+  lost by a refusal for size that names no share (the engine charges an
+  attach to a missing pool in full rather than refusing it).
+- A changed `boot_id` drops every pool.
+
+Every stated window is capped at the engine's `session_ctx_max` (`/props`
+`opencoti.kv`): a cold model's budget sized from its trained context asked
+a 96k output of a 32k engine, a 429 that never clears.
+
+A session with a live booking keeps it: the engine ignores a different
+`num_ctx` on its later calls, so a lane whose history outgrew its first
+booking is refused as `request (N tokens, S of them shareable …) exceeds
+the available context size (W private tokens)`. The manager reads the
+engine's own count from that refusal, resizes the booking (or, where `W`
+is what was asked, widens its estimate and learns the gap for the root's
+later calls: code read into a transcript takes more cells per character
+than the prose layer the ratio comes from) and resends once.
+
+**Compaction can continue the lane** (`[compaction] continuation`: `off`
+by default, `auto` = under `pooled` / `assured` only, `on` for any
+backend). Off by default since compaction-v7-cont2 (2026-10-24, qwen3.6
+27B 128k, one trial per arm): the continuing writer's replays were ~30%
+shorter, the lane re-read 7 modules instead of 113 because it trusted
+them, and of the module rows only the fold could supply it got 26% right
+(28/108) against 97% (36/37) as text — the answer's table 71/151 against
+150/151, both fixed. When on:
+the writer and the half-critics (or the reduced flow's reviewer) are sent
+as the lane's next turn — its own messages, tools and `num_ctx`, with the
+instruction on the content of its last tool result — so the engine reads
+the lane's stream from its slot instead of a transcript pasted as text.
+Never as a new user turn: a Qwen-style template renders every assistant
+turn after the last user query with its `<think></think>` block, so a new
+query re-renders the whole loop and the share stops right after the
+question (render on eleven2go). A call the model answers with a tool call
+is answered as not run and asked again once, still as a continuation
+(Ollama has no `tool_choice: "none"`, and dropping the tools would change
+the head). The retrospective and the synthesizer stay requests of their
+own; after the critics the lane's slot is given back with
+`close(keep_running)` (its cells hold the transcript the replay replaces,
+and the layer covers its next call's head). It falls back to the text path
+when the lane's prompt plus the instruction and the summary do not fit the
+window, in overflow recovery, and when the continuing writer writes
+nothing. Smoke: `benchmarks/consultants/compaction_continuation_smoke.py
+--xollama URL --model M [--files N]`. On eleven2go (32k, one live slot,
+2026-10-24) the continuing writer read 19,624 of 22,340 tokens from cache
+where the text writer read none; over a whole fold the saving depends on
+the transcript dwarfing the instruction (3 reads: 8,231 vs 12,940 tokens
+prefilled, 22 vs 56 s; 4 reads: 17,158 vs 12,362, because the synthesizer
+evicted the single slot between folds). Replay quality is not yet benched
+(one sample: the continuing writer cited no `[#N]` and stated line numbers
+it was never shown). The fork's concurrent critics on a frozen P′ need
+`continue_pool` on xOllama's `/api/chat` and are not built.
+
+**Follow-ups reuse what the run built.** A completed run whose consultancy
+is still open (not accepted) is *held* instead of released: its lane
+sessions close, its owner, pinned layers and keepalive stay, for
+`polykv.HOLD_S` (15 min). A follow-up in the same mode adopts it (no new
+owner, no new layer; 2026-10-24 on eleven2go: 6/6 calls shared across the
+two runs, both modes). `accept` or the deadline releases it. Holds are
+listed in `~/.claude/consultants-polykv-held.json`
+(`CONSULTANTS_POLYKV_HELD`); an engine start releases any a previous
+process left, since their pins outlive it.
+
+When the run ends, every session it used is closed; every layer it made
+is released if nobody attached it (the engine never sweeps those) and
+unpinned otherwise. The engines are then audited for anything carrying the
+run's prefix and for its own layers still pinned or never attached, each
+candidate confirmed by id (the engine's pool list keeps pools it dropped). The report (sessions
+closed, leaks, per-role shared and cached tokens) goes to
+`.claude-hooks/consultants/<sid>/polykv.json`. A suspended run releases
+nothing: it writes its snapshot there and takes it back on resume. Attached
+roots are left to the engine's ephemeral sweep, because another council
+may be attached. Live gate for the client: `scripts/polykv_probe.py`; for
+the manager on the council's prompt path,
+`benchmarks/consultants/polykv_smoke.py --xollama URL --model M
+[--lanes 3] [--sequential]` (2026-10-24 on eleven2go: 3/3 lanes pooled,
+49,809 of 49,997 prompt tokens shared, nothing leaked, concurrent and
+sequential).
 
 ### Verify budget — the skeptic-panel cap
 
@@ -1207,8 +1822,11 @@ with less to work from.
 **Reservations follow what turns cost.** `num_predict` is a ceiling, not
 a forecast. Before a run has turns to measure, a quarter of the window
 is held back; after two, the reservation follows their high-water mark
-×1.5. This is why the same model can show a different trigger point on
-two different questions.
+×1.5, never more than the model's declared room — its published output
+ceiling, else a quarter of the window — and never the per-turn cap
+(0.75 × window), which is the most a turn may spend, not what it is
+expected to. This is why the same model can show a different trigger
+point on two different questions.
 
 ### Thinking is condensed, not discarded
 
@@ -1237,90 +1855,194 @@ read as thirty things it thought, and no note simply returns the
 pre-existing behaviour of re-deriving. Set
 `LoopConfig.capped_thinking_enabled = False` to disable it entirely.
 
-### What a compaction leaves behind
+### Compaction — how a long lane keeps working
 
-Compaction used to replace the elided messages with a marker counting
-them. That is honest and carries nothing: every finding, every dead end
-and every stretch of reasoning in that span was gone, and a role that
-continues with no memory of having been wrong makes the same mistakes in
-the same order.
+When a role's history reaches the trigger (the smaller of 0.9 of the
+usable input — itself 0.9 of the window — and the window less the reply
+reserve; Cerebriline's rule), the span between the question and the recent tail is
+folded into one message. Everything about that fold is in
+`consultants/engine/compaction.py`; the cut is planned by
+`budget.plan_cut()`.
 
-Two passes now run over the span while it still exists — that moment is
-the only one where those turns are still available — and both land in
-the marker:
+**Who writes it.** Every compaction call runs on the lane's own client
+and model — there is no parameter that could name another, and a test
+asserts it — one call after another on one connection, with thinking
+off. The calls are recorded as `<role>:compaction` rows and carry
+`phase: "compaction"` for the stall monitor, which gives them their own
+thresholds (`compaction_stall_threshold_s` / `compaction_hard_s` on
+`POST /control` override them). A refused call (429/503, or a refusal
+fault) is waited out: without bound for the writer, three times on a
+2–30 s backoff for the rest.
 
+**Three flows**, chosen per role (and per model) under `[compaction]`:
+
+| flow | calls | what it is for |
+|---|---|---|
+| `auto` (default) | `full` from a 64k window up, `reduced` below (`resolve_flow()`, `SMALL_WINDOW_TOKENS`) | every role, every model (2026-10-26, ch-25) |
+| `full` | writer (with a `<<<HALFWAY>>>` mark) → retrospective → critic, first half → critic, second half → synthesizer | the default from 64k up since 2026-10-24 (compaction-v7-g2) |
+| `reduced` | writer → retrospective → reviewer | the default below 64k: about half the folding time; it lost the fix on compaction-v7-g2 at 128k / 256k, where folds are rare |
+| `basic` | none | the deterministic elision note only |
+
+**Below a 64k window** (ch-25) a fold is also sized for the window: the
+tail it keeps verbatim gets what the digest leaves of the compaction target
+(`tail_keep_tokens()`: target − the generation's summary + retrospective
+budget, never below the recency floor), the fork's overflow-recovery bar on
+every fold. At 32k the fork's sizing landed a fold ~4k under the trigger,
+so a researcher folded every 2–3 calls and compaction took 772 of 981 s of
+LLM time (csl-2026-10-25-1312-4ea5). Replayed on its 27 folds
+(`benchmarks/consultants/fold_cadence_replay.py`): 24 folds, tail 5.2k →
+4.2k. A forced fold that then finds nothing left to fold with a tail folds
+the tail too, the typed prompt pinned. From 64k up nothing changes.
+
+The **writer** is the fork's present-tense replay prompt, verbatim: a
+replay written in the past tense reads as history, which the model feels
+free to doubt. It gets three attempts; an over-long draft is re-asked
+with the measured overrun. Its output is cut where it starts echoing the
+transcript (`Conversation:`, `[Tool result]:` outside a code fence) and
+long fences are trimmed. The **retrospective** is the assessment of
+method — the discarded reasoning paired with what each stretch produced
+— and has no guaranteed floor: the summary writes first. The **reviewer**
+(or, in `full`, the two critics and the synthesizer) fixes tense and
+keeps citations; a revision under half the original is rejected.
+
+**What the writer is given.** The task first: the head's question is
+never folded, so the writer would not see it otherwise, and a writer
+with no task took one from the prompt's examples ("I am fixing the
+collision") and wrote the work up against it (compaction bench,
+2026-10-19). Then every typed request, the previous digest, the numbered
+key, and the folded span sized from the window — the transcript the
+largest compaction request carries, with its reply, must fit the
+window — not a fixed share of the target. The key lists **every call of
+the span**, plus the carried calls evicted to budget: a key that dropped
+the span's oldest calls and renumbered the rest made the writer narrate
+calls it never made. The ledger budget bounds only what is carried to
+the next fold. Each fold's generation is the previous one's plus one;
+the output-budget ladder keys on it.
+
+**What the fold message carries**, in this order:
+
+1. every typed user request, verbatim — follow-ups included, within a
+   15% share, middle-elided if long, never dropped;
+2. the retrospective;
+3. `Context summary:` — the replay;
+4. the tool ledger entries the summary did not cite (the summary cites
+   `[#N]`; the entries are spliced in after the review, so the critics
+   move four-token citations instead of 400-character entries);
+5. the elision note.
+
+`placement` decides whether that message is a mid-history `system`
+marker or a `user` turn (the fork's and xOllama's order).
+
+**Sizing.** The target is 25% of the free input (0.9 × window less
+system prompt and tool schemas), always below the trigger. At 32k / 128k
+/ 256k the cold-start trigger is 24,576 / 98,304 / 196,608. The reply reserve is
+measured from the transcript: the largest of the newest three turns, or
+the second-largest once there are four samples, never below
+`output_room_min` (8,000). The cut never folds the question, the newest
+typed prompt (a follow-up is pinned instead), or less than a quarter of
+the messages, and walks back to a safe boundary so a tool call is never
+separated from its result. If the result is still over the trigger, the
+fold is re-run without a tail and the smaller result kept; a fold that
+does not shrink the history is discarded. One fold at a time per lane.
+
+**Before sizing**, the history is tidied (`consultants/engine/history.py`):
+tool results over 32,000 characters (file reads 50,000) are cut in the
+middle with a marker that says the harness made the gap and the file is
+complete; and once the history fills 40% of the window, every read
+superseded by a later read of the same range becomes
+`[outdated - see the latest file content]` — all at once, because each
+rewrite breaks the server's prefix cache.
+
+**Overflow.** A provider that refuses the request as too long gets one
+forced compaction (the deterministic fold as the floor; the model's
+digest only if it is smaller still and within the trigger) and one
+resend; a second refusal raises `ContextOverflowUnrecovered`. Ollama
+does not refuse, it truncates: a prompt count at the window's edge that
+falls 15% short of our estimate is treated the same way, and that count
+is never used for calibration. A reply cap squeezed below the output
+room by the window forces one compaction per descent.
+
+**Thinking.** `reasoning_replay` (`none` | `all` | `inline`) decides what
+a past turn's reasoning looks like on the wire. `all` is probed once per
+server and model and falls back to `inline` (`<think>` in the content)
+when the template drops the field. Inside a compaction, reasoning enters
+the writer's input cut to 2,000 characters a block. A turn that ran out
+of thinking budget and is thrown away — a continued answer, a forced
+retry, a `_single_shot` re-ask — leaves a condensed note, framed as
+reasoning the model can no longer see so it does not distrust the notice
+quoting it.
+
+**After a fold**, the loop forgets its duplicate-call stubs: a repeat of
+a call whose result was folded away runs again instead of being told to
+"use the prior result". Stubs are keyed on canonical arguments, cleared
+by any write, and the real result is re-served every fourth repeat.
+
+```bash
+claude-consultants config set-compaction --flow full --role researcher
+claude-consultants config set-compaction --placement user
+claude-consultants config set-budget --trigger-ratio 0.85 --output-room-min 6000
+claude-consultants config set-compaction --clear flow --role researcher
 ```
-Retrospective on the work this summary replaces — your own assessment,
-carried forward:
 
-## What did not
-Re-reading the same three files after each failed grep. The file was
-never the problem; the aggregation order was.
-...
+Each run's folds are `compaction` events in `transcript.db` with the
+flow, placement, reason (`trigger` / `overflow` / `silent-truncation` /
+`starved-cap`), tokens before / target / after, and whether the no-tail
+rescue ran. The bench behind the defaults is
+`benchmarks/consultants/compaction_bench.py`.
 
-Context summary:
+### Decision models — Jev and `/v1/systemone`
 
-## Goal
-Find where the metric drops rows before normalisation.
-## Ruled out
-The tokenizer (eval.py:88 counts rows, not tokens).
-...
+A decision model writes no text: it reads a state and answers typed
+questions — *is this true?* (noul), *which option?* (choice), *which
+level?* (score) — with probabilities. The council can ask one at four
+places, each switched on in `[decision] seams` and each a no-op when off
+or when the call fails:
 
-[61 earlier message(s) were elided to fit the model's context window...]
+| seam | where | what changes |
+|---|---|---|
+| `review` | after the synthesizer | an accept / followup / research recommendation on the answer, in `show` as `decision` (and `metadata.json`) for the review loop |
+| `confidence` | critic, meta-critic, synthesizer | advice, never an override (owner, 2026-10-15/19): before the role rates, its prompt gets a `DECISION-MODEL ADVICE` block with the raw p that the research suffices, labelled with what that server's scores were measured to mean (`decision.SCORE_MEANINGS`, from H6: Jev ranks well but its accepted answers averaged 0.46; the local models barely rank). The role's own `CONFIDENCE:` stays on the channel the xauto escalator, the low-confidence interrupt and the adversary checkpoint read. The finished answer's score goes to `result` as `decision.answer_confidence` for the reviewer |
+| `struggle` | researcher loop | every 6 tool results, *is this lane repeating itself?*; a confident yes (high-stakes floor) adds one harness nudge per lane |
+| `citations` | after the CitationLinter | *does the cited code show what the sentence claims?*; a confident no annotates the cite `[unsupported — the cited code does not show this]` |
+
+Two servers speak the API. **TypeSafe's Jev** (`jev-latest`, about 270
+ms a call) needs a key; `key_file` names the file holding it — the key
+is never written into the config or a run's checkpoint. **Ollama ≥ 0.35 /
+xOllama** serves local decision models at `<root>/v1/systemone` with no
+key; `claude-consultants decision-models --url <root>` lists the ones it
+has. The client handles Ollama's limits itself: a body over 64 KiB or a
+state over the model's loaded window is cut (the state only, never the
+questions), retried, and the size that fitted is remembered.
+
+```bash
+# Jev (TypeSafe), every seam
+claude-consultants config set-decision --enabled on \
+    --key-file ~/jev.key --model jev-latest \
+    --seams review,confidence,struggle,citations
+# a local decision model instead
+claude-consultants config set-decision --url http://localhost:11434 --model tev1:latest
+claude-consultants decision-models
+# shadow: ask and record, never act (collect live scores first)
+claude-consultants config set-decision --enabled on --key-file ~/jev.key \
+    --seams '' --shadow confidence
+claude-consultants config set-decision --enabled off
 ```
 
-The **summary** is the hand-over note — goal, done, in progress, ruled
-out, key facts, next — written from the transcript with reasoning
-excluded. The **retrospective** is the assessment of *method*, written
-from the discarded reasoning paired with what each stretch produced.
-That pairing is the point: reasoning on its own reads as a plan, and
-every plan reads as sound; the outcome beside it shows which ones were.
-Tool results are reduced to a verdict (`applied`, `refused as an
-unchanged repeat`, `failed: …`), and each turn carries its reasoning
-cost in tokens — the one thing a model cannot infer from re-reading its
-own thinking is that the stretch which felt thorough was the turn that
-spent eighteen thousand tokens for one refused call.
+**Shadow.** A seam in `[decision] shadow` is asked and recorded exactly
+as an acting one, and its answer is then dropped: no advice block in the
+prompt, no `answer_confidence`, no recommendation in `result`, no struggle nudge, no
+citation note. Shadow wins over `seams`. The recorded `decision` events
+carry `shadow`, and `benchmarks/consultants/mine_decision_cases.py`
+pairs each answer's live scores with what the reviewer did next (a
+follow-up, or `accept`), which is how a per-server mapping is measured
+before a seam acts (plan H6).
 
-The retrospective comes first because it is what should be read first:
-how the work went, before what the work was.
-
-Budgets: the summary writes first against 70% of a combined budget that
-grows with **generation** (0.33 → 0.55 of the compaction target across
-five compactions, then flat — a fifth compaction is carrying everything
-the task has learned, and holding it to a first compaction's budget is
-how a long run degrades). The retrospective is then sized from what the
-summary actually cost, so an economical summary buys it room. Each
-digest chains into the next, which revises rather than restates it.
-
-**The summary writes first and takes what it needs; the retrospective
-is capped at what is left to reach the target.** There is no guaranteed
-floor for it: when the summary spends the budget, the retrospective is
-skipped and the skip is logged. The summary is the only record of *what
-happened* — lose it and the next turn cannot continue the work at all,
-whereas the retrospective improves how the work is done.
-
-```
-retrospective skipped: the summary spent 2604 of a 2640 budget,
-leaving 36 — below the 512 floor for a usable assessment
-```
-
-The digest's **input** is bounded too, by a projection rather than a
-character cap (`claude_hooks/budget_projection.py`). A cap can sever an
-assistant's tool call from the result answering it, which is not a
-smaller conversation but an invalid one. The projection degrades in a
-fixed order — reasoning per intent, then text truncation newest-first,
-then whole messages oldest-first **in tool-pair closures** — and never
-drops the first or latest typed user message or the turn in flight. It
-reports what it did:
-
-```
-summary input projection ok: ~7865 tok (33 dropped_field)
-retrospective input projection ok: ~9555 tok (40 dropped_message, 64 truncated_text)
-```
-
-If either phase fails or comes back empty, compaction still happens and
-falls back to the bare elision note — a digest that cannot be written
-must never block the compaction it was meant to enrich.
+Each call is a `decision` event in `transcript.db` (seam, model,
+latency, answers, or the error). What Jev sees is the question and the
+answer, the critic's evidence, a lane's recent call lines, or a cite with
+its code — bounded per part. Zero data retention at TypeSafe is
+enterprise-only. Measured on 25 council-shaped cases:
+[`benchmarks/consultants/results/2026-10-14/decision/report.md`](../benchmarks/consultants/results/2026-10-14/decision/report.md).
 
 ---
 
@@ -1357,7 +2079,7 @@ hand-editable if you prefer.
 | `store.ttl.jitter_pct` | store | #215 cohort spread — at write time `expires_at += ttl * uniform(-jitter, +jitter)`. Stops N sessions from expiring on the same reaper tick. Default 0.1 (±10 %). |
 | `store.distillation.enabled` | store | Master switch for Caliber-style summarization at expiry. M14 default = `true`. |
 | `store.distillation.model` | store | Primary distiller LLM. Default `gemma4:31b-cloud` (M11c-2 tool_executor winner). |
-| `store.distillation.fallback_models` | store | Tried in order on primary failure. Default `["glm-5.2:cloud"]`. |
+| `store.distillation.fallback_models` | store | Tried in order on primary failure. Default `["glm-5.3-flash:cloud"]` (glm-5.2 until 2026-10-18). |
 | `store.distillation.sweep_interval_seconds` | store | Reaper cadence. Minimum 30 s; default 3600 (1 h). |
 | `store.distillation.min_entries_per_distillation` | store | Cost gate — research groups below this delete without an LLM call. Default 3. |
 | `store.distillation.max_session_entries` | store | Per-prompt truncation cap. Default 50 (~30 k tokens at `gemma4:31b-cloud`'s 32 k ctx). |
@@ -1420,6 +2142,254 @@ claude-consultants config set-tools --all-roles false --cwd "$(pwd)"
 Worth knowing before you do: the cost argument for turning it off did
 not survive measurement.
 
+### The sandboxed shell (`--shell`, plan E)
+
+A council can only read unless a run asks for the shell. With `--shell`
+(on `consult` or `follow-up`) the researcher, tool_executor and coder
+lanes get `run_command`, and so do the critic and meta-critic, each
+bound to a lane of its own (`critic:<n>`, `meta_critic:0`) with a lane's
+extra turns (14 / 13), so a judge can run the check itself instead of
+sending a lane back for it. The planner, synthesizer and adversary never
+do, since a shell's state belongs to a lane.
+
+```bash
+claude-consultants consult --message "do the tests in tests/test_x.py pass on dev?" \
+  --cwd "$(pwd)" --shell
+claude-consultants follow-up <sid> --message "run them and see" --shell
+claude-consultants shell-preflight          # can this host do it, layer by layer
+claude-consultants config set-shell --default always   # every run gets it
+```
+
+**What a command sees** (the default `read` mode): the project and the
+other roots read-only at their real paths, a private writable
+`/scratch` (one per lane, kept between its commands, under
+`<cwd>/.claude-hooks/consultants/<sid>/lanes/<lane>/`) and `/tmp`, no
+network (`lo` only), no host home directory (`$HOME` is an empty
+tmpfs), an allowlisted environment (no tokens, keys, `OLLAMA_*`,
+`SSH_AUTH_SOCK`), and per-command limits: 120 s by default (a call may
+ask up to 600 s), 4 GiB memory, 256 processes, 400% CPU, 4096 open
+files, 1 GiB per file. Output is capped at 20,000 characters, head and
+tail kept, with the harness's truncation marker.
+
+**How it is built** (Linux, `claude_hooks/sandbox/linux_bwrap.py`; the
+static launcher below replaces the middle three) — programs that each
+set one layer and `exec` the next:
+
+```
+systemd-run --scope -p MemoryMax= -p TasksMax= -p CPUQuota=   cgroup
+  prlimit --core=0 --nofile= --fsize=                         rlimits
+    setpriv --reuid=65534 ... --nnp --bounding-set=-all       nobody, no caps
+      bwrap --unshare-all ... --seccomp FD                    namespaces, fresh root
+        <command>
+```
+
+Two orders in it were measured on solidpc and are not stylistic. Root
+running `bwrap --uid 65534` maps the inside uid back to the caller's,
+so a file written inside belonged to host uid 0: the engine drops to
+nobody *before* bwrap. And `/root/.claude.json` is world-readable on
+that host, so being nobody does not protect it — not mounting it does,
+which is why the root is a fresh tmpfs (remounted read-only once set
+up) rather than a read-only bind of `/`. The seccomp program
+(`claude_hooks/sandbox/seccomp.py`, generated in Python and read by
+bwrap from an fd) refuses `mount`, `unshare`/`setns`, `clone` with any
+`CLONE_NEW*` flag, `ptrace`, `bpf`, `io_uring`, `kexec`, keyrings,
+module loading, `TIOCSTI` and raw sockets with `EPERM`, and kills a
+foreign-architecture or x32 call. Landlock is optional and absent on
+solidpc.
+
+**A missing layer means no shell, never a weaker one.** A run asking
+for the shell on a host that cannot sandbox it is refused before it
+starts (HTTP 409 naming the layer); `shell-preflight` lists every layer.
+Windows (AppContainer + Job Object) and macOS (Seatbelt) are plan E7
+and not built: those hosts report the shell unavailable.
+
+**Permissions.** `run_command` goes through the ladder per call, by a
+cost/reach table (`claude_hooks/sandbox/classify.py`), because the jail
+— not the table — is the safety boundary: reading and test runners
+(`ls`, `git log`, `pytest`, `cargo test`, ...) are `auto`; interpreters,
+builds and anything unknown are `ask_assistant`; a command that can
+spend money (`aws`, `kubectl`, `runpod`, `curl`, ...) is `ask_human`
+except that with no network it cannot, so it is `ask_assistant`; a call
+asking more than 120 s is `ask_assistant`. `[tools.permissions]` and
+`POST /control` still win over the table.
+
+**Inheritance.** A follow-up that turns the shell on banks it on the
+consultancy: later follow-ups keep it until one sends `--no-shell`.
+Every answer of a run with the shell ends with
+`shell: enabled since <the ask | follow-up #k | config> (read, net none)`,
+so an inherited shell is never invisible.
+
+**Restarts.** A council suspended mid-command resumes with its shell.
+The command itself died with the engine (`--die-with-parent` and the
+scope), and is never re-run — commands are not idempotent. The lane's
+next result opens with a note naming the interrupted command; its
+partial writes stay in `/scratch`.
+
+**Disk.** A lane refuses to run when the disk holding its scratch is
+below max(20 GiB, 10%) free, or its `/scratch` is over 2 GiB
+(`--lane-disk-gib`). Scratch dirs go with the session's other files.
+
+**The session store is masked.** `<root>/.claude-hooks/consultants/` is
+an empty tmpfs inside every command, so a lane never sees another lane's
+scratch or view, nor the session's transcripts and checkpoints.
+
+#### Write mode (`--shell write`): a private worktree per lane
+
+On a git root, `--shell write` gives each research lane its own **git
+worktree**, bound at the repo's real path, so it can edit, build, run
+the tests and commit — try a fix, not just describe it. The user's tree
+is never written. (`claude_hooks/sandbox/views.py`.)
+
+- **Base.** One snapshot of the user's tree per session — HEAD plus
+  uncommitted and untracked, non-ignored files — written as a commit
+  under `refs/claude-hooks/council/<sid>/base` (never `refs/stash`). A
+  repo with more than 256 MiB of untracked files is refused (the base
+  would hash them all into the object store).
+- **View.** Created on the lane's first command (about 0.7 s on a small
+  repo). Ignored entries (`.env`, `node_modules`, ...) are mounted
+  read-only from the original, except caches a command recreates
+  (`__pycache__`, `.pytest_cache`, ...) and anything holding the session
+  store. Inside, git works against the view: the common git dir is
+  mounted read-only at `/council/git`, the worktree's admin dir writable
+  inside it, and new objects go to a lane-private directory — so `git
+  commit` inside cannot touch the user's refs or object store. The
+  lane's file tools (`read_file`, `grep`, ...) read its view too, with
+  paths mapped back to the real ones in their answers.
+- **When the council ends** every view is frozen: its changes against
+  the base are captured to `lanes/<lane>/changes.patch` and the worktree
+  is removed. Nothing big outlives a council, and nothing is ever
+  mounted in the host namespace (the view is bound only inside each
+  command's own mount namespace). The answer gains a **"Sandbox
+  changes"** section listing each lane's files and patch.
+- **Then:**
+
+  ```bash
+  claude-consultants changes <sid> [--lane L] [--diff]
+  claude-consultants apply <sid> --lane L [--dry-run] [--3way]
+  claude-consultants discard <sid> --lane L | --all
+  claude-consultants sandbox ls                 # every live or held view on this host
+  claude-consultants sandbox gc [--dry-run]
+  ```
+
+  `apply` checks first (`git apply --check`) and refuses a patch that no
+  longer fits the tree as it is now; it never touches the index unless
+  `--3way` is given. A held patch not applied or discarded within
+  `[tools.shell] held_ttl_days` (7) moves to `<sid>/expired/` — kept,
+  never silently deleted.
+- **Crashes.** A host registry (`~/.claude/consultants-sandbox-views.json`)
+  lists every live or held view. At engine start, before councils resume,
+  and hourly from the idle reaper, views of councils that are not running
+  are frozen to patches (a view cut short while being created is
+  removed); resuming councils keep theirs. A `kill -9` of the engine in
+  the middle of a command leaves no process, unit, mount or worktree
+  behind (`tests/test_council_shell_escape.py`).
+
+- **The coder** (when the role is on) gets a view of its own, lane
+  `coder:<n>`: `write_file` lands in it (paths from the repo root) and
+  it has `run_command` there, so it runs the tests it writes; its files
+  are in the "Sandbox changes" patch like a lane's, and the synthesizer
+  is told which commands ran (`RUN: …`) or that nothing did — then the
+  code is unverified. Without `--shell write` it writes to `coder-out/`
+  as before.
+- **Room.** Researcher loop caps (iterations / tools stripped after) are
+  low 6/4, medium 8/6, high and xhigh 40/32, max 80/72. A lane with
+  `run_command` gets `max(10, iters // 2)` more of both (xhigh: 60 / 52)
+  — writing, running and fixing takes turns of its own. Runs 3 and 4
+  (xhigh, 16 turns with the shell) had most lanes cut by the cap while
+  still reading; run 5 (45 with the shell) still capped a
+  deepseek-v4.1-flash lane that was writing and running probes. The coder's own loop is 12 turns, 60 with its write-mode
+  workspace. Near the end (turn 54, or 6) it loses every tool **but
+  `write_file`**, and while it has written nothing it is reminded every
+  12 (or 4) turns, more firmly each time. In run 8 a coder lost
+  `write_file` at turn 54 with nothing written, after a single ignored
+  reminder at turn 12. A planner task that names more than two ledger
+  findings is split into lanes of two, at most four lanes in all,
+  because run 8's one task covered six findings.
+  A probe in `/scratch` whose relative import (`./sdk/…`) missed gets a
+  hint naming the absolute path to import. Imports resolve from the
+  script's own directory, not from the cwd.
+
+#### Write scopes (`--write-scope PATH`): a reflink clone per lane
+
+A tree that is not a git repo, or a huge one, gets a writable view of
+**only the directories you name** (`claude_hooks/sandbox/clone_views.py`):
+
+```bash
+claude-consultants ask "fix the quantize script and run its self-test" \
+  --cwd "$(pwd)" --shell write --write-scope scripts [--write-scope conf]
+```
+
+- **View.** Each lane's first command clones every scope with
+  `cp --reflink` into the session store, and the clone is bound
+  read-write at the scope's real path; the rest of the root and the
+  other roots stay read-only. On XFS / btrfs a clone shares the
+  original's data extents, so it costs metadata only. Measured on
+  backup_models (`scripts/`, 4,745 entries / 136 GiB,
+  `scripts/bench_clone_views.py`): 0.5–1.4 s and up to 4 MiB per lane,
+  the first lane of a cold cache included. A clone against a cold cache
+  reads every file's extent map from disk (13–18 s for that first lane),
+  so the run starts reading them when it is submitted
+  (`clone_views.prewarm()`, a FIEMAP count per file, 10–14 s here) and
+  the first lane waits for that read rather than repeating it; councils
+  recorded 13–29 s before their first command, and at 13 s the first
+  lane took 0.57 s (`--prewarm-lead`). The very first clone of a scope
+  ever also costs the filesystem a one-time ~270 MiB of shared-extent
+  metadata, which later clones do not pay again. A filesystem that cannot reflink falls back to a plain copy
+  only while the scope is under `[tools.shell] lane_disk_gib`; a bigger
+  scope is refused, as is one over 250,000 entries. The session store is
+  never cloned. With a scope, write mode uses clones even on a git root,
+  which is the way to give a big repo a cheap view of one part.
+- **When the council ends**, each clone is checked against the manifest
+  taken when it was made. Size, mtime and ctime are compared, so a
+  `touch -d` that restores mtime is still caught. The changed files are
+  moved into `lanes/<lane>/held/` and the clone is removed. A review
+  diff goes to `changes.patch`.
+- **apply** copies the held files back, deletes what the lane deleted,
+  and gives each file its original owner. It refuses as a whole when any
+  of those files changed in your tree since the clone. A deleted
+  directory you have since added files to is kept, and `apply` names it.
+  There is no `--3way`, because the held changes are files, not a git
+  patch. `changes`, `discard`, `sandbox ls|gc` and the TTL work as for
+  worktrees.
+- The lane's file tools read its clone for paths under a scope, given
+  as relative or absolute paths, and the paths are mapped back in their
+  answers. The coder gets a workspace only when a scope is the whole
+  root.
+
+**Toolchains** (`claude_hooks/sandbox/toolchains.py`). The host's own
+`node`, `bun`, `deno` and `go` come first on the jail's PATH, found as
+the engine's user would find them: its PATH, then `~/.bun/bin` and the
+other usual per-user install dirs. A binary the sandbox user can reach
+is bound in place; for `node` and `go` that is the install prefix, so
+`npm` finds its `lib`. One under a directory it cannot traverse, such
+as a mode-700 home, is mirrored once into
+`/var/cache/claude-hooks-sandbox/toolchains/<tool>-<key>`, which is
+root-owned and world-readable (`CLAUDE_HOOKS_SANDBOX_TOOLCHAINS`
+overrides the location). Before this, the jail ran `/usr/bin/node`
+v12 and had no bun. The tool text names what was found, and for JS
+gives the vitest recipe: `--configLoader runner`. Without it, vite
+writes its bundled config beside the config file, into the read-only
+tree, and fails with EROFS.
+
+**The launcher.** Where the static `council-sandbox` binary is installed
+and verifies, the default `backend = "auto"` runs commands through it
+instead of `prlimit → setpriv → bwrap`: one binary, no dependencies,
+built from `native/council-sandbox` (Rust, musl, static — the fork's
+launcher needed glibc 2.34 and never started on bullseye). It reads the
+same mount plan as bwrap, with `--drop-to` and `--rlimit`; the escape
+suite runs every test through both. `scripts/deploy.py` installs it to
+`~/.claude/claude-hooks-sandbox/council-sandbox` only as the pinned
+build (`claude_hooks/sandbox/launcher_pin.json`: the host's own
+reproducible build when it hashes to the pin, else the release asset
+`council-sandbox-v<version>`, checked against the same hash), and the
+engine refuses a copy that does not match, is not static, or that
+anyone but its owner could replace. `verify_deploy.py` runs escape
+attempts through the backend councils will use. Rebuild and re-pin
+after a source change with `scripts/build_council_sandbox.py --pin`.
+
+Not yet: views of non-git trees (reflink / overlay), Windows and macOS
+(`docs/PLAN-council-cerebriline.md` §5).
+
 ### CLI
 
 If you don't want the AskUserQuestion walk-through (e.g. scripting,
@@ -1462,7 +2432,7 @@ claude-consultants config set-store-ttl --refresh-on-read false --jitter-pct 0.0
 
 # Distillation knobs (M14 sweep + #215 pacing)
 claude-consultants config set-store-distillation --enabled true \
-    --model gemma4:31b-cloud --add-fallback-model glm-5.2:cloud
+    --model gemma4:31b-cloud --add-fallback-model glm-5.3-flash:cloud
 claude-consultants config set-store-distillation --sweep-interval-seconds 1800 \
     --min-entries-per-distillation 5
 claude-consultants config set-store-distillation --max-groups-per-sweep 3 \
@@ -1838,6 +2808,72 @@ claude-consultants show <sid> --raw
 Dumps each `llm_call` / `node_enter` / `node_exit` / `tool_call`
 event as one JSON object per line. Schema:
 [`docs/consultants-transcript-db-schema.md`](consultants-transcript-db-schema.md).
+
+### The dashboard
+
+The engine serves a read-only dashboard at
+`http://127.0.0.1:38095/dashboard`. To reach it from the LAN, run
+`claude-consultants config set-dashboard-host 0.0.0.0` (or this host's
+LAN address; `off` undoes it) and restart the engine. The engine then
+also listens there. A client that is not on loopback gets only the
+dashboard routes (`/dashboard`, `GET /v1/dashboard/councils[/<sid>]`,
+`GET /v1/consult/<sid>/events`, `/v1/health`) and a 403 for everything
+else, so the LAN can watch councils but never start, steer or cancel
+one. It lists
+every council on the host, running and past, with status, project,
+effort and duration, and filters by status or by text in the question or
+sid. Selecting a council shows:
+
+- per-role progress (live councils);
+- the lanes table: model, LLM calls, tool calls, commands, tokens, time,
+  and how the lane ended (D7);
+- the commands that ran;
+- the answer;
+- the timeline of runtime events (node boundaries, injects, rewinds,
+  guard trips). A running council's timeline follows its SSE stream;
+- **Messages**: what the roles handed each other, in order. The
+  planner's plan goes to the researchers, each lane's report to the
+  critic and synthesizer, the critic's verdict to the next round or to
+  synthesis, and the answer to the user. Each card names its sender and
+  recipients, the verdict and confidence, how the lane ended, the
+  tokens, and any typed record (`[protocol] typed`) as labelled fields.
+  The control signals between the cards (injects, rewinds, the
+  adversary checkpoint, decision scores, guard trips) are one line of
+  plain words each. "What it was given" shows the start of the role's
+  opening request. Any of its LLM calls opens in full: system prompt,
+  every message, tool calls with their arguments, tool results, harness
+  notes, thinking, and the answer. A call can be linked as
+  `#<sid>/messages/call=<id>`.
+
+Questions, answers and messages are rendered as markdown. JSON in a
+message, such as typed records, tool arguments or event payloads, is
+shown as labelled fields, with the raw JSON one click away. A decision
+seam in `[decision] shadow` is never shown: its scores are recorded to
+be compared later with what the reviewer did without seeing them. `/`
+redirects to `/dashboard`. The proxy dashboard (:38081) links here from
+its header when `hooks.consultants.engine_url` is set, on the host the
+browser used.
+
+`/v1/sessions` covers one project at a time, so the list comes from a
+host-wide index at `~/.claude/consultants-councils.db`
+(`CONSULTANTS_COUNCIL_INDEX` overrides it). Every in-flight registration
+writes a row and every settled run updates it. On engine start, a
+background backfill indexes older councils from the projects the host
+already knows: `~/.claude.json` projects, in-flight cwds and sandbox
+registry repos. A council that ran with `--cwd` somewhere else is found by:
+
+```
+curl -X POST 127.0.0.1:38095/v1/dashboard/index/backfill \
+     -d '{"scan": ["/srv", "/shared"], "max_depth": 5}'
+```
+
+The index only points at the project's own files and is never the record
+itself. A row whose session directory is gone shows as `missing`. A row
+indexed as running that no engine runs and no in-flight record will
+resume shows as `lost`. JSON: `GET /v1/dashboard/councils?limit=&status=&q=`,
+`GET /v1/dashboard/councils/{sid}?since=&full=1` (`full` keeps the
+per-call events), `GET /v1/dashboard/councils/{sid}/messages`,
+`GET /v1/dashboard/councils/{sid}/calls/{event_id}`.
 
 ---
 

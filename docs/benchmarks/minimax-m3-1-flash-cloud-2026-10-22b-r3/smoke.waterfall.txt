@@ -1,0 +1,39 @@
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/minimax-m3-1-flash-cloud-2026-10-22b-r3/smoke.transcript.db
+
+sid: csl-2026-10-22-1700-0ccd
+status: completed
+total wall: 29.2s
+
+  planner       node=10.3s   (entries) llm=4x=10.0s   tool=4x=12ms    tok=p28613/c420
+      LLM round=1 model=minimax-m3.1-flash:cloud     3.9s  p=12881  c=178   
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.3s  p=11143  c=120   
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.2s  p=1586   c=26    
+      LLM round=1 model=minimax-m3.1-flash:cloud     1.6s  p=3003   c=96    
+      tool grep               x2       8ms chars=48185
+      tool survey_project     x1       4ms chars=3779
+      tool list_files         x1       0ms chars=131
+
+  researcher    node=20.1s   (2xentries) llm=6x=20.1s   tool=9x=3ms     tok=p156533/c1512
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     6.7s  p=33116  c=669   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     4.7s  p=35909  c=556   
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     2.6s  p=16893  c=76    
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     2.3s  p=35246  c=69    
+      LLM round=1 lane=0 model=minimax-m3.1-flash:cloud     2.1s  p=16929  c=84    
+      LLM round=1 lane=1 model=minimax-m3.1-flash:cloud     1.8s  p=18440  c=58    
+      tool read_file          x4       2ms chars=113696
+      tool grep               x1       1ms chars=2168
+      tool list_files         x3       0ms chars=445
+      tool survey_project     x1       0ms chars=3779
+
+  synthesizer   node=7.4s    (entries) llm=2x=7.4s    tool=3x=0ms     tok=p8724/c481
+      LLM round=1 model=minimax-m3.1-flash:cloud     5.4s  p=5122   c=324   
+      LLM round=1 model=minimax-m3.1-flash:cloud     2.0s  p=3602   c=157   
+      tool read_file          x3       0ms chars=4744
+
+totals
+  wall                  29.2s
+  sum of node spans     37.8s
+  sum of LLM call time  37.5s  (128.7% of wall)
+  sum of tool call time 15ms
+  total prompt tokens   193870
+  total completion tok  2413

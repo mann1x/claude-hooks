@@ -40,6 +40,11 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     # registry full of dead rows still misreports peers at SessionStart.
     _unregister_mailbox_session(event, config, providers)
 
+    # Resource claims follow the session: release them now rather than
+    # when another host's lease check notices (``run`` jobs keep theirs).
+    from claude_hooks.resources.hook import session_end as _release_resources
+    _release_resources(event=event, config=config)
+
     ep_cfg = config.get("episodic") or {}
     mode = (ep_cfg.get("mode") or "off").lower()
 

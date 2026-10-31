@@ -1,0 +1,54 @@
+{
+  "harness_version": "1.0",
+  "suite": "stall",
+  "suite_version": "1.0",
+  "suite_hash": "c8306c6204bc013a50a516dc388601072336aee152ccdc5629092b3208f6742d",
+  "suite_released": "2026-05-17",
+  "rubric": {
+    "stall_margin_factor": 2.5,
+    "hardcap_margin_factor": 3.0,
+    "stall_min_s": 30.0,
+    "stall_max_s": 600.0,
+    "stall_round_s": 30.0,
+    "hardcap_min_s": 300.0,
+    "hardcap_max_s": 3600.0,
+    "hardcap_round_s": 60.0
+  },
+  "models": [
+    "minimax-m3.1-flash:cloud"
+  ],
+  "mode": "live",
+  "ollama_base": "http://192.168.178.161:11434",
+  "tier1_enabled": true,
+  "tier2_enabled": false,
+  "tier1_trials": 3,
+  "tier2_trials": 2,
+  "git_commit": "4f6afa735ba110efb0e2c6069c371f23e3eca2da",
+  "started_at": "2026-10-22T05:34:04Z",
+  "questions": [
+    "council-gpqa-01-physics",
+    "council-gpqa-02-biology",
+    "council-synth-01-proxy-log-rca",
+    "council-synth-02-two-stack-tradeoff",
+    "standalone-01-research-synth",
+    "standalone-02-compare-architectures",
+    "standalone-03-summarize-paper",
+    "standalone-04-explain-tradeoff"
+  ],
+  "estimate": {
+    "trials": 24,
+    "by_model": {
+      "minimax-m3.1-flash:cloud": {
+        "trials_tier1": 24,
+        "trials_tier2": 0,
+        "chat_calls": 24,
+        "prompt_tokens": 36000,
+        "completion_tokens": 19200,
+        "total_tokens": 55200
+      }
+    },
+    "total_tokens": 55200,
+    "summary_line": "1 models \u00d7 8 questions \u00d7 (3t1+0t2) = 24 trials [tier1]. ~0.06M tokens estimated.",
+    "tiers": "tier1"
+  }
+}

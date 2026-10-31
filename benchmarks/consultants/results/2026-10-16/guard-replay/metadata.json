@@ -1,0 +1,11 @@
+{
+  "date": "2026-10-16",
+  "commit": "v1.20.2-62-gf76fa09-dirty",
+  "transcripts": 207,
+  "lanes": 911,
+  "roots": [
+    "dev",
+    "dev",
+    "backup_models"
+  ]
+}

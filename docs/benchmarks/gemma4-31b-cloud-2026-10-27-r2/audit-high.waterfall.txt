@@ -1,0 +1,42 @@
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/gemma4-31b-cloud-2026-10-27-r2/audit-high.transcript.db
+
+sid: csl-2026-10-27-1142-e47b
+status: completed
+total wall: 39.3s
+
+  planner       node=8.0s    (entries) llm=5x=8.0s    tool=3x=5ms     tok=p12435/c1826
+      LLM round=1 model=gemma4:31b-cloud             2.5s  p=2399   c=676   
+      LLM round=1 model=gemma4:31b-cloud             1.6s  p=1376   c=323   
+      LLM round=1 model=gemma4:31b-cloud             1.4s  p=2568   c=265   
+      LLM round=1 model=gemma4:31b-cloud             1.3s  p=3063   c=311   
+      LLM round=1 model=gemma4:31b-cloud             1.2s  p=3029   c=251   
+      tool glob               x1       5ms chars=29
+      tool survey_project     x1       0ms chars=3779
+      tool list_files         x1       0ms chars=131
+
+  researcher    node=29.7s   (2xentries) llm=6x=29.6s   tool=16x=61ms    tok=p190293/c4493
+      LLM round=1 lane=0 model=gemma4:31b-cloud             7.6s  p=50662  c=1019  
+      LLM round=1 lane=1 model=gemma4:31b-cloud             7.4s  p=33036  c=974   
+      LLM round=1 lane=1 model=gemma4:31b-cloud             5.6s  p=50683  c=871   
+      LLM round=1 lane=1 model=gemma4:31b-cloud             4.2s  p=18518  c=829   
+      LLM round=1 lane=0 model=gemma4:31b-cloud             2.4s  p=18591  c=378   
+      LLM round=1 lane=0 model=gemma4:31b-cloud             2.3s  p=18803  c=422   
+      tool grep               x1      59ms chars=328
+      tool read_file          x10      2ms chars=192330
+      tool list_files         x5       0ms chars=667
+
+  critic        node=6.8s    (entries) llm=2x=6.7s    tool=4x=1ms     tok=p14319/c1485
+      LLM round=2 model=gemma4:31b-cloud             3.7s  p=5173   c=881   
+      LLM round=2 model=gemma4:31b-cloud             3.1s  p=9146   c=604   
+      tool read_file          x4       1ms chars=11371
+
+  synthesizer   node=7.0s    (entries) llm=1x=7.0s    tool=0x=0ms     tok=p4929/c1215
+      LLM round=1 model=gemma4:31b-cloud             7.0s  p=4929   c=1215  
+
+totals
+  wall                  39.3s
+  sum of node spans     51.5s
+  sum of LLM call time  51.4s  (130.6% of wall)
+  sum of tool call time 67ms
+  total prompt tokens   221976
+  total completion tok  9019

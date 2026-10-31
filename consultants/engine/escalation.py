@@ -226,6 +226,10 @@ def _critic_named_gap(state: dict) -> bool:
     """
     if (state.get("critic_decision") or "") != "needs_more_research":
         return False
+    from consultants.engine import typed_results
+    rec = typed_results.loads(state.get("critique"), typed_results.VERDICT)
+    if rec is not None:            # plan G7: the verdict's own gaps
+        return bool(rec.get("gaps"))
     critique = (state.get("critique") or "").lower()
     if not critique:
         return False

@@ -143,7 +143,7 @@ def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
 # --------------------------------------------------------------------- #
 def step_repo(dry: bool) -> Step:
     s = Step("repo")
-    print("\n[1/6] repo state")
+    print("\n[1/7] repo state")
     head = _run(["git", "-C", str(REPO), "log", "--oneline", "-1"])
     if head.returncode != 0:
         s.fail(f"git log failed: {head.stderr.strip()}")
@@ -165,6 +165,22 @@ def step_repo(dry: bool) -> Step:
                "deployable paths — deploying the working tree, not HEAD")
         for ln in changed[:10]:
             s.note(f"  {ln}")
+
+    # The commit secret gate (scripts/secret_scan.py): .git/hooks is not
+    # tracked, so a clone has the gate only once deploy puts it there.
+    # c2f2caa pushed the pgvector DSN password with no gate in the hook.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import secret_scan
+    if secret_scan.hook_installed():
+        s.note("secret gate: in .git/hooks/pre-commit")
+    elif dry:
+        s.note("secret gate: would install into .git/hooks/pre-commit")
+    else:
+        s.note(f"secret gate: {secret_scan.install_hook()} in "
+               ".git/hooks/pre-commit")
+    if secret_scan.find_gitleaks() is None:
+        s.note("WARNING: gitleaks is not installed — every commit here is "
+               "refused until it is")
     return s
 
 
@@ -218,7 +234,7 @@ def _envs_with_package() -> list[Path]:
 
 def step_packages(dry: bool, only_env: str | None) -> Step:
     s = Step("packages")
-    print("\n[2/6] packages (editable installs)")
+    print("\n[2/7] packages (editable installs)")
     pys = _envs_with_package()
     if only_env:
         pys = [p for p in pys if only_env in str(p)]
@@ -256,7 +272,7 @@ def step_packages(dry: bool, only_env: str | None) -> Step:
 # --------------------------------------------------------------------- #
 def step_skills(dry: bool) -> Step:
     s = Step("skills")
-    print("\n[3/6] skills")
+    print("\n[3/7] skills")
     repo_skills = REPO / ".claude" / "skills"
     if not repo_skills.is_dir():
         s.note("no in-repo skills directory")
@@ -441,7 +457,7 @@ def step_episodic(dry: bool) -> Step:
     behind upstream, and its better-sqlite3 sat on the wrong Node ABI for
     12 days. Runs before services so episodic-server restarts on it."""
     s = Step("episodic")
-    print("\n[4/6] episodic-memory (vendored)")
+    print("\n[4/7] episodic-memory (vendored)")
     mode = _episodic_mode()
     if mode != "server":
         s.note(f"episodic.mode is {mode!r} — only the server host builds it")
@@ -457,7 +473,60 @@ def step_episodic(dry: bool) -> Step:
 
 
 # --------------------------------------------------------------------- #
-# 5. Services
+# 5. Council sandbox launcher
+# --------------------------------------------------------------------- #
+def _shell_backend() -> str:
+    try:
+        sys.path.insert(0, str(REPO))
+        from consultants import config as cc
+        return cc.load_config(cwd=REPO).tools.shell.backend
+    except Exception:
+        return "auto"
+
+
+def step_sandbox(dry: bool) -> Step:
+    """The static ``council-sandbox`` launcher (plan E2) is a native
+    binary no pip install touches, run by the engine as root. It is
+    installed only as the pinned build — the host's own reproducible
+    build when it hashes to the pin, else the release asset checked
+    against the same hash — before the engine restarts onto it. Nothing
+    obtainable is fine while the backend is ``auto`` (the shell runs on
+    the bwrap chain); a configured ``launcher`` backend without one, or
+    an artifact that does not match the pin, fails the deploy."""
+    s = Step("sandbox")
+    print("\n[5/7] council sandbox launcher")
+    if not sys.platform.startswith("linux"):
+        s.note(f"no launcher on {sys.platform} (plan E7)")
+        return s
+    sys.path.insert(0, str(REPO))
+    try:
+        from claude_hooks.sandbox import launcher
+    finally:
+        sys.path.pop(0)
+    status = launcher.install(dry=dry, note=s.note)
+    backend = _shell_backend()
+    if status == "failed":
+        s.fail("the council-sandbox artifact did not match its pin; "
+               "nothing was installed")
+    elif status == "unavailable" and backend == "launcher":
+        s.fail("[tools.shell] backend = \"launcher\" but no pinned "
+               "launcher could be installed")
+    elif status == "unavailable":
+        s.note("no launcher installed — council shells use the bwrap chain")
+    # Plan E8: the engine's hardening drop-in, measured against this
+    # sandbox; written here so the restart in step_services applies it.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import engine_hardening
+    try:
+        for msg in engine_hardening.ensure(dry_run=dry):
+            s.note(msg)
+    except OSError as e:
+        s.fail(f"engine hardening drop-in: {e}")
+    return s
+
+
+# --------------------------------------------------------------------- #
+# 6. Services
 # --------------------------------------------------------------------- #
 def _repo_units() -> list[tuple[str, str]]:
     """``(unit, scope)`` for every unit file referencing this repo.
@@ -597,7 +666,7 @@ def _councils_clear(s: Step, unit: str, scope: str, wait: float,
 def step_services(dry: bool, skip: bool, council_wait: float = 0.0,
                   kill_councils: bool = False) -> Step:
     s = Step("services")
-    print("\n[5/6] services")
+    print("\n[6/7] services")
     if skip:
         s.note("--skip-restart: not touching any service")
         return s
@@ -803,7 +872,7 @@ def _stop_lsp_daemons(s: Step) -> None:
 # --------------------------------------------------------------------- #
 def step_verify(dry: bool) -> Step:
     s = Step("verify")
-    print("\n[6/6] verify")
+    print("\n[7/7] verify")
     if dry:
         s.note("[dry-run] would run scripts/verify_deploy.py")
         return s
@@ -852,6 +921,7 @@ def main() -> int:
         step_packages(a.dry_run, a.env),
         step_skills(a.dry_run),
         step_episodic(a.dry_run),
+        step_sandbox(a.dry_run),
         step_services(a.dry_run, a.skip_restart, a.wait_for_councils,
                       a.kill_councils),
     ]
@@ -859,7 +929,7 @@ def main() -> int:
     if all(s.ok for s in steps):
         steps.append(step_verify(a.dry_run))
     else:
-        print("\n[6/6] verify — SKIPPED (an earlier step failed)")
+        print("\n[7/7] verify — SKIPPED (an earlier step failed)")
 
     failed = [s.name for s in steps if not s.ok]
     print("\n" + "=" * 60)

@@ -1,0 +1,14 @@
+{
+  "date": "2026-10-15",
+  "plan": "H6",
+  "commit": "a237f96 + uncommitted decision_bench.py --client/--cases and mine_decision_cases.py (committed with this report)",
+  "councils": 144,
+  "cases": 199,
+  "repeats": 1,
+  "client": "production (decision_client.evaluate)",
+  "targets": ["typesafe:jev-latest", "xollama:tev1:latest", "xollama:nimble:latest", "xollama:clef-flash:latest"],
+  "xollama": "http://192.168.178.2:11433 (solidpc, 0.40.3-xollama.2)",
+  "raw_run": "the same cases on a raw POST (H4's method): jev 178, tev1 137 (12 refused: loaded window), nimble 166, clef-flash 168",
+  "cases_file": "benchmarks/consultants/results/2026-10-15/decision-h6/cases.json (local only)",
+  "labels_file": "benchmarks/consultants/results/2026-10-15/decision-h6/labels.json (local only)"
+}

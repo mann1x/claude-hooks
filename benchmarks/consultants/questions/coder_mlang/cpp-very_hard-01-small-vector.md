@@ -5,6 +5,7 @@ source: cpp-idiom
 task: 'SmallVector<T,N> template with stack-then-heap storage. Placement new, move semantics. NO std::vector.'
 sandbox_path: solution.cpp
 oracle: cpp-very_hard-01-small-vector-oracle.py
+spec: body
 ---
 
 # cpp-very_hard-01-small-vector

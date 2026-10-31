@@ -97,8 +97,11 @@ class TestBaseUrlDefault:
         assert ctx_probe.base_url_default() == "http://other.host:9999"
 
     def test_default_when_unset(self, monkeypatch):
+        from claude_hooks import ollama_upstream
         monkeypatch.delenv("CALIBER_GROUNDING_UPSTREAM", raising=False)
-        assert ctx_probe.base_url_default() == ctx_probe.DEFAULT_BASE_URL
+        monkeypatch.delenv("OLLAMA_HOST", raising=False)
+        monkeypatch.setattr(ollama_upstream, "_host_config", lambda: {})
+        assert ctx_probe.base_url_default() == ollama_upstream.DEFAULT_URL
 
 
 class TestProbeFailures:

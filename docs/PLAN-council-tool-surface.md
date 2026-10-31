@@ -1,15 +1,13 @@
 # PLAN — council tool surface: MCP bridge, network, shell, git, uniform roles
 
-Status, 2026-08-01: **M-A partially landed, M-C landed.** The registry,
-the provider ABC, the policy gate and the git provider are in
-`claude_hooks/tool_registry/`, wired through
-`consultants/server/tool_surface.py`, configurable via `[tools]` /
-`config set-tools` / Subflow I. **M-A's remaining piece is the
-lane-scoped interrupt** — until it lands there is no approval channel,
-so the registry refuses any `ask_*` tool rather than running it. That
-costs nothing today (every tool in the default surface is `auto`) and
-is the correct failure direction the moment an effectful provider
-arrives. Everything below M-C is still scoping.
+Status, 2026-10-14: **M-A and M-C landed.**
+- The registry, the provider ABC, the policy gate and the git provider are in `claude_hooks/tool_registry/`, wired through `consultants/server/tool_surface.py`, and configurable via `[tools]` / `config set-tools` / Subflow I.
+- **The approval channel is built** (`consultants/engine/tool_approval.py`, e18fa33 and 3c54c4d, 2026-08-02):
+  - `ask_assistant` auto-approves and records;
+  - `ask_human` parks the lane and denies on timeout;
+  - requests are coalesced per council, with class grants and `tool-ack`.
+- The live control surface reaches the gate: `POST /control` `tool_permissions` takes the same four-level ladder (`allow` / `ask` are accepted as deprecated aliases for `auto` / `ask_human`) and is read per call through `RunControl`. Milestone E1 of [`PLAN-council-cerebriline.md`](PLAN-council-cerebriline.md).
+- The shell tool (M-D) is now planned in that plan's Milestone E (sandbox launcher, lane views, shell off by default). The M-D sections below are the earlier scoping and are superseded where the two differ.
 
 Scope request (2026-08-01): (1) generic MCP bridge, fully configurable
 including the config menu; (2) direct network access, configurable,

@@ -47,6 +47,14 @@ the tasks that had not (measured 2026-10-01: a 3-lane fan-out where one
 lane raised resumed with that lane alone). Skipping, as cancel does,
 would drain the graph to END and leave nothing to resume.
 
+**Wrap-up is "stop and synthesize what you have"** (plan D9), the verb
+cancel is not. Nothing raises and nothing is lost: a loop already running
+reads :meth:`RunControl.wrapping_up` before each turn and ends on one
+report (``LoopConfig.wrap_up_check``); work not yet started is skipped at
+the gate (:func:`wrap_up_skips`); the graph routes past the critic and the
+coder straight to the synthesizer, which is told its evidence is partial;
+and the result is marked ``partial``. Cancel still means "no answer".
+
 **Pause resumes on timeout; cancel denies on timeout.** They are
 opposites on purpose. An unanswered spend approval must not authorize
 spend, so it denies. An unanswered pause has already spent everything up
@@ -105,10 +113,37 @@ class RunControl:
         self._resume_evt.set()
         self._suspended = False
         self._suspend_reason = ""
+        self._wrap_up = False
+        self._wrap_up_reason = ""
+        self._wrap_up_at: Optional[float] = None
         #: Roles observed skipping / parking, for the status payload and
         #: for tests that need to prove the gate actually fired.
         self.skipped: list[str] = []
         self.paused_roles: list[str] = []
+        #: One entry per node a wrap-up skipped ("researcher#3").
+        self.wrap_up_skipped: list[str] = []
+        # Live copy of ``runtime_control.tool_permissions``. The graph
+        # channel cannot be read from inside a running ``invoke``
+        # (``update_state`` never reaches it), so the tool gate reads
+        # this instead; ``POST /control`` writes both.
+        self._tool_permissions: dict[str, str] = {}
+
+    # ------------------------------------------------------------------ #
+    # Tool permissions (HTTP thread writes, executor threads read)
+    # ------------------------------------------------------------------ #
+    def set_tool_permissions(self, perms: Optional[dict]) -> None:
+        """Merge ``perms`` into the live map, the same deep-merge the
+        ``runtime_control`` reducer applies to the graph channel."""
+        if not perms:
+            return
+        with self._lock:
+            self._tool_permissions.update(
+                {str(k): str(v) for k, v in perms.items()})
+
+    def tool_permissions(self) -> dict:
+        """A snapshot for one gate decision."""
+        with self._lock:
+            return dict(self._tool_permissions)
 
     # ------------------------------------------------------------------ #
     # Requests (HTTP thread)
@@ -148,6 +183,41 @@ class RunControl:
         if first:
             log.warning("run %s: suspend requested (%s)", self.sid, reason)
         return first
+
+    def request_wrap_up(self, reason: str = "user-wrap-up",
+                        now: Optional[float] = None) -> bool:
+        """Ask the run to finish on what it has (plan D9). Returns True the
+        first time only; False on a cancelled run, which gives no answer
+        at all. Releases a pause: a parked node must not hold the stop."""
+        with self._lock:
+            if self._cancelled:
+                return False
+            first = not self._wrap_up
+            self._wrap_up = True
+            if first:
+                self._wrap_up_reason = reason or "user-wrap-up"
+                self._wrap_up_at = time.time() if now is None else now
+            self._paused = False
+            self._resume_evt.set()
+        if first:
+            log.warning("run %s: wrap-up requested (%s)", self.sid, reason)
+        return first
+
+    @property
+    def wrapping_up(self) -> bool:
+        with self._lock:
+            return self._wrap_up and not self._cancelled
+
+    def partial(self) -> Optional[dict]:
+        """What the result records about a wrap-up, or ``None``."""
+        with self._lock:
+            if not self._wrap_up or self._cancelled:
+                return None
+            out = {"reason": "wrap_up", "requested_by": self._wrap_up_reason,
+                   "requested_at": self._wrap_up_at}
+            if self.wrap_up_skipped:
+                out["skipped_roles"] = list(self.wrap_up_skipped)
+            return out
 
     @property
     def suspended(self) -> bool:
@@ -210,6 +280,13 @@ class RunControl:
                     out["cancelled_at"] = self._cancelled_at
                 if self.skipped:
                     out["skipped_roles"] = list(self.skipped)
+            if self._wrap_up and not self._cancelled:
+                out["wrap_up_requested"] = True
+                out["wrap_up_reason"] = self._wrap_up_reason
+                if self._wrap_up_at is not None:
+                    out["wrap_up_at"] = self._wrap_up_at
+                if self.wrap_up_skipped:
+                    out["wrap_up_skipped"] = list(self.wrap_up_skipped)
             if self._paused:
                 out["paused"] = True
                 out["pause_reason"] = self._pause_reason
@@ -320,6 +397,11 @@ class RunControl:
             return "suspend"
         return "run"
 
+    def note_wrap_up_skip(self, role: str, lane_idx: Any = None) -> None:
+        with self._lock:
+            self.wrap_up_skipped.append(
+                role if lane_idx is None else f"{role}#{lane_idx}")
+
     def _note_skipped(self, role: str) -> None:
         with self._lock:
             if role and role not in self.skipped:
@@ -332,6 +414,27 @@ def _safe_emit(emit: Callable[[str, dict], None], kind: str,
         emit(kind, payload)
     except Exception:  # pragma: no cover — telemetry must not break a run
         log.exception("run_control emit(%s) raised", kind)
+
+
+#: Nodes a wrap-up never starts: they would begin new work (plan, research,
+#: tool lanes, code) or another review round. The synthesizer always runs.
+WRAP_UP_SKIPPED_ROLES = frozenset({
+    "planner", "critic", "meta_critic", "xauto_escalator", "adversary",
+    "tool_executor", "coder", "cross_examine", "cross_exam_ruling"})
+
+
+def wrap_up_skips(role: str, state: Any) -> bool:
+    """Whether a wrap-up skips this node. A researcher is skipped unless it
+    is a REPORT-mode re-entry carrying tool results of its current round:
+    those results are already paid for, and its loop reports at once."""
+    if role in WRAP_UP_SKIPPED_ROLES:
+        return True
+    if role != "researcher":
+        return False
+    state = state if isinstance(state, dict) else {}
+    current = int(state.get("research_rounds_used") or 0) + 1
+    return not any(int(getattr(r, "parent_round", 1) or 1) == current
+                   for r in state.get("tool_results") or [])
 
 
 # ---------------------------------------------------------------------- #
@@ -378,6 +481,14 @@ def gate_node(fn: Callable, *, role: str,
             # nothing, and the graph moves on to the next node — which
             # is also cancelled, so the whole remainder drains fast.
             return {}
+        if run_control.wrapping_up and wrap_up_skips(role, state):
+            lane = state.get("lane_idx") if isinstance(state, dict) else None
+            run_control.note_wrap_up_skip(role, lane)
+            log.info("node %s skipped: run wrapping up", role)
+            if emit is not None:
+                _safe_emit(emit, "node_wrap_up_skipped", {
+                    "role": role, "lane_idx": lane, "sid": run_control.sid})
+            return {}
         return fn(state, *a, **kw)
 
     _gated.__name__ = getattr(fn, "__name__", f"gated_{role}")
@@ -389,5 +500,7 @@ __all__ = [
     "DEFAULT_PAUSE_TIMEOUT_S",
     "RunControl",
     "RunSuspended",
+    "WRAP_UP_SKIPPED_ROLES",
     "gate_node",
+    "wrap_up_skips",
 ]

@@ -1,0 +1,10 @@
+# A plain static executable, not a static-pie: no interpreter, no
+# DT_NEEDED, no dynamic segment for `file` to read as "dynamically
+# linked". The glibc trap (plan E2) is exactly a launcher that needed
+# a loader the host did not have.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "relocation-model=static"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "relocation-model=static"]
+linker = "rust-lld"

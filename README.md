@@ -461,7 +461,7 @@ layer; it asks for explicit confirmation before writing.
 | `scripts/bench_lsp_engine.py` | LSP engine vs ruff-only baseline. Measures `did_change` IPC-only and full round-trip (with diagnostics). Use after a new pyright / engine release. |
 | `scripts/migrate_to_pgvector.py` | One-shot dump-and-load from Qdrant or Memory KG into the pgvector backend, with delta sync. See [`docs/pgvector-runbook.md`](docs/pgvector-runbook.md). |
 | `scripts/episodic_doctor.py` | Checks that episodic-memory's host-built native Node modules (better-sqlite3) load; `--rebuild` rebuilds the ones that don't after a Node major upgrade. See [`docs/episodic-server.md`](docs/episodic-server.md). |
-| `scripts/install-caliber-hook.sh` | Installs the Caliber pre-commit hook into the current repo so agent configs stay in sync. |
+| `scripts/install-caliber-hook.sh` | Merges the non-blocking Caliber block into the repo's pre-commit hook (only its marked span; the secret gate and other lines are kept). |
 | `scripts/openwolfstatus.{py,sh,bat}` | OpenWolf status utility. |
 
 ### `bin/` shim reference
@@ -1185,36 +1185,44 @@ for the full integration plan.
 
 ## Scripts
 
-### `scripts/install-caliber-hook.sh` — fast caliber pre-commit hook
+### `scripts/install-caliber-hook.sh` — fast caliber pre-commit block
 
 Caliber's default pre-commit hook runs `caliber refresh` and
-`caliber learn finalize` synchronously — each calls an LLM, and on
+`caliber learn finalize` synchronously. Each one calls an LLM, and on
 event-heavy sessions the combined wait can block `git commit` for
-**20 minutes or more**. This installer replaces that hook with a
-portable non-blocking version:
+**20 minutes or more**. This installer merges a non-blocking caliber
+block (`scripts/caliber-precommit.sh`) into `.git/hooks/pre-commit`:
 
-- backgrounds `caliber refresh` so commits return instantly (refreshed
-  docs land in the next commit)
-- drops `caliber learn finalize` (the SessionEnd Claude Code hook
-  already runs the `--auto` version, and 240-event LLM passes on the
-  commit path were hitting caliber's internal 600 s timeout)
-- bounds the inner Claude CLI call at 60 s via
-  `CALIBER_CLAUDE_CLI_TIMEOUT_MS`
-- wraps the refresh in GNU `timeout 30` when available (skipped on
-  Windows Git Bash, where `timeout.exe` is a `sleep` with different
-  semantics)
+- it backgrounds `caliber refresh`, so commits return at once and
+  refreshed docs land in the next commit;
+- it drops `caliber learn finalize`, since the SessionEnd hook already
+  runs the `--auto` version;
+- it has no wall-clock cap, because a refresh of this repo takes about
+  110 s and the old `timeout 30` killed every one. Inactivity timeouts
+  bound a stalled call instead;
+- it passes `--quiet` only to a caliber build that exempts git hooks
+  from its Claude-session guard (ai-setup #251). Elsewhere `--quiet`
+  makes the refresh silently do nothing.
 
-Measured on a 240-event session: `~20 min` → `~0.7 s` per commit.
+The block is **merged, never copied over the hook**. Only the span
+between `# caliber:pre-commit[:vN]:start` and `:end` is replaced, and
+that includes Caliber's own `caliber hooks --install` block. With no such
+span, the block is appended, so anything earlier keeps running first.
+That matters most for the secret gate (`scripts/secret_scan.py`), which
+must refuse a leak before caliber runs. A hook is created only when
+there is none. The installer:
+
+- refuses a hook with an unmatched marker;
+- warns about a top-level `exit` before the block, or a secret gate
+  after it;
+- backs up a hook it changes to `.git/hooks/pre-commit.bak-<timestamp>`.
 
 ```bash
-sh scripts/install-caliber-hook.sh         # install / update
+sh scripts/install-caliber-hook.sh         # install / update (idempotent)
 sh scripts/install-caliber-hook.sh --dry   # preview
 ```
 
-Existing `.git/hooks/pre-commit` is backed up to
-`.git/hooks/pre-commit.bak-<timestamp>` before being replaced. Re-run
-on every machine that clones the repo — git doesn't version-control
-`.git/hooks/` so the install can't be automatic.
+Git doesn't version-control `.git/hooks/`, so run it on every clone.
 
 ### `scripts/openwolfstatus` — OpenWolf dashboard status
 

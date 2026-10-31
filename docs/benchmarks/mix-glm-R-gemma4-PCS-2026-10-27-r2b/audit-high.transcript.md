@@ -1,0 +1,129 @@
+# Consultation transcript — csl-2026-10-27-1616-2906
+
+_Question_: In the consultants engine's Send-API fan-out path, suppose one of the parallel researcher lanes raises an unhandled exception inside agent_loop.runner.run_loop (e.g. an HTTP timeout that exhausts the retry budget, or a tool_executor returning a non-string). Trace the exact failure path through:
+
+1. CouncilState's additive reducers (consultants/engine/graph.py)
+2. consultants/server/runner.py's compiled.stream loop
+3. The synthesizer's input messages — what does it actually see?
+4. The storage.py artifact writer
+
+Answer concretely: does the council still produce a coherent answer to the user, or does the entire consultation fail and surface as status=failed? If it produces a degraded answer, what's the failure mode the user perceives? Cite path:line for every claim. Recommend exactly ONE hardening change with path:line.
+
+
+## Planner
+
+1. Verify if `consultants/engine/council.researcher_node` contains a try-except block that catches exceptions from `agent_loop.runner.run_loop` and returns a state update with `error` or `_role_failed` (consultants/engine/council.py).
+2. Analyze how `CouncilState` additive reducers (operator.add) handle a researcher lane that returns no data or an error object instead of the expected `research` list in `consultants/engine/graph.py:64,68`.
+3. Trace the `compiled.stream` loop in `consultants/server/runner.py:137-161` to determine if an unhandled exception in a `Send` lane propagates to the `except Exception as e` block at line 155.
+4. Examine `consultants/engine/council.synthesizer_node` to see how it handles `research` lists that are missing data from failed parallel lanes (consultants/engine/council.py).
+5. Determine the final `status` and `final_answer` written by `storage.write_consultation` in `consultants/server/runner.py:177-199` when `final_state` contains a `node_error` (consultants/engine/storage.py).
+
+---
+
+## Researcher (round 1)
+
+## Findings
+
+**1. The lane exception is caught — `researcher_node` has a broad try/except around `run_loop`**
+- `consultants/engine/council.py:547-554` wraps the `loop_runner(...)` call; `council.py:555-573` catches `Exception`, logs, and returns a **tombstone delta**: `{"error": "researcher failed: <e>", "_role_failed": "researcher", "research": ["(researcher lane failed: <e>)"], "research_rounds_used": 1, "turns": [RoleTurn(...)]}`. The comment at `council.py:557-561` states this exists precisely so a crashed lane isn't silently dropped (audit `csl-...-faa2` finding).
+- The two hypothesized triggers are already neutralized upstream: `claude_hooks/caliber_proxy/tools.py:420-439` — `execute()` "Never raises" and coerces non-strings (`tools.py:439`); an HTTP timeout exhausting retries raises from `chat_fn` inside `run_loop` (`claude_hooks/agent_loop/runner.py:230`), which lands in the same except.
+- **Gap:** only the `run_loop` call is inside the try. Post-loop code runs bare — `_extract_text(final)` / `_usage_from(final)` at `council.py:575-576` and the empty-text fallback's `chat_client.chat` at `council.py:614` (that one is wrapped at `council.py:633`). A raise at `council.py:575` escapes the node.
+
+**2. Additive reducers merge the tombstone cleanly — but `error`/`_role_failed` are last-write-wins**
+- `consultants/engine/graph.py:64` `research: Annotated[list, operator.add]`, `graph.py:68` `turns`, `graph.py:69-72` int-sum counters — so a failed lane's `"(researcher lane failed: …)"` string and its 0-token RoleTurn concatenate with surviving lanes without clobbering them.
+- `error` (`graph.py:74`) and `_role_failed` (`graph.py:75`) are **plain channels** (default dict-merge). With multiple failing lanes under Send, merge order is nondeterministic — only one lane's error text survives. Minor, since the message content is nearly identical.
+
+**3. `compiled.stream` loop — two distinct outcomes**
+- If the node catches (normal case): the stream completes; `consultants/server/runner.py:137-154` just flips `state.progress`. The `except Exception` at `runner.py:155-161` is **not** reached.
+- If an exception escapes the node (e.g. `council.py:575`): LangGraph aborts the superstep, `compiled.stream` raises, and `runner.py:155-161` sets `state.status = "failed"`, `state.error = "graph crashed: <e>"`, and calls `_write_failed_artifacts` (`runner.py:160`), which writes `final_answer = "(consultation failed: <e>)"` with empty turns (`runner.py:224-225`). **This is the only path to a total failure with no answer.**
+
+**4. What the synthesizer actually sees**
+- `build_synthesizer_messages` (`council.py:245-266`) enumerates `state["research"]` as `RESEARCHER REPORT (round N)` blocks (`council.py:253-254`). The failed lane appears as a report whose body is literally `(researcher lane failed: <exc repr>)` — so the synthesizer *can* see the gap and hedge.
+- It does **not** see `state["error"]` or `state["_role_failed"]` — `build_synthesizer_messages` never receives them (`council.py:718-723`). And if the lane died via the escape path (no tombstone), its sub-plan items are simply absent from `research` — the synthesizer sees a silently incomplete evidence set and, per its prompt ("Do NOT mention the council, the roles, or the process", `council.py:164-165`), writes a confident answer over the hole. That is the worst user-visible mode: **plausible but ungrounded coverage of the dead lane's sub-question**.
+
+**5. Storage / status — the surprising part**
+- After a *caught* lane failure, the graph completes normally; the runner then reads `final_state.get("error")` (`runner.py:172`) and sets `terminal_status = "failed" if node_error else "completed"` (`runner.py:174`). **A single failed lane flips the entire consultation to `status=failed`** even though 2/3 lanes succeeded and `final_answer` is a real synthesized answer.
+- `storage.write_consultation` still runs (`runner.py:199`, `consultants/engine/storage.py:200-208`): `summary.md` gets `status: failed` + `error:` in YAML front-matter (`storage.py:108-110`) but the body is the full synthesizer answer (`storage.py:117-120`); `metadata.json` records `status: "failed"` (`runner.py:189-190`). The poll endpoint (`consultants/server/app.py:61-71`) reports `status: failed, error: "researcher failed: …"`.
+
+**Bottom line:** the council does **not** hard-fail on a lane exception. It produces a degraded answer — surviving lanes' findings + a tombstone the synthesizer can hedge on — but the user *perceives* `status=failed` on poll and in metadata, despite a readable `summary.md`. Only an exception escaping the node body (`council.py:575`) produces the true `status=failed` / no-answer outcome via `runner.py:155-161`.
+
+## ONE hardening change
+
+`consultants/server/runner.py:174` — stop treating a lane-level researcher failure as a terminal consultation failure:
+
+```python
+terminal_status = ("failed" if node_failed not in ("researcher",)
+                   else "completed") if node_error else "completed"
+```
+
+i.e. when `_role_failed == "researcher"` and `final_answer` is non-empty, report `status="completed"` (keeping `error` populated in `metadata.json` for observability) — the answer exists and is coherent; "failed" misrepresents it. Optionally pair with a `(degraded: 1 of N lanes failed)` note appended to the summary body. The secondary gap (bare `_extract_text` at `council.py:575` outside the try) is real but much lower probability.
+
+---
+
+## Researcher (round 1)
+
+## Findings
+
+**1. The "unhandled" exception never leaves `researcher_node` — it's converted to a tombstone.**
+- `run_loop` has no internal try/except in its iteration body (`claude_hooks/agent_loop/runner.py:215-301`); an exhausted ChatClient retry budget raises `RuntimeError` at `claude_hooks/get_advice/chat_client.py:285-287` (HTTP) or re-raises at `chat_client.py:301-302` (URLError/OSError).
+- That exception propagates into `researcher_node`'s call site and is caught at `consultants/engine/council.py:555-573`: the lane returns a tombstone — `error: "researcher failed: ..."`, `_role_failed: "researcher"`, `research: [err_text]`, one `RoleTurn` with the failure text.
+- The non-string tool_executor variant dies the same way: `execute_tool_calls` does `len(output)` at `claude_hooks/agent_loop/runner.py:126` → `TypeError` → same `except` at `council.py:555`. (Note: `len()` on e.g. an int raises; on a list/dict it "works" and the non-str flows into message content — a quieter corruption path, `runner.py:129-134`.)
+
+**2. CouncilState reducers: the tombstone merges cleanly, except for one hazard.**
+- `research` and `turns` are `Annotated[list, operator.add]` (`consultants/engine/graph.py:64,68`), so the failed lane's `research: [err_text]` delta concatenates with surviving lanes' reports — the graph keeps progressing.
+- `error` and `_role_failed` are plain (non-reducer) LastValue channels (`graph.py:74-75`). One lane failing is fine; **two lanes failing in the same fan-out superstep** both write `error` — LangGraph raises for concurrent writes to a reducer-less channel (inference from LangGraph semantics, not verified in this repo since langgraph isn't installed here). That would flip the failure into the *graph-crash* branch instead of the tombstone branch.
+
+**3. `compiled.stream` loop: no crash, but status is poisoned.**
+- The stream completes normally; `final_state` is the last "values" payload (`consultants/server/runner.py:135-141`).
+- `node_error = final_state.get("error")` at `runner.py:172` → `terminal_status = "failed" if node_error else "completed"` at `runner.py:174`. **A single dead lane marks the whole consultation `status=failed` even though the synthesizer still runs and produces a real `final_answer`** (`runner.py:186`, `201-202`).
+
+**4. What the synthesizer actually sees.**
+- `build_synthesizer_messages` enumerates `state["research"]` verbatim (`consultants/engine/council.py:245-254`): the failed lane appears as `RESEARCHER REPORT (round N): (researcher lane failed: RuntimeError: ollama chat HTTP 5xx ...)` inline next to surviving lanes' real reports. It is not filtered or labeled. The critic sees the same tombstone (`council.py:669-671`). So the synthesizer produces a degraded-but-real answer that must self-interpret the tombstone string — it is never told "this lane failed, re-plan" structurally.
+
+**5. Storage artifacts.**
+- `storage.write_consultation` (`consultants/engine/storage.py:200-208`) writes `summary.md` = front-matter + `final_answer` (`storage.py:117-120`) with `status: failed` and `error:` lines in the YAML (`storage.py:108-110`), `transcript.md` including the tombstone turn (`storage.py:129-136`), and `metadata.json` with `status: "failed"` (`storage.py:166-169`; runner builds the result at `runner.py:177-199`).
+
+**Answer to the question:** the council does NOT crash and does NOT go through `_write_failed_artifacts` (`runner.py:211-237`) for a single-lane failure — it produces a coherent, degraded answer synthesized from surviving lanes. But the user perceives **status=failed with a non-empty summary**: `/v1/consult/{sid}` returns `status: "failed"`, `error: "researcher failed: ..."` (`consultants/server/app.py:64,70`), while `summary.md` contains a substantive answer. Any caller that treats `failed` as "no answer" discards usable output — that's the failure mode. (Caveat: if ≥2 lanes fail simultaneously, the concurrent LastValue write likely crashes the graph into the total-failure branch at `runner.py:155-161` — inference-flagged.)
+
+**ONE hardening change:** at `consultants/server/runner.py:174`, classify by role instead of blanket-failing — e.g. `terminal_status = "failed" if (node_error and (final_state.get("_role_failed") == "synthesizer" or not (final_state.get("final_answer") or "").strip())) else "completed"`, keeping `node_error` populated so `error`/metadata still record the lane failure. This turns the single-dead-lane case into "completed with recorded error" and stops discarding the degraded answer the synthesizer already produced.
+
+---
+
+## Critic (round 2)
+
+DECISION: ready
+
+The researcher's evidence is sufficient. I have verified the critical path: `researcher_node` catches `run_loop` exceptions and returns a tombstone (`council.py:547-573`), which is merged via additive reducers (`graph.py:64,68`). The `compiled.stream` loop continues normally (`runner.py:137-141`), but the presence of `error` in the final state poisons the `terminal_status` to `"failed"` (`runner.py:174`), despite a valid `final_answer` being produced and written to `summary.md` (`runner.py:186,199`). The user perceives a failed consultation via API (`app.py:64,70`) while a degraded answer still exists in the artifacts.
+
+CORRECTIONS:
+- report 1: claimed `council.py:547-554` contains `researcher_node` but no `run_loop` — actual: `run_loop` (via `loop_runner`) is exactly at `council.py:548`.
+- report 2: claimed `graph.py:64` is not where `turns` is located — actual: `turns` is at `graph.py:68`.
+
+---
+
+## Synthesizer
+
+The council produces a degraded but coherent answer, but the user perceives the entire consultation as `status=failed`.
+
+**Failure Path Trace:**
+1.  **`researcher_node` Catch:** An exception in `agent_loop.runner.run_loop` (e.g., HTTP timeout or `TypeError` from a non-string tool output) is caught by the broad `try...except Exception` block in `consultants/engine/council.py:555-573`. The node returns a "tombstone" delta: `{"error": "researcher failed: <e>", "_role_failed": "researcher", "research": ["(researcher lane failed: <e>)"]}`.
+2.  **`CouncilState` Reducers:** 
+    *   The `research` and `turns` channels use `operator.add` (`consultants/engine/graph.py:64, 68`), so the tombstone's failure string and empty turn are concatenated with the results of successful lanes.
+    *   The `error` and `_role_failed` channels are plain (last-write-wins) (`consultants/engine/graph.py:74-75`). A single failing lane sets these values; multiple failing lanes may lead to non-deterministic error text or a graph crash due to concurrent writes to a non-reducer channel.
+3.  **`compiled.stream` Loop:** Because the exception was caught and converted to a state update, the `compiled.stream` loop in `consultants/server/runner.py:137-154` completes normally. The `except Exception` block at `runner.py:155-161` is not triggered.
+4.  **Synthesizer Input:** `build_synthesizer_messages` (`consultants/engine/council.py:245-266`) iterates over the `research` list. The synthesizer sees the tombstone string `(researcher lane failed: <exc repr>)` as a report body (`consultants/engine/council.py:253-254`). It then synthesizes a final answer based on the remaining successful lanes, potentially hedging or ignoring the gap.
+5.  **Storage and Status:**
+    *   The runner checks `final_state.get("error")` at `consultants/server/runner.py:172`.
+    *   Because the tombstone populated `error`, `terminal_status` is set to `"failed"` at `consultants/server/runner.py:174`.
+    *   `storage.write_consultation` (`consultants/engine/storage.py:200-208`) writes the full synthesized answer to `summary.md` (`storage.py:117-120`), but sets the YAML front-matter `status` to `failed` (`storage.py:108-110`).
+    *   The user sees `status: "failed"` and the error message via the API endpoint (`consultants/server/app.py:61-71`).
+
+**User Perception:** The user receives a "Failed" status via the API/metadata, but if they open `summary.md`, they find a substantive (though potentially incomplete) answer.
+
+**Recommended Hardening Change:**
+Modify `consultants/server/runner.py:174` to prevent researcher-level failures from poisoning the terminal status of a consultation that successfully produced a final answer:
+```python
+terminal_status = "failed" if (node_error and (final_state.get("_role_failed") != "researcher" or not final_state.get("final_answer"))) else "completed"
+```
+
+---
