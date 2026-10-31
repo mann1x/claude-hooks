@@ -1946,7 +1946,9 @@ def _single_shot(chat_client, model: str, messages: list[dict],
                  lane_idx: Optional[int] = None,
                  result: Optional[str] = None,
                  knobs: Optional["budget.Knobs"] = None,
-                 sampling: Optional[dict] = None
+                 sampling: Optional[dict] = None,
+                 continuations: int = MAX_CONTINUATIONS,
+                 cut_out: Optional[list] = None
                  ) -> tuple[str, int, int]:
     """Run a one-call chat (no tools, no loop). Returns
     (text, prompt_tokens, completion_tokens).
@@ -1976,6 +1978,10 @@ def _single_shot(chat_client, model: str, messages: list[dict],
 
     Token counts returned are summed across continuations, so a
     caller's accounting stays true.
+
+    ``continuations`` bounds that continuing. A caller whose reply is not
+    a deliverable passes a smaller one and ``cut_out``, a list that gets
+    the :class:`Truncation` when the reply it returns is still cut.
     """
     session = _calibration_session(f"single-{role or 'role'}")
     convo, plan = _plan_and_compact(chat_client, model, list(messages),
@@ -1994,7 +2000,7 @@ def _single_shot(chat_client, model: str, messages: list[dict],
     recompact = dict(role=role, session=session, knobs=knobs, think=think,
                      recorder=recorder, round=round, lane_idx=lane_idx)
     overflow_recovered = False
-    for attempt in range(MAX_CONTINUATIONS + 1):
+    for attempt in range(continuations + 1):
         while True:
             payload = {
                 "model": model,
@@ -2116,11 +2122,14 @@ def _single_shot(chat_client, model: str, messages: list[dict],
         cut = truncation.classify(response, role=role or "", model=model)
         if cut is None:
             break
-        if attempt == MAX_CONTINUATIONS:
+        if attempt == continuations:
+            if cut_out is not None:
+                cut_out.append(cut)
+                break
             log.error(
                 "role=%s: still truncated after %d continuation(s) — "
                 "returning the partial answer; the run will be marked "
-                "failed. %s", role, MAX_CONTINUATIONS, cut.detail,
+                "failed. %s", role, continuations, cut.detail,
             )
             break
         log.warning(
@@ -4255,25 +4264,31 @@ def _unverified_revision(chat_client, model, msgs, text, *, state, think,
 def _directive_audit(chat_client, model, text, docs, *, state, recorder
                      ) -> tuple:
     """One auditor call holding ``text`` to the operator's directives.
-    A failed call checks nothing and says so. Returns ``(audit, prompt
-    tokens, completion tokens)``; recorded as
+    A failed or cut call checks nothing and says so. Thinking stays on:
+    off, glm-5.3-flash reasoned into the reply past 96,000 tokens, and a
+    cut reply is never continued, since half a verdict list is not one.
+    Returns ``(audit, prompt tokens, completion tokens)``; recorded as
     ``synthesizer:directive-audit``."""
     from consultants.engine import directives
+    knobs = _budget_knobs(state, "synthesizer", model)
+    cut: list = []
     try:
         reply, p, c = _single_shot(
             chat_client, model, [
                 {"role": "system", "content": directives.AUDIT_SYSTEM},
                 {"role": "user",
                  "content": directives.audit_prompt(docs, text)}],
-            think=False, recorder=recorder,
+            think=True, recorder=recorder,
             role="synthesizer:directive-audit", round=1,
-            knobs=_budget_knobs(state, "synthesizer", model),
+            knobs=dataclasses.replace(knobs, output_ceiling=min(
+                knobs.output_ceiling, directives.AUDIT_OUTPUT_TOKENS)),
             sampling=_instance_sampling(state, "synthesizer", model,
-                                        chat_client))
+                                        chat_client),
+            continuations=0, cut_out=cut)
     except Exception:
         log.exception("directive audit failed; directives left unchecked")
         return directives.unchecked(len(docs)), 0, 0
-    return directives.parse_audit(reply, len(docs)), p, c
+    return directives.parse_audit(reply, len(docs), cut=bool(cut)), p, c
 
 
 def _directive_revision(chat_client, model, msgs, text, docs, *, state, think,
@@ -4284,7 +4299,7 @@ def _directive_revision(chat_client, model, msgs, text, docs, *, state, think,
     from consultants.engine import directives
     audit, pt, ct = _directive_audit(chat_client, model, text, docs,
                                      state=state, recorder=recorder)
-    if not audit.violated:
+    if not audit.broken:
         return text, pt, ct
     try:
         revised, rpt, rct = _role_turn(
@@ -4609,8 +4624,8 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                     + held_patches.held_block(_patches, _ovl))}]
     msgs = _with_decision_advice(msgs, state, "synthesizer", recorder)
     from consultants.engine import directives
-    _binding = directives.directives_of(
-        _additional_context_for(state, "synthesizer"))
+    _binding = directives.items_of(directives.directives_of(
+        _additional_context_for(state, "synthesizer")))
     models_to_try: list[str] = [model] + list(fallback_models or [])
     t0 = time.monotonic()
     text: Optional[str] = None
