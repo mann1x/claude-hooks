@@ -574,7 +574,9 @@ def _clip(text, n: int):
     if text is None:
         return None
     text = str(text)
-    return text if len(text) <= n else text[:n] + "…"
+    if len(text) <= n:
+        return text
+    return f"{text[:n]}… [preview: {n} of {len(text)} chars]"
 
 
 def summarize_state_for_get(
@@ -619,9 +621,7 @@ def summarize_state_for_get(
         # lane's report opening and the critic's verdict, short. The
         # counts alone left a reviewer reading transcript.db by hand.
         "research_previews": [
-            (str(r)[:STATE_PREVIEW_CHARS]
-             + ("…" if len(str(r)) > STATE_PREVIEW_CHARS else ""))
-            for r in research],
+            _clip(r, STATE_PREVIEW_CHARS) for r in research],
         "critique": _clip(state.get("critique"), STATE_CRITIQUE_CHARS),
         "plan_items_count": len(plan_items),
         "research_rounds_used": int(state.get("research_rounds_used") or 0),

@@ -615,7 +615,7 @@ class TestStateShowsTheReview(unittest.TestCase):
             "research": ["short", "x" * 1000], "critique": "DECISION: ready"}},
             sid="s")
         self.assertEqual(body["research_previews"][0], "short")
-        self.assertTrue(body["research_previews"][1].endswith("…"))
+        self.assertIn("… [preview: ", body["research_previews"][1])
         self.assertLess(len(body["research_previews"][1]), 400)
         self.assertEqual(body["critique"], "DECISION: ready")
         self.assertEqual(body["research_count"], 2)

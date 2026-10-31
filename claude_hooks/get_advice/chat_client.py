@@ -217,6 +217,15 @@ def _raise_stream_error(obj: dict, partial: str) -> None:
     raise OSError(f"stream error from server: {str(err)[:300]}")
 
 
+def _raise_stream_cut(partial: str) -> None:
+    """A stream that ended with no terminal signal was cut in transit: the
+    text so far is not a reply, whatever it looks like. ``OSError``, so it
+    is retried as transport; read as a reply it would be stamped ``stop``,
+    and a detector downstream could not tell it from a finished answer."""
+    raise OSError(f"stream ended without a terminal signal after "
+                  f"{len(partial)} characters")
+
+
 def classify_http_fault(status: int, body: str) -> str:
     # Ahead of the status gate: opencoti rejects a call with a 500, and
     # what the model emitted is the fault whatever the status says.
@@ -1535,6 +1544,7 @@ class ChatClient:
         role = "assistant"
         guard = rlg.ReasoningLoopGuard()
         verdict = None
+        finished = False
 
         for raw_line in resp:
             if cancel_check is not None and cancel_check():
@@ -1596,6 +1606,7 @@ class ChatClient:
                         log.exception("on_token raised; ignored")
             # Final record fields land on done=true.
             if obj.get("done"):
+                finished = True
                 for k in ("prompt_eval_count", "eval_count",
                          "total_duration", "load_duration",
                          "prompt_eval_duration", "eval_duration",
@@ -1614,6 +1625,9 @@ class ChatClient:
             # stops the provider generating — and billing.
             if verdict is not None:
                 break
+
+        if verdict is None and not finished:
+            _raise_stream_cut("".join(content_parts))
 
         merged_message: dict = {"role": role,
                                 "content": "".join(content_parts)}
@@ -1947,6 +1961,7 @@ class OpenAICompatChatClient(ChatClient):
         guard = rlg.ReasoningLoopGuard()
         verdict = None
         placed: Optional[dict] = None
+        finished = False
         for raw in resp:
             if verdict is not None:
                 # Plan D1: stop reading; closing the connection stops
@@ -1969,6 +1984,7 @@ class OpenAICompatChatClient(ChatClient):
                 continue
             data = line[5:].strip()
             if data == "[DONE]":
+                finished = True
                 break
             try:
                 obj = json.loads(data)
@@ -2023,6 +2039,8 @@ class OpenAICompatChatClient(ChatClient):
                             on_token(piece)
                         except Exception:  # pragma: no cover
                             log.exception("on_token raised; ignored")
+        if verdict is None and not finished and finish is None:
+            _raise_stream_cut("".join(content))
         msg: dict = {"role": "assistant", "content": "".join(content)}
         if reasoning:
             msg["reasoning_content"] = "".join(reasoning)
