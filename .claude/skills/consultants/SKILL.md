@@ -1729,7 +1729,9 @@ default if you don't know which role should see it.
 An inject **binds**: its instructions are orders, not context. An auditor
 holds the final answer to each one, a violation gets one re-ask, and
 whatever the delivered answer still breaks (or could not be checked) is
-listed under `## Operator directives not met`. Read that section before
+listed under `## Operator directives not met`. A numbered list in an inject is audited item by item. An empty section
+means one auditor found nothing, not that every directive held: check the
+ones that matter yourself. Read that section before
 accepting. A fact stated in an inject is not thereby verified.
 
 ### control — mutate runtime_control mid-flight

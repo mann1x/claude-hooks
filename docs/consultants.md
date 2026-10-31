@@ -1003,7 +1003,8 @@ by subscribing to `events`, reading `state` (each lane's
 `adversary-ack`-ing — see the SKILL's **Dynamic adversary** subsection.
 
 An inject binds. Every role is told so in its prompt, and the final answer
-is audited against each one (`synthesizer:directive-audit`): a violation gets
+is audited against each one (each item of a numbered list counts as one, and
+a clean audit is one model's reading, not proof) (`synthesizer:directive-audit`): a violation gets
 one re-ask, and what the delivered answer still breaks, or what could not be
 checked, is listed under `## Operator directives not met`. A fact stated in
 an inject is not thereby verified.
