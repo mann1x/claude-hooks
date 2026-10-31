@@ -7,7 +7,7 @@ area: consultants.sandbox
 tags: [council, cerebriline]
 plan: docs/PLAN-council-cerebriline.md
 created: 2026-10-14T13:22:15Z
-updated: 2026-10-26T14:12:30Z
+updated: 2026-10-31T12:53:56Z
 sessions: [0a7a5bf4]
 ---
 
@@ -22,6 +22,7 @@ Milestone E: E1 prerequisite fixes (runtime_permissions, control.py enum, per-la
 - [ ] Windows smoke passes
 
 ## Log
+- 2026-10-31 12:53Z [0a7a5bf4] 2026-10-31: council-sandbox-v0.1.0 published with x86_64 + aarch64 builds and SHA256SUMS (both matched launcher_pin.json), so hosts without cargo can now install the pinned launcher. v2.0.0 released Linux only at 1363614 and deployed on solidpc. Still owed here: Windows smoke + pandorum deploy once reachable (No route to host as of 10-31).
 - 2026-10-26 14:12Z [0a7a5bf4] updated acceptance ✓1 ✓2 ✓3 ✓4: 2026-10-26 Linux acceptance: 240 sandbox tests green, no skips (escape suite live on both backends; kill -9 lifecycle class; follow-up adds shell via app route). backup_models view bar failed cold (first lane 13-18 s; one-time 266 MiB on the very first share, ~1 MiB after). Fix (uncommitted, suite running): clone_views.prewarm() reads each file's extent map (FIEMAP count) from submission (shell_enable.prewarm in both submit routes), ensure() waits on it (wait_prewarm, ≤120 s). Cold cache, 13 s lead (fastest recorded submit→first run_command; median 29 s): every lane 0.47-0.57 s, ≤1.3 MiB. 8/8 mutants killed. Results benchmarks/consultants/results/2026-10-26/clone-views/. Left: Windows smoke (pandorum, ch-26 window).
 - 2026-10-19 06:21Z [0a7a5bf4] E8 built 5b60e8a (2026-10-19): measured hardening drop-in <unit>.d/hardening.conf via scripts/engine_hardening.py, written by deploy step_sandbox, checked by verify check_engine_hardening. ProtectSystem=full (strict stops unit), no ProtectHostname (sandbox preflight refuses). Not deployed yet; this host's verify will FAIL until the next deploy writes it. Landlock + VM backend remain optional/later.
 - 2026-10-18 13:41Z [0a7a5bf4] Run-5 grade (#1641) fixes deployed at f43a445; the caps are in 596cf2b and the glm-5.3-flash defaults in 2fb31d4. Researcher caps high/xhigh 40/32, max 80/72 (shell: 60/52, 120/112); coder workspace 60. Edge-case matrix rows with no run that reached the code are marked "not tested", and cited rows are claim-audited. The critic checks case labels against the runs. CitationLinter resolves a short path by unique suffix. Open, user's call: gap 2 (known findings carried across councils), gap 5 (the critic re-ranks the deliberate read ledger every run). Run 6 requested (#1642).
