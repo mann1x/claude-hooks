@@ -16,6 +16,32 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [2.0.1] — 2026-10-31
+
+### Fixed
+- **A directive audit no longer loses a verdict.** `parse_audit()` numbered
+  verdicts by injected doc, so one inject holding 8 numbered directives audited
+  as one: `8 VIOLATED` was dropped as out of range and `1 MET` read as a full
+  pass, leaving an answer that broke a directive with no re-ask and no
+  `## Operator directives not met` section. Each numbered item now counts as a
+  directive, only the reply's last block of verdicts counts, and a violation
+  numbered past the directives is kept.
+- **A cut directive audit says so.** It is never continued, and every directive
+  is listed as not checked under the audit-incomplete note.
+- **The directive audit has its own output cap.** It runs with thinking on
+  under 32,000 tokens; with thinking off, glm-5.3-flash reasoned into the reply
+  past 96,000 tokens per pass.
+
+### Security
+- `episodic-memory`: `vitest` 3 → 4.1.12 for CVE-2026-84373
+  (GHSA-82fw-gwwq-j7x9, arbitrary file read through `@vitest/mocker`). A
+  development dependency only.
+
+### Known limits
+- A clean directive audit is one model's reading, not proof: four replays of
+  one answer gave three violations and one clean pass.
+- Not smoke-tested on Windows, as with 2.0.0.
+
 ## [2.0.0] — 2026-10-31
 
 The major bump is for one changed default: councils now call Ollama Cloud
@@ -10114,7 +10140,8 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/mann1x/claude-hooks/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/mann1x/claude-hooks/compare/v1.20.2...v2.0.0
 [1.20.2]: https://github.com/mann1x/claude-hooks/compare/v1.20.1...v1.20.2
 [1.20.1]: https://github.com/mann1x/claude-hooks/compare/v1.20.0...v1.20.1
