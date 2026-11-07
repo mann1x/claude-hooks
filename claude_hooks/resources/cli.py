@@ -312,20 +312,46 @@ def cmd_run(args) -> int:
     return rc
 
 
-def cmd_release(args) -> int:
+_CLAIM_ID = re.compile(r"[0-9a-f]{12}")
+
+
+def _claim_ids_from_specs(args) -> None:
+    """``extend e7cab7ddf337`` means the claim: a resource is a host or a
+    path under one, never 12 hex digits, and reading the id as a resource
+    answered "nothing to extend" (backup_models #2169)."""
+    ids = [sp for sp in args.specs if _CLAIM_ID.fullmatch(sp)]
+    if ids:
+        args.claim = list(args.claim or []) + ids
+        args.specs = [sp for sp in args.specs if sp not in ids]
+
+
+def _session_here(args) -> tuple[str, dict]:
+    """The session to act as and, unless ``--session`` names one, the
+    Claude Code process whose claims are this session's under any id."""
     from claude_hooks.resources import api
-    session = args.session if args.session is not None else api.session_id_here()
+    if args.session is not None:
+        return args.session, {}
+    from claude_hooks.mailbox.identity import client_process
+    client = client_process()
+    proc = ({"pid": client[0], "pid_started": client[1]} if client else {})
+    return api.session_id_here(client or []), proc
+
+
+def cmd_release(args) -> int:
+    _claim_ids_from_specs(args)
+    session, proc = _session_here(args)
     st = _store()
     if args.claim:
         done, refused = st.release(args.claim, session_id=session,
-                                   force=args.force)
+                                   force=args.force, **proc)
     elif args.all or args.specs:
-        if not session:
+        if not session and not proc:
             print("release: no session here (CLAUDE_CODE_SESSION_ID); use "
                   "--claim ID", file=sys.stderr)
             return 2
         names = [model.parse_item(s).resource for s in args.specs]
-        done, refused = st.release(session_id=session, resources=names)
+        done, refused = st.release(session_id=session, resources=names,
+                                   **proc)
     else:
         print("release: name resources, --claim ID or --all", file=sys.stderr)
         return 2
@@ -377,8 +403,8 @@ def cmd_renew(args) -> int:
 
 
 def cmd_extend(args) -> int:
-    from claude_hooks.resources import api
-    session = args.session if args.session is not None else api.session_id_here()
+    _claim_ids_from_specs(args)
+    session, proc = _session_here(args)
     ttl, by = parse_duration(args.ttl), parse_duration(args.by)
     if not (ttl or by):
         print("extend: give --ttl DUR (from now) or --by DUR (on top)",
@@ -387,15 +413,15 @@ def cmd_extend(args) -> int:
     st = _store()
     if args.claim:
         done, refused = st.extend(args.claim, session_id=session, ttl_s=ttl,
-                                  by_s=by, force=args.force)
+                                  by_s=by, force=args.force, **proc)
     elif args.all or args.specs:
-        if not session:
+        if not session and not proc:
             print("extend: no session here (CLAUDE_CODE_SESSION_ID); use "
                   "--claim ID", file=sys.stderr)
             return 2
         names = [model.parse_item(sp).resource for sp in args.specs]
         done, refused = st.extend(session_id=session, resources=names,
-                                  ttl_s=ttl, by_s=by)
+                                  ttl_s=ttl, by_s=by, **proc)
     else:
         print("extend: name resources, --claim ID or --all", file=sys.stderr)
         return 2

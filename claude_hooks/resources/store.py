@@ -113,6 +113,18 @@ def _same_process(c: Claim, pid: Optional[int],
     return c.pid == pid and c.pid_started == pid_started
 
 
+def _of_session(c: Claim, session_id: str, pid: Optional[int],
+                pid_started: Optional[float], host: str) -> bool:
+    """Is ``c`` this session's? Its id, or — on its own host — the Claude
+    Code process it follows: ``/clear`` and resume change the session id
+    inside one process, and a session must never become a stranger to
+    its own claims (backup_models #2169)."""
+    if session_id and c.session_id == session_id:
+        return True
+    return bool(pid and c.host == host
+                and _same_process(c, pid, pid_started))
+
+
 def backend_from_config(config: Optional[dict] = None) -> tuple[str, str]:
     """``("postgres", dsn)`` when the memory store is pgvector — shared by
     every host on it — else ``("sqlite", path)``: the sqlite_vec store's
@@ -391,10 +403,11 @@ class ResourceStore:
             live, capacity, _ = self._settle(cur)
             if reuse and owner.session_id:
                 for c in live:
-                    if (c.state == "granted" and c.session_id == owner.session_id
-                            and c.host == owner.host
+                    if (c.state == "granted" and c.host == owner.host
                             and _same_process(c, owner.pid, owner.pid_started)
+                            and (owner.pid or c.session_id == owner.session_id)
                             and model.covers(c, items)):
+                        self._restamp(cur, c, owner.session_id)
                         return Outcome(c, True, reused=True)
             now_iso = self._now_iso()
             # No expiry while queued: the grant sets it from ``ttl_s``.
@@ -441,14 +454,49 @@ class ResourceStore:
             return None if c is None else self._outcome(c, live, capacity)
         return self._run(go)
 
+    def _restamp(self, cur, c: Claim, session_id: str) -> None:
+        """Give ``c`` to ``session_id`` when it was its process's under an
+        earlier id, so SessionEnd and the session block find it."""
+        if not session_id or c.session_id == session_id:
+            return
+        old = c.session_id
+        cur.execute(self._q("UPDATE resource_claims SET session_id = ? "
+                            "WHERE id = ?"), (session_id, c.id))
+        c.session_id = session_id
+        self._event(cur, c, "adopted", f"from session {old[:8] or '-'}")
+
+    def adopt(self, session_id: str, pid: Optional[int],
+              pid_started: Optional[float]) -> list[Claim]:
+        """Hand every live claim on this host that follows the Claude Code
+        process ``pid`` to its current ``session_id``. SessionStart calls
+        it after ``/clear`` or resume. Returns the claims it moved."""
+        if not session_id or not pid:
+            return []
+
+        def go(cur):
+            live, _, _ = self._settle(cur)
+            moved = []
+            for c in live:
+                if (c.session_id != session_id and c.host == self.host
+                        and _same_process(c, pid, pid_started)):
+                    self._restamp(cur, c, session_id)
+                    moved.append(c)
+            return moved
+
+        return self._run(go)
+
     def release(self, claim_ids: Iterable[str] = (), *,
                 session_id: str = "", resources: Iterable[str] = (),
                 force: bool = False, event: str = "released",
-                by: str = "") -> tuple[list[Claim], list[Claim]]:
+                by: str = "", pid: Optional[int] = None,
+                pid_started: Optional[float] = None
+                ) -> tuple[list[Claim], list[Claim]]:
         """Release claims. ``claim_ids`` must belong to ``session_id``
         unless ``force``; with ``resources`` (and no ids) every claim of
         ``session_id`` that names one of them; with neither, every claim
-        of ``session_id``. Returns ``(released, refused)``."""
+        of ``session_id``. A claim following the caller's process
+        (``pid`` / ``pid_started``) is the session's under any earlier
+        id. Returns ``(released, refused)``."""
         ids = set(claim_ids or ())
         names = {model.normalize(r) for r in (resources or ())}
 
@@ -456,20 +504,22 @@ class ResourceStore:
             live, _, _ = self._settle(cur)
             done, refused = [], []
             for c in live:
+                mine = _of_session(c, session_id, pid, pid_started,
+                                   self.host)
                 if ids:
                     if c.id not in ids:
                         continue
-                    if not force and c.session_id != session_id:
+                    if not force and not mine:
                         refused.append(c)
                         continue
-                elif not session_id or c.session_id != session_id:
+                elif not (session_id or pid) or not mine:
                     continue
                 elif names and not names & {i.resource for i in c.items}:
                     continue
                 cur.execute(self._q(
                     "DELETE FROM resource_claims WHERE id = ?"), (c.id,))
                 self._event(cur, c, "force_released" if force and
-                            c.session_id != session_id else event,
+                            not mine else event,
                             by or c.reason)
                 done.append(c)
             if done:
@@ -506,7 +556,9 @@ class ResourceStore:
 
     def extend(self, claim_ids: Iterable[str] = (), *, session_id: str = "",
                resources: Iterable[str] = (), ttl_s: float = 0,
-               by_s: float = 0, force: bool = False
+               by_s: float = 0, force: bool = False,
+               pid: Optional[int] = None,
+               pid_started: Optional[float] = None
                ) -> tuple[list[tuple[Claim, str]], list[Claim]]:
         """Move claims' expiry in place: the claim keeps its id, its grant
         and its place in the queue, which a release + acquire loses (a FIFO
@@ -525,16 +577,20 @@ class ResourceStore:
             now = self._clock()
             done, refused = [], []
             for c in live:
+                mine = _of_session(c, session_id, pid, pid_started,
+                                   self.host)
                 if ids:
                     if c.id not in ids:
                         continue
-                    if not force and c.session_id != session_id:
+                    if not force and not mine:
                         refused.append(c)
                         continue
-                elif not session_id or c.session_id != session_id:
+                elif not (session_id or pid) or not mine:
                     continue
                 elif names and not names & {i.resource for i in c.items}:
                     continue
+                if mine:
+                    self._restamp(cur, c, session_id)
                 was = c.expires_at
                 if c.state != "granted":
                     if c.ttl_s <= 0:

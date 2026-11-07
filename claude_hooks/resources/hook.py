@@ -76,7 +76,13 @@ def session_block(*, event: dict, config: Optional[dict] = None) -> str:
         return ""
     sid = event.get("session_id") or ""
     try:
-        outs, _, _ = _store().status()
+        st = _store()
+        client = event.get("claude_client")
+        if sid and client:
+            # After /clear or resume the process's claims carry the
+            # session id it had before; they are this session's.
+            st.adopt(sid, int(client[0]), client[1])
+        outs, _, _ = st.status()
     except Exception as e:
         log.debug("resources: status failed", exc_info=True)
         return f"{HOWTO} (store unreachable: {type(e).__name__})"
@@ -137,11 +143,17 @@ def _is_claude_pid(pid: Optional[int]) -> bool:
         return True        # gone, or not Linux: the session's to release
 
 
+#: SessionEnd reasons after which the same Claude Code process goes on
+#: with a new session id; its claims go with it (adopted at SessionStart)
+#: and still end when the process does.
+CONTINUING_REASONS = frozenset({"clear", "resume"})
+
+
 def session_end(*, event: dict, config: Optional[dict] = None) -> int:
     if not enabled(config):
         return 0
     sid = event.get("session_id") or ""
-    if not sid:
+    if not sid or event.get("reason") in CONTINUING_REASONS:
         return 0
     try:
         st = _store()

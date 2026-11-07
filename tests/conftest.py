@@ -566,10 +566,14 @@ def _no_ollama_cloud_key(monkeypatch):
 #
 # The session identity Claude Code exports (CLAUDE_CODE_SESSION_ID,
 # CLAUDE_PROJECT_DIR) is cleared too: a test run from a session shell would
-# otherwise bind the mailbox to that live session's id and project.
+# otherwise bind the mailbox to that live session's id and project. For the
+# same reason ~/.claude/sessions (each Claude Code process's live session) is
+# swapped for an empty folder.
 @pytest.fixture(autouse=True)
-def _interactive_session(monkeypatch):
+def _interactive_session(monkeypatch, tmp_path):
     for name in ("CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ATTENDED",
                  "CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID",
                  "CLAUDE_PROJECT_DIR"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CLAUDE_HOOKS_SESSIONS_DIR",
+                       str(tmp_path / "claude-sessions"))

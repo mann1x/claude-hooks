@@ -112,6 +112,11 @@ def _names(a: dict, key: str, singular: str) -> list[str]:
     return out
 
 
+def _proc_of(owner) -> dict:
+    """The process an owner follows, for the store's ownership test."""
+    return {"pid": owner.pid, "pid_started": owner.pid_started}
+
+
 def _line(c: Claim) -> str:
     since = (c.granted_at or c.created_at)[:19].replace("T", " ")
     ttl = (f", until {c.expires_at[:19].replace('T', ' ')}" if c.expires_at
@@ -187,10 +192,12 @@ class ResourceTools:
             if not ids and not names and not a.get("all"):
                 return "Name claims, resources, or all=true."
             if ids:
-                done, refused = st.release(ids, session_id=owner.session_id)
+                done, refused = st.release(ids, session_id=owner.session_id,
+                                           **_proc_of(owner))
             else:
                 done, refused = st.release(session_id=owner.session_id,
-                                           resources=names)
+                                           resources=names,
+                                           **_proc_of(owner))
             lines = [f"RELEASED {c.id}: {c.label()}" for c in done]
             lines += [f"REFUSED {c.id}: held by {c.owner}, not this session"
                       for c in refused]
@@ -205,7 +212,8 @@ class ResourceTools:
             if not ids and not names and not a.get("all"):
                 return "Name claims, resources, or all=true."
             done, refused = st.extend(ids, session_id=owner.session_id,
-                                      resources=names, ttl_s=ttl, by_s=by)
+                                      resources=names, ttl_s=ttl, by_s=by,
+                                      **_proc_of(owner))
             lines = [(f"EXTENDED {c.id}: {c.label()} until "
                       f"{c.expires_at[:19].replace('T', ' ')} UTC (was "
                       f"{was[:19].replace('T', ' ') or 'no end'})")

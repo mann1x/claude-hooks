@@ -176,11 +176,16 @@ class TaskTools:
         self._svc = None
         self._background = background_embed
         self._embedding = threading.Lock()
+        self.session_fn: Optional[Callable[[], str]] = None
 
     @property
     def svc(self):
         if self._svc is None:
             self._svc = self._factory()
+        if self.session_fn is not None:
+            sid = self.session_fn()
+            if sid:
+                self._svc.session_id = sid
         return self._svc
 
     def call(self, name: str, args: dict) -> str:
@@ -340,13 +345,22 @@ def _in_area(r: dict, area: str) -> bool:
 def tools_for_provider(provider, *, cwd: Optional[str] = None,
                        session_id: Optional[str] = None) -> TaskTools:
     """Bound to the session's project; works with no provider (files)."""
-    import os
     from claude_hooks.tasks import service_for
-    sid = (session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
-           or os.environ.get("CLAUDE_SESSION_ID", ""))
 
     def factory():
-        svc = service_for(provider, cwd=cwd, session_id=sid)
+        svc = service_for(provider, cwd=cwd, session_id=_live_sid(session_id))
         svc.embed_on_write = False
         return svc
-    return TaskTools(factory)
+    tools = TaskTools(factory)
+    if not session_id:
+        # An MCP server outlives the session it was spawned in: stamp each
+        # log line with the session running now, not the first one.
+        tools.session_fn = lambda: _live_sid(None)
+    return tools
+
+
+def _live_sid(session_id: Optional[str]) -> str:
+    if session_id:
+        return session_id
+    from claude_hooks.resources.api import session_id_here
+    return session_id_here()

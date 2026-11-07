@@ -36,9 +36,22 @@ def reset_store() -> None:
     _STORE = None
 
 
-def session_id_here() -> str:
-    return (os.environ.get("CLAUDE_CODE_SESSION_ID")
-            or os.environ.get("CLAUDE_SESSION_ID", ""))
+def session_id_here(client=None) -> str:
+    """The session this code runs for, now: the Claude Code process's
+    live session (``identity.live_session_id``), else the environment.
+
+    The environment alone is wrong in a long-lived child: the MCP server
+    keeps the id it was spawned with through ``/clear`` and resume, and
+    refused the session's own claims as another's (backup_models #2169).
+    """
+    from claude_hooks.mailbox.identity import live_session_id
+    try:
+        sid = live_session_id(client)
+    except Exception:
+        log.debug("resources: live session lookup failed", exc_info=True)
+        sid = None
+    return sid or (os.environ.get("CLAUDE_CODE_SESSION_ID")
+                   or os.environ.get("CLAUDE_SESSION_ID", ""))
 
 
 def alias_for(session_id: str, cwd: Optional[str] = None) -> str:
@@ -64,7 +77,11 @@ def owner_here(*, session_id: Optional[str] = None,
     nothing on this host and lives by its lease or TTL alone.
     """
     from claude_hooks._proc import process_start_time
-    sid = session_id if session_id is not None else session_id_here()
+    if client is None:
+        from claude_hooks.mailbox.identity import client_process
+        client = client_process()
+    sid = session_id if session_id is not None else session_id_here(
+        client or [])
     cwd = cwd or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
     pid = started = None
     if follow_pid:
@@ -77,12 +94,8 @@ def owner_here(*, session_id: Optional[str] = None,
     elif own_process:
         pid = os.getpid()
         started = process_start_time(pid)
-    else:
-        if client is None:
-            from claude_hooks.mailbox.identity import client_process
-            client = client_process()
-        if client:
-            pid, started = client
+    elif client:
+        pid, started = client
     alias = alias_for(sid, cwd) if sid else os.path.basename(
         os.path.abspath(cwd)) or "shell"
     return Owner(session_id=sid, alias=alias, host=host_name(), pid=pid,

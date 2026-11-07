@@ -265,6 +265,68 @@ def client_process(start_pid: Optional[int] = None
         return None
 
 
+#: Where Claude Code records each running process's current session,
+#: ``<pid>.json``. ``$CLAUDE_HOOKS_SESSIONS_DIR`` overrides it (tests).
+SESSIONS_DIR_ENV = "CLAUDE_HOOKS_SESSIONS_DIR"
+
+#: ``startedAt`` is written as the process boots (1.4 s after its start
+#: time, measured); a file further off than this is another process's.
+_SESSION_FILE_SLACK_S = 60.0
+
+
+def _sessions_dir() -> Path:
+    root = os.environ.get(SESSIONS_DIR_ENV)
+    return Path(root) if root else Path.home() / ".claude" / "sessions"
+
+
+def _proc_ticks(pid: int) -> Optional[str]:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        return stat.rsplit(")", 1)[1].split()[19]
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def live_session_id(client=None) -> Optional[str]:
+    """The session the Claude Code process ``client`` (``(pid, start
+    time)``, default :func:`client_process`) is running now, or None.
+
+    ``CLAUDE_CODE_SESSION_ID`` is frozen into a process's environment
+    when it starts: an MCP server spawned with the process keeps the
+    first session's id through every ``/clear`` and resume after it,
+    while Bash children get the current one. Claude Code rewrites
+    ``~/.claude/sessions/<pid>.json`` on every session change, so that
+    file is the live answer. It is trusted only when it is provably this
+    process's — ``procStart`` equal to its start ticks on Linux, else
+    ``startedAt`` within a minute of its start time — since a crashed
+    process leaves its file behind for the next owner of the pid.
+    """
+    if client is None:
+        client = client_process()
+    if not client:
+        return None
+    pid, started = int(client[0]), client[1]
+    try:
+        with open(_sessions_dir() / f"{pid}.json", encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(rec, dict) or rec.get("pid") not in (pid, str(pid)):
+        return None
+    sid = rec.get("sessionId")
+    if not isinstance(sid, str) or not sid:
+        return None
+    ticks = _proc_ticks(pid) if os.name != "nt" else None
+    if rec.get("procStart") is not None and ticks is not None:
+        return sid if str(rec["procStart"]) == ticks else None
+    at = rec.get("startedAt")
+    if isinstance(at, (int, float)) and started is not None:
+        lag = at / 1000.0 - float(started)
+        if -_START_SLACK_S <= lag <= _SESSION_FILE_SLACK_S:
+            return sid
+    return None
+
+
 def same_process(a_pid, a_started, b_pid, b_started) -> bool:
     if not a_pid or not b_pid or a_started is None or b_started is None:
         return False

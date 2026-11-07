@@ -16,6 +16,19 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed
+- **A session change no longer makes a session a stranger to its own claims.**
+  The MCP server keeps the `CLAUDE_CODE_SESSION_ID` it was spawned with, so
+  after a `/clear` or resume `resource-extend` / `resource-release` refused the
+  session's GPU claims as another session's, while the CLI accepted them. The
+  session id is now read live from `~/.claude/sessions/<pid>.json`, a claim
+  following the caller's Claude Code process counts as its own under any
+  earlier id and takes the live id, SessionStart hands the process's claims to
+  the new session, and SessionEnd keeps them on `clear` / `resume`. Task notes
+  written through MCP carry the live session too.
+- `claude-hooks-res extend <claim-id>` / `release <claim-id>` read the id as
+  the claim instead of answering "nothing to extend".
+
 ## [2.0.2] — 2026-10-31
 
 ### Security

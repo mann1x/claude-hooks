@@ -109,6 +109,15 @@ A claim follows a process on its own host:
 - under `run`, it follows the wrapper: released when the command exits,
   even if the session ended first.
 
+A claim belongs to that process, not to one session id. `/clear` and resume
+start a new session id inside the same process, and an MCP server keeps the
+`CLAUDE_CODE_SESSION_ID` it was spawned with through all of them. So "this
+session" is read live from `~/.claude/sessions/<pid>.json` (trusted only
+when its `procStart` / `startedAt` match the process), a claim following the
+caller's Claude Code process can be extended and released under any earlier
+id, and it is re-stamped with the live id when that happens or at the next
+SessionStart.
+
 Other hosts cannot see that process, so they trust a **lease**
 (`--lease`, default 30 min) that the holder's host renews from its hooks
 (once a minute at most), its waiters, `run` wrappers, and the hook
@@ -123,9 +132,12 @@ Every grant, release, expiry and holder exit is logged
 
 ## What the hooks do
 
-- **SessionStart**: one line on how to claim, plus what is held and queued.
+- **SessionStart**: hand the process's claims to the new session id, then
+  one line on how to claim, plus what is held and queued.
 - **UserPromptSubmit / Stop**: renew this host's claims (throttled).
-- **SessionEnd**: release the session's claims, except `run` jobs.
+- **SessionEnd**: release the session's claims, except `run` jobs. Not on
+  `/clear` or resume (reason `clear` / `resume`): the process goes on, and
+  its claims with it.
 - **PreToolUse (Bash)**: a command that reaches a host or GPU another
   session holds exclusively — named by `ssh`/`scp`/`rsync` or
   `CUDA_VISIBLE_DEVICES` — or any command on a host another session keeps
