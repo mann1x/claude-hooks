@@ -1,6 +1,6 @@
 ---
 description: Resource claims — shared / exclusive / quiet locks on hosts, GPUs, pods and the cloud account for shared machines
-globs: claude_hooks/resources/**,claude_hooks/resources/hook.py,bin/claude-hooks-res,tests/test_resources.py,tests/test_resources_hooks.py,docs/resources.md
+globs: claude_hooks/resources/**,claude_hooks/resources/hook.py,claude_hooks/mailbox/identity.py,bin/claude-hooks-res,tests/test_resources.py,tests/test_resources_hooks.py,tests/test_resources_session_change.py,docs/resources.md
 ---
 
 - Resource claims (`claude_hooks/resources/`, reference `docs/resources.md`) replace before/after mail for shared machines: claim with `claude-hooks-res acquire|wait|run` or the `resource-*` MCP tools, release when done. Waiting is a background `claude-hooks-res wait …`, whose exit is the notification.
