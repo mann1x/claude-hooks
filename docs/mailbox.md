@@ -242,6 +242,28 @@ fixed"*. It can be called later than the read, and **replaced until the
 sender has seen it**; once the sender sees it, it freezes and the
 answer is a new message.
 
+## Ringing the doorbell
+
+Mail is noticed at the recipient's next prompt or Stop, so a terminal
+sitting idle holds it until someone types there. Claude Code's own
+`SendMessage` reaches a session listed by ListAgents at once, and a
+session's ListAgents name is its mailbox alias. So the reply to
+`mailbox-send` and to a `mailbox-ack` with a note ends with the ready-made
+call, one per `alias@host` the mail reached (`doorbell()` in
+`claude_hooks/mailbox/tools.py`):
+
+```
+Ring the doorbell: mail waits for the recipient's next turn, so if ListAgents lists them, tell them now:
+  SendMessage({to: "backup_models", message: "I've sent you mail #2301 — check your inbox (mailbox-list)."})   # backup_models@solidpc
+```
+
+An ack's call goes to the original sender and points at `mailbox-sent`.
+There is none for a send that only queued, nor for mail to yourself. The
+mailbox does not check ListAgents itself, because it cannot see it: the
+sender skips a recipient ListAgents does not list (another host, a client
+other than Claude Code) and uses the live row's `[ref]` when a name is
+listed twice (a terminal and an offline Remote Control row).
+
 ## Ownership
 
 A message is the sender's until it is read. `mailbox-edit` and

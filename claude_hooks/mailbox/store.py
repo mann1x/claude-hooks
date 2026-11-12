@@ -1689,7 +1689,9 @@ class MailboxStore:
             except Exception:
                 self._rollback(conn)
                 raise
-        return {"action": action, "id": message_id}
+        return {"action": action, "id": message_id,
+                "from_alias": row["from_alias"],
+                "from_host": row["from_host"]}
 
     # ─── expiry ──────────────────────────────────────────────────────
 

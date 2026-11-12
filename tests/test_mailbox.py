@@ -1204,6 +1204,41 @@ class ToolsTests(StoreHarness):
                                                 {"note": "x"}))
         self.assertIn("Pass id", self.me.call("mailbox-cancel", {}))
 
+    def test_send_says_how_to_ring_the_recipients_doorbell(self):
+        out = self.me.call("mailbox-send", {"to": "osync", "subject": "s",
+                                            "body": "b"})
+        self.assertIn("Ring the doorbell", out)
+        self.assertIn('SendMessage({to: "osync", message: "I\'ve sent you '
+                      'mail #1', out)
+        self.assertIn("# osync@solidpc", out)
+
+    def test_a_queued_send_has_no_doorbell(self):
+        out = self.me.call("mailbox-send", {"to": "nobody-here",
+                                            "subject": "s", "body": "b"})
+        self.assertNotIn("SendMessage", out)
+
+    def test_no_doorbell_for_mail_to_yourself(self):
+        out = self.me.call("mailbox-send", {"to": "claude-hooks",
+                                            "subject": "s", "body": "b"})
+        self.assertNotIn("SendMessage", out)
+
+    def test_ack_rings_the_senders_doorbell_once(self):
+        for n in range(2):
+            self.me.call("mailbox-send", {"to": "osync", "subject": f"s{n}",
+                                          "body": "b"})
+        self.them.call("mailbox-read", {"ids": [1, 2]})
+        out = self.them.call("mailbox-ack", {"ids": [1, 2], "note": "ok"})
+        self.assertEqual(out.count("SendMessage("), 1)
+        self.assertIn('SendMessage({to: "claude-hooks", message: "I\'ve '
+                      'answered your mail #1, #2 with a note', out)
+
+    def test_a_refused_ack_rings_nothing(self):
+        self.me.call("mailbox-send", {"to": "osync", "subject": "s",
+                                      "body": "b"})
+        out = self.them.call("mailbox-ack", {"id": 1, "note": "unread"})
+        self.assertIn("has not been read", out)
+        self.assertNotIn("SendMessage", out)
+
     def test_edit_then_refused_after_read(self):
         self.me.call("mailbox-send", {"to": "osync", "subject": "v1",
                                       "body": "b"})

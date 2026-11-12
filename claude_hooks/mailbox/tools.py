@@ -45,6 +45,34 @@ CLOUD_HOST = "cloud"
 AS_TOOLS = frozenset({"mailbox-list", "mailbox-read", "mailbox-ack",
                       "mailbox-edit", "mailbox-cancel", "mailbox-sent"})
 
+def doorbell(targets, message: str, *, me: tuple = ()) -> str:
+    """The line telling the sender to ring the recipient's doorbell.
+
+    Mail is noticed at the recipient's next prompt or Stop, so an idle
+    terminal sits on it; a Claude Code ``SendMessage`` wakes it now.
+    ``targets`` are ``(alias, host)`` pairs, ``me`` the caller's own;
+    the ListAgents name of a session is its alias. Empty when there is
+    nobody to wake.
+    """
+    seen: list[tuple] = []
+    for alias, host in targets:
+        key = (alias or "", host or "")
+        if key[0] and key != tuple(me) and key not in seen:
+            seen.append(key)
+    if not seen:
+        return ""
+    calls = "\n".join(
+        f'  SendMessage({{to: "{a}", message: {json.dumps(message, ensure_ascii=False)}}})'
+        f"   # {a}@{h}" if h else
+        f'  SendMessage({{to: "{a}", message: {json.dumps(message, ensure_ascii=False)}}})'
+        for a, h in seen)
+    return ("\n\nRing the doorbell: mail waits for the recipient's next "
+            "turn, so if ListAgents lists them, tell them now:\n" + calls
+            + "\nUse the live row's [ref] when the name is listed twice; "
+            "skip anyone ListAgents does not list (another host, another "
+            "client).")
+
+
 _AS_PROPERTY = {"as": {
     "type": "string",
     "description": "act as a durable alias you registered with "
@@ -455,7 +483,10 @@ class MailboxTools:
             # A partial send has to say what it did *not* do, or the
             # confirmation is a claim about recipients that never got it.
             out += f" Skipped {describe_skipped(skipped)}."
-        return out
+        return out + doorbell(
+            [(r.alias, r.host) for r in res["recipients"]],
+            f"I've sent you mail #{ids} — check your inbox (mailbox-list).",
+            me=(self.alias, self.host))
 
     def _mailbox_list(self, args: dict) -> str:
         try:
@@ -543,6 +574,7 @@ class MailboxTools:
             return "Pass id (or ids) — the message(s) the note answers."
         note = str(args.get("note") or "")
         out = []
+        noted: dict = {}
         for mid in dict.fromkeys(ids):
             try:
                 res = self.store.ack(
@@ -554,7 +586,15 @@ class MailboxTools:
             verb = "Attached" if res["action"] == "attached" else "Replaced"
             out.append(f"{verb} the note on #{res['id']}. The sender will "
                        f"see it next time they check in.")
-        return "\n".join(out)
+            if res.get("from_alias"):
+                noted.setdefault((res["from_alias"], res.get("from_host")),
+                                 []).append(res["id"])
+        return "\n".join(out) + "".join(
+            doorbell([who], "I've answered your mail "
+                     + ", ".join(f"#{i}" for i in mids)
+                     + " with a note — check mailbox-sent.",
+                     me=(self.alias, self.host))
+            for who, mids in noted.items())
 
     def _mailbox_edit(self, args: dict) -> str:
         res = self.store.edit(

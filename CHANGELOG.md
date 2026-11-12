@@ -16,6 +16,14 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added
+- **Mail rings the doorbell.** The reply to `mailbox-send` and to a
+  `mailbox-ack` with a note ends with a ready-made `SendMessage` call per
+  recipient ("I've sent you mail #N — check your inbox"), so an idle
+  terminal listed by ListAgents hears of the mail now instead of at its next
+  turn. None for a queued send or mail to yourself. See `docs/mailbox.md`
+  "Ringing the doorbell".
+
 ### Fixed
 - **A session change no longer makes a session a stranger to its own claims.**
   The MCP server keeps the `CLAUDE_CODE_SESSION_ID` it was spawned with, so
