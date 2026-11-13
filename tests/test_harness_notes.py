@@ -22,7 +22,7 @@ def test_every_harness_message_is_built_by_the_helper():
     offenders = []
     for base in ("claude_hooks", "consultants"):
         for path in (ROOT / base).rglob("*.py"):
-            for n, line in enumerate(path.read_text().splitlines(), 1):
+            for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                 if raw.search(line) and "def harness_note" not in line \
                         and 'return {"role": "user", "content": body' not in line:
                     offenders.append(f"{path.relative_to(ROOT)}:{n}")

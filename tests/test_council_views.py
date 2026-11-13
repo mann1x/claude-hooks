@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="the council shell is Linux-only (plan E7)")
+
 if not shutil.which("git"):
     pytest.skip("git", allow_module_level=True)
 

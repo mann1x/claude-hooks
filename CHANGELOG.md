@@ -25,6 +25,24 @@ release with the auto-generated source archive
   "Ringing the doorbell".
 
 ### Fixed
+- **The secret gate passed every commit on Windows.** An MSYS `git` spells the
+  worktree `/c/Users/...`; the native `gitleaks.exe` could not open it, logged
+  an error, scanned 0 bytes and exited 0. The gate now hands gitleaks the
+  Windows spelling and refuses the commit when the scan target is not a
+  directory, so a path gitleaks cannot open fails closed.
+- **A process that has exited is no longer alive on Windows.** It stays a kernel
+  object while anyone holds a handle to it, so `process_start_time()` kept
+  answering and a `--follow-pid` claim outlived its job (likewise a mailbox
+  alias or daemon lock whose process had exited). It now reads the exit time
+  `GetProcessTimes` already returns.
+- **Tool paths use `/` on Windows.** The researcher / Caliber-proxy tools showed
+  the model `src\net\x.py` while the CitationLinter and code graph key on
+  `src/net/x.py`, and `glob` matched `src/*.py` against backslashed paths and
+  found nothing. Relative paths in tool output and glob matching are now
+  spelled with `/` on every OS (Linux output is unchanged).
+- Windows test debt from the v2.0 line: the Linux-only council shell / launcher
+  tests skip on Windows, psycopg tests skip without it, and the compaction
+  bench keys its project paths with `/`.
 - **A session change no longer makes a session a stranger to its own claims.**
   The MCP server keeps the `CLAUDE_CODE_SESSION_ID` it was spawned with, so
   after a `/clear` or resume `resource-extend` / `resource-release` refused the

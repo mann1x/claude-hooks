@@ -6,15 +6,15 @@
 
 ## Active (1)
 
-- [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 1h
+- [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 1m
 
 ## Ready (1)
 
-- [ch-26](.claude-hooks/tasks/ch-26.md) **L** `mailbox.identity` ch-18 follow-up: run the durable-alias check from a linked cloud thread (osync@cloud) when the owner is back on pandorum — 5d
+- [ch-26](.claude-hooks/tasks/ch-26.md) **L** `mailbox.identity` ch-18 follow-up: run the durable-alias check from a linked cloud thread (osync@cloud) when the owner is back on pandorum — 18d
 
 ## Waiting (1)
 
-- [ch-23](.claude-hooks/tasks/ch-23.md) **L** `consultants.polykv` PolyKV: re-run arms A/B at ~655k cells once opencoti c14 (op-296 KV spill to host RAM) ships — 6d
+- [ch-23](.claude-hooks/tasks/ch-23.md) **L** `consultants.polykv` PolyKV: re-run arms A/B at ~655k cells once opencoti c14 (op-296 KV spill to host RAM) ships — 18d
 
 ## By plan
 
@@ -22,18 +22,18 @@
 
 ## Recently closed (15 of 24)
 
-- [ch-27](.claude-hooks/tasks/archive/ch-27.md) **H** `consultants.directives` Binding injects: audit silently passes a multi-directive doc; bound the audit call — 1m
-- [ch-13](.claude-hooks/tasks/archive/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 3d
-- [ch-25](.claude-hooks/tasks/archive/ch-25.md) `consultants.compaction` Compaction at 32k windows: a fold every 2–3 research calls — ~5k between where a fold lands and the trigger — 5d
-- [ch-18](.claude-hooks/tasks/archive/ch-18.md) **H** `mailbox.identity` Mailbox: lasting cloud aliases — a linked cloud thread registers and sends as <alias>@cloud without a per-session approval — 5d
-- [ch-11](.claude-hooks/tasks/archive/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 5d
-- [ch-24](.claude-hooks/tasks/archive/ch-24.md) `consultants.budget` Council grounding sized by the role's window — 50 KB anchors fill 56% of a 32k head that compaction never folds — 6d
-- [ch-12](.claude-hooks/tasks/archive/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 6d
-- [ch-15](.claude-hooks/tasks/archive/ch-15.md) **H** `consultants.providers` Ollama Cloud direct (https://ollama.com, no local Ollama) for consultants / get-advice / caliber — 6d
-- [ch-19](.claude-hooks/tasks/archive/ch-19.md) **H** `resources` Resources: extend a held claim's expiry, wake waiters on extension, and make booking behind a held claim always queue — 6d
-- [ch-22](.claude-hooks/tasks/archive/ch-22.md) `consultants.polykv` PolyKV F4: quality A/B of the shared layout (role text last) vs as-built — 6d
-- [ch-21](.claude-hooks/tasks/archive/ch-21.md) `consultants.polykv` PolyKV: per-lane output cap so concurrent lanes fit beside the shared layer on a small engine — 6d
-- [ch-10](.claude-hooks/tasks/archive/ch-10.md) `consultants.polykv` Council F — PolyKV, complete (opencoti + xOllama), last — 6d
-- [ch-20](.claude-hooks/tasks/archive/ch-20.md) **H** `security.secrets` Commit secret gate — gitleaks + .gitleaks.toml config rules + host-secret search, on every host and in CI — 6d
-- [ch-16](.claude-hooks/tasks/archive/ch-16.md) **H** `resources` Resource manager: shared/exclusive/quiet locks on hosts, GPUs, pods, cloud — real-time waiters, no mail — 7d
-- [ch-17](.claude-hooks/tasks/archive/ch-17.md) `benchmarks.models` Model eval 2026-10-22: minimax-m3.1-flash full bench + gemma4 council re-run with thinking fixed — 7d
+- [ch-27](.claude-hooks/tasks/archive/ch-27.md) **H** `consultants.directives` Binding injects: audit silently passes a multi-directive doc; bound the audit call — 12d
+- [ch-13](.claude-hooks/tasks/archive/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 16d
+- [ch-25](.claude-hooks/tasks/archive/ch-25.md) `consultants.compaction` Compaction at 32k windows: a fold every 2–3 research calls — ~5k between where a fold lands and the trigger — 17d
+- [ch-18](.claude-hooks/tasks/archive/ch-18.md) **H** `mailbox.identity` Mailbox: lasting cloud aliases — a linked cloud thread registers and sends as <alias>@cloud without a per-session approval — 18d
+- [ch-11](.claude-hooks/tasks/archive/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 18d
+- [ch-24](.claude-hooks/tasks/archive/ch-24.md) `consultants.budget` Council grounding sized by the role's window — 50 KB anchors fill 56% of a 32k head that compaction never folds — 18d
+- [ch-12](.claude-hooks/tasks/archive/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 18d
+- [ch-15](.claude-hooks/tasks/archive/ch-15.md) **H** `consultants.providers` Ollama Cloud direct (https://ollama.com, no local Ollama) for consultants / get-advice / caliber — 18d
+- [ch-19](.claude-hooks/tasks/archive/ch-19.md) **H** `resources` Resources: extend a held claim's expiry, wake waiters on extension, and make booking behind a held claim always queue — 18d
+- [ch-22](.claude-hooks/tasks/archive/ch-22.md) `consultants.polykv` PolyKV F4: quality A/B of the shared layout (role text last) vs as-built — 18d
+- [ch-21](.claude-hooks/tasks/archive/ch-21.md) `consultants.polykv` PolyKV: per-lane output cap so concurrent lanes fit beside the shared layer on a small engine — 18d
+- [ch-10](.claude-hooks/tasks/archive/ch-10.md) `consultants.polykv` Council F — PolyKV, complete (opencoti + xOllama), last — 18d
+- [ch-20](.claude-hooks/tasks/archive/ch-20.md) **H** `security.secrets` Commit secret gate — gitleaks + .gitleaks.toml config rules + host-secret search, on every host and in CI — 18d
+- [ch-16](.claude-hooks/tasks/archive/ch-16.md) **H** `resources` Resource manager: shared/exclusive/quiet locks on hosts, GPUs, pods, cloud — real-time waiters, no mail — 19d
+- [ch-17](.claude-hooks/tasks/archive/ch-17.md) `benchmarks.models` Model eval 2026-10-22: minimax-m3.1-flash full bench + gemma4 council re-run with thinking fixed — 19d

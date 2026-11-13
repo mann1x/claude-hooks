@@ -107,6 +107,7 @@ class TestElf:
 
 
 # --------------------------------------------------------------- verify
+@pytest.mark.skipif(os.name == "nt", reason="the launcher is a Linux ELF; verify reads POSIX owner and mode")
 class TestVerify:
     def test_the_pinned_binary_verifies(self, tmp_path, host_x86):
         os.chmod(tmp_path, 0o755)
@@ -158,6 +159,7 @@ class TestVerify:
 
 
 # -------------------------------------------------------------- install
+@pytest.mark.skipif(os.name == "nt", reason="the launcher is a Linux ELF; verify reads POSIX owner and mode")
 class TestInstall:
     def _setup(self, tmp_path):
         os.chmod(tmp_path, 0o755)

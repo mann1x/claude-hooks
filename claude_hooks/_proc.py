@@ -84,6 +84,12 @@ def _process_start_time_windows(pid: int) -> Optional[float]:  # pragma: no cove
             ctypes.byref(kernel), ctypes.byref(user))
         if not ok:
             return None
+        # An exited process stays a kernel object while anyone holds a
+        # handle to it (its parent's Popen, the terminal that started
+        # it), and OpenProcess keeps succeeding: a claim followed a job
+        # killed and waited on as if it still ran. Exited means gone.
+        if exited.dwHighDateTime or exited.dwLowDateTime:
+            return None
         ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
         return ticks / 1e7 - _FILETIME_EPOCH_DELTA
     except Exception:

@@ -7,7 +7,7 @@ area: consultants.sandbox
 tags: [council, cerebriline]
 plan: docs/PLAN-council-cerebriline.md
 created: 2026-10-14T13:22:15Z
-updated: 2026-10-31T12:53:56Z
+updated: 2026-11-13T00:09:42Z
 sessions: [0a7a5bf4]
 ---
 
@@ -22,6 +22,8 @@ Milestone E: E1 prerequisite fixes (runtime_permissions, control.py enum, per-la
 - [ ] Windows smoke passes
 
 ## Log
+- 2026-11-13 00:09Z [0a7a5bf4] Pandorum smoke re-run with the fixes (scratch worktree at d5eb950 + patch): 8521 passed, 248 skipped; all 43 original failures pass/skip. 3 others failed only from the scratch setup (worktree dir name in alias, no gitignored config/claude-hooks.json, one timing flake from an overlapping run), each passed in the real checkout. Linux full suite with the same changes: 8813 passed. Windows council shell remains unbuilt (plan E7).
+- 2026-11-12 23:52Z [0a7a5bf4] 2026-11-13 Pandorum smoke (d5eb950, deployed DEPLOY OK): full suite 43 failed / 8519 passed. Root causes: (1) secret gate fail-open on Windows (MSYS /c/... toplevel, gitleaks exit 0) → _native() + fail closed; (2) exited Windows process read as alive (held handle) → check GetProcessTimes exit time; (3) tool paths with backslash (CitationLinter/glob mismatch) → '/' everywhere; (4) council shell/launcher/views tests not skipped on Windows (plan E7) + psycopg/encoding test debt. Fixes validated on Pandorum via applied patch (targeted 314 pass); full re-runs on both hosts in progress, not committed yet.
 - 2026-10-31 12:53Z [0a7a5bf4] 2026-10-31: council-sandbox-v0.1.0 published with x86_64 + aarch64 builds and SHA256SUMS (both matched launcher_pin.json), so hosts without cargo can now install the pinned launcher. v2.0.0 released Linux only at 1363614 and deployed on solidpc. Still owed here: Windows smoke + pandorum deploy once reachable (No route to host as of 10-31).
 - 2026-10-26 14:12Z [0a7a5bf4] updated acceptance ✓1 ✓2 ✓3 ✓4: 2026-10-26 Linux acceptance: 240 sandbox tests green, no skips (escape suite live on both backends; kill -9 lifecycle class; follow-up adds shell via app route). backup_models view bar failed cold (first lane 13-18 s; one-time 266 MiB on the very first share, ~1 MiB after). Fix (uncommitted, suite running): clone_views.prewarm() reads each file's extent map (FIEMAP count) from submission (shell_enable.prewarm in both submit routes), ensure() waits on it (wait_prewarm, ≤120 s). Cold cache, 13 s lead (fastest recorded submit→first run_command; median 29 s): every lane 0.47-0.57 s, ≤1.3 MiB. 8/8 mutants killed. Results benchmarks/consultants/results/2026-10-26/clone-views/. Left: Windows smoke (pandorum, ch-26 window).
 - 2026-10-19 06:21Z [0a7a5bf4] E8 built 5b60e8a (2026-10-19): measured hardening drop-in <unit>.d/hardening.conf via scripts/engine_hardening.py, written by deploy step_sandbox, checked by verify check_engine_hardening. ProtectSystem=full (strict stops unit), no ProtectHostname (sandbox preflight refuses). Not deployed yet; this host's verify will FAIL until the next deploy writes it. Landlock + VM backend remain optional/later.

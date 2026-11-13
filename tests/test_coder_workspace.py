@@ -108,7 +108,8 @@ def test_a_view_that_cannot_be_made_falls_back_to_coder_out(tmp_path):
 def test_written_files_go_to_the_sandbox_uid(tmp_path, monkeypatch):
     from consultants.engine import coder as C
     owned = []
-    monkeypatch.setattr(C.os, "chown", lambda p, u, g: owned.append((Path(p).name, u)))
+    monkeypatch.setattr(C.os, "chown", lambda p, u, g: owned.append((Path(p).name, u)),
+                        raising=False)          # no os.chown on Windows
     sb = C.CoderSandbox(root=tmp_path, max_file_bytes=1000, max_total_bytes=1000,
                         max_files=4, owner=4242)
     sb.write("pkg/sub/f.py", "x")

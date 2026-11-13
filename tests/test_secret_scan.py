@@ -176,6 +176,30 @@ def test_missing_gitleaks_fails_closed(monkeypatch, capsys):
     assert "refused" in capsys.readouterr().err
 
 
+def test_a_target_gitleaks_cannot_open_fails_closed(monkeypatch, capsys):
+    # gitleaks exits 0 on a path it cannot open (pandorum, 2026-11-13).
+    monkeypatch.setattr(ss, "find_gitleaks", lambda: "gitleaks")
+    monkeypatch.setattr(ss, "_top", lambda: "/no/such/worktree")
+    monkeypatch.setattr(ss.subprocess, "run", lambda *a, **k: pytest.fail(
+        "gitleaks was run on a path that does not exist"))
+    assert ss.run_gitleaks("staged") == 2
+    assert "refused" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("raw, native", [
+    ("/c/Users/manni/repo", "C:\\Users\\manni\\repo"),
+    ("/cygdrive/d/a", "D:\\a"),
+    ("C:/Users/x", "C:/Users/x"),
+    ("/srv/repo", "/srv/repo"),
+])
+def test_an_msys_toplevel_is_spelled_natively_on_windows(raw, native):
+    assert ss._native(raw, windows=True) == native
+
+
+def test_paths_are_untouched_off_windows():
+    assert ss._native("/c/Users/manni", windows=False) == "/c/Users/manni"
+
+
 # ---------------------------------------------------------------- hook
 def test_the_hook_is_installed_once_after_the_shebang(tmp_path):
     hooks = tmp_path / "hooks"

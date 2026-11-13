@@ -178,7 +178,10 @@ class TestAppliedOnConnect(unittest.TestCase):
         time the provider reconnects."""
         from unittest import mock
 
-        import psycopg
+        try:
+            import psycopg
+        except ImportError:
+            self.skipTest("psycopg is not installed")
 
         conn = _FakeConn()
         p, _ = _provider()

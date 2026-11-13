@@ -983,7 +983,7 @@ def probe_trial(project: Path, order: list[str],
                 purposes: dict[str, tuple[str, str]], out: Path) -> dict:
     """One trial of :class:`GrepProbe` through the real loop, executor and
     grader, its history under ``out/preflight``."""
-    packages = sorted({str(Path(p).parent) for p in order})
+    packages = sorted({Path(p).parent.as_posix() for p in order})
     probe = GrepProbe(packages)
     global make_client
     real, make_client = make_client, (lambda base, window: probe)
@@ -1417,7 +1417,8 @@ def saved_order(out: Path) -> list[str]:
     """The project's modules from the copy saved with the run, for a run
     whose metadata predates ``order``."""
     root = out / "project"
-    return sorted(str(p.relative_to(root)) for p in (root / "src").rglob("*.py"))
+    return sorted(p.relative_to(root).as_posix()
+                  for p in (root / "src").rglob("*.py"))
 
 
 def regrade_dir(out: Path) -> int:

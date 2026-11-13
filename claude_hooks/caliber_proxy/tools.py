@@ -128,11 +128,15 @@ def _render_path(abs_path: str, primary_cwd: str) -> str:
     *extra* root render as their absolute path — keeps the output
     unambiguous instead of producing an ugly ``../../../...`` rel
     path that crosses sibling trees.
+
+    A relative path is spelled with ``/`` on every OS: the CitationLinter
+    and the code graph key on it, and a Windows ``src\\net\\x.py`` was
+    never matched to what the model was shown (pandorum, 2026-11-13).
     """
     primary_real = os.path.realpath(primary_cwd)
     if abs_path == primary_real or abs_path.startswith(primary_real + os.sep):
         try:
-            return os.path.relpath(abs_path, primary_real)
+            return os.path.relpath(abs_path, primary_real).replace(os.sep, "/")
         except ValueError:
             return abs_path
     return abs_path
@@ -295,7 +299,8 @@ def glob_files(args: dict, cwd: str,
                             "build", ".cache", "target"}]
                 for name in files:
                     full = os.path.join(root, name)
-                    rel = os.path.relpath(full, walk_root)
+                    # ``/`` so a ``src/*.py`` pattern matches on Windows.
+                    rel = os.path.relpath(full, walk_root).replace(os.sep, "/")
                     if (fnmatch.fnmatch(rel, pattern)
                             or fnmatch.fnmatch(name, pattern)):
                         matches.append(_render_path(full, cwd_real))
@@ -528,7 +533,8 @@ def _build_survey(cwd: str) -> str:
                     per_dir[ext] = per_dir.get(ext, 0) + 1
                     ext_counts[ext] = ext_counts.get(ext, 0) + 1
                 # Path relative to project root, e.g. "claude_hooks/dispatcher.py"
-                rel = os.path.relpath(os.path.join(dirpath, fn), cwd)
+                rel = os.path.relpath(os.path.join(dirpath, fn),
+                                      cwd).replace(os.sep, "/")
                 per_dir_files.append((rel, ext))
         top_dirs[name] = per_dir
         # Pick up to 5 representative filenames: dominant extension first,

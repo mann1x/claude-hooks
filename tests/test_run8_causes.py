@@ -5,6 +5,9 @@ whose relative imports resolved from /scratch."""
 from __future__ import annotations
 
 import inspect
+import os
+
+import pytest
 
 from claude_hooks.agent_loop import runner
 from claude_hooks.test_reruns import (NOTHING_WRITTEN, NOTHING_WRITTEN_AGAIN,
@@ -20,6 +23,7 @@ REPO = "/repo/cline-sync"
 
 # --- researcher probes ----------------------------------------------------
 
+@pytest.mark.skipif(os.name == "nt", reason="the council shell is Linux-only (plan E7)")
 def test_relative_import_from_scratch_gets_the_absolute_path():
     out = ("error: Cannot find module './sdk/core/grep' from "
            "'/scratch/crlf_probe.ts'")
