@@ -6,7 +6,7 @@
 
 ## Active (2)
 
-- [ch-28](.claude-hooks/tasks/ch-28.md) **H** `tasks.graph` Task graph from beads: one canonical root per project, cross-project depends, typed links, gates, unblock doorbell, graph views — 1m
+- [ch-28](.claude-hooks/tasks/ch-28.md) **H** `tasks.graph` Task graph from beads: one canonical root per project, cross-project depends, typed links, gates, unblock doorbell, graph views — 4h
 - [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 6d
 
 ## Ready (1)
@@ -15,7 +15,7 @@
 
 ## Waiting (1)
 
-- [ch-23](.claude-hooks/tasks/ch-23.md) **L** `consultants.polykv` PolyKV: re-run arms A/B at ~655k cells once opencoti c14 (op-296 KV spill to host RAM) ships — 25d
+- [ch-23](.claude-hooks/tasks/ch-23.md) **L** `consultants.polykv` PolyKV: re-run arms A/B at ~655k cells once opencoti c14 (op-296 KV spill to host RAM) ships — 1m
 
 ## By plan
 
@@ -24,8 +24,8 @@
 
 ## Recently closed (15 of 24)
 
-- [ch-27](.claude-hooks/tasks/archive/ch-27.md) **H** `consultants.directives` Binding injects: audit silently passes a multi-directive doc; bound the audit call — 18d
-- [ch-13](.claude-hooks/tasks/archive/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 22d
+- [ch-27](.claude-hooks/tasks/archive/ch-27.md) **H** `consultants.directives` Binding injects: audit silently passes a multi-directive doc; bound the audit call — 19d
+- [ch-13](.claude-hooks/tasks/archive/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 23d
 - [ch-25](.claude-hooks/tasks/archive/ch-25.md) `consultants.compaction` Compaction at 32k windows: a fold every 2–3 research calls — ~5k between where a fold lands and the trigger — 24d
 - [ch-18](.claude-hooks/tasks/archive/ch-18.md) **H** `mailbox.identity` Mailbox: lasting cloud aliases — a linked cloud thread registers and sends as <alias>@cloud without a per-session approval — 24d
 - [ch-11](.claude-hooks/tasks/archive/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 24d
