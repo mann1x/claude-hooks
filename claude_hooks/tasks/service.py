@@ -21,7 +21,10 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
 
 from claude_hooks._atomic import write_text_atomic
-from claude_hooks.tasks.files import TaskDir, TaskNotFound, file_hash
+from claude_hooks.tasks.files import (
+    CONFIG, TASKS_DIR, Checkout, TaskDir, TaskNotFound, checkout_of,
+    file_hash, git_main_root,
+)
 from claude_hooks.tasks.model import (
     ACCEPTANCE, CLOSED_STATUSES, DESCRIPTION, OPEN_STATUSES, PRIORITIES,
     Task, normalise_status, parse_stamp, stamp, utcnow,
@@ -126,9 +129,20 @@ class TaskService:
     def __init__(self, root, index: Optional[TaskIndex] = None, *,
                  host: str = "", session_id: str = "",
                  embedder: Optional[Callable[[str], Optional[list]]] = None,
-                 embed_model: str = "", embed_on_write: bool = True):
-        self.dir = TaskDir(Path(root))
+                 embed_model: str = "", embed_on_write: bool = True,
+                 read_only_worktrees: Sequence[str] = ()):
+        #: The checkout the session is in; ``dir`` is the folder it reads,
+        #: which for a read-only worktree is the main checkout's.
+        self.origin = Path(root)
+        self.dir = TaskDir(self.origin)
         self.index = index
+        #: Directory-name globs of linked worktrees that change nothing
+        #: even on a branch (``hooks.tasks.read_only_worktrees``).
+        self.read_only_worktrees = tuple(read_only_worktrees or ())
+        self._checkout: Optional[Checkout] = None
+        #: Whether this checkout owns the project's index rows; decided
+        #: once per service, see :meth:`_writes_index`.
+        self._owner: Optional[bool] = None
         self.host = host
         self.session_id = session_id or ""
         self.embedder = embedder
@@ -139,6 +153,17 @@ class TaskService:
         #: Regenerate TASKS.md after each write. Bulk callers (the
         #: importer) turn it off and write the board once at the end.
         self.board_on_write = True
+        # A read-only worktree (a release snapshot) shows the live list of
+        # its main checkout; it writes nothing either way. A worker keeps
+        # its own folder: its task's file travels on its branch.
+        co = self.checkout
+        if co.kind == "read-only":
+            main = TaskDir(co.main_root)
+            if main.exists:
+                self.dir = main
+        if not TaskDir(self.origin).exists:
+            # Whether it is a mirror depends on the folder it may get.
+            self._checkout = None
 
     # ─── setup ───────────────────────────────────────────────────────
 
@@ -150,10 +175,99 @@ class TaskService:
     def initialised(self) -> bool:
         return self.dir.exists
 
+    @property
+    def checkout(self) -> Checkout:
+        """Where this checkout stands in its repository.
+
+        A linked worktree is a mirror of the main checkout unless both
+        have a task folder and they name different projects (a worktree
+        deliberately tracking its own). One with no folder of its own is
+        a mirror too: starting one there made a new project named after
+        the worktree directory.
+        """
+        if self._checkout is None:
+            co = checkout_of(self.origin, self.read_only_worktrees)
+            own = TaskDir(self.origin)
+            if co.mirror and own.exists:
+                main = TaskDir(co.main_root)
+                if main.exists and main.project != own.project:
+                    co = Checkout()
+            self._checkout = co
+        return self._checkout
+
+    def _refuse_in_mirror(self, what: str) -> None:
+        co = self.checkout
+        if not co.mirror:
+            return
+        raise ValueError(
+            f"{self.origin} is a {co.kind} worktree of {co.main_root}: "
+            f"{what} in the main checkout, which hands out the ids")
+
+    def _writes_index(self) -> bool:
+        """Whether this checkout may write the project's index rows.
+
+        Rows are keyed on the project name, which every checkout of a
+        repository shares, so only one checkout may write them. A mirror
+        never does. Otherwise the registered owner ``(root, host)`` does;
+        an unregistered project is taken. Ownership moves only when the
+        registered root is on this host and is gone or is a worktree of
+        this checkout, or by :meth:`adopt`. Without this a session in an
+        older release worktree rewrote the rows with that branch's copies
+        and deleted every row whose file the branch lacked.
+        """
+        if self.index is None or self.checkout.mirror:
+            return False
+        if self._owner is None:
+            try:
+                self._owner = self._claim()
+            except Exception:
+                log.warning("tasks: cannot read the project registry; the "
+                            "index is left alone", exc_info=True)
+                return False        # not cached: the next call retries
+        return self._owner
+
+    def _claim(self) -> bool:
+        root, host = str(self.dir.root), self.host
+        row = self.index.project_row(self.project)
+        # A row with no host on either side is no evidence of another
+        # machine: the same root is ours.
+        same_host = row is not None and (row["host"] == host
+                                         or not row["host"] or not host)
+        if row is None or (row["root"] == root and same_host):
+            self._register()
+            return True
+        if row["host"] == host:
+            old = Path(row["root"])
+            gone = not (old / TASKS_DIR / CONFIG).is_file()
+            main = git_main_root(old)
+            ours = main is not None and main == _resolved(self.dir.root)
+            if gone or ours:
+                log.warning("tasks: %s moves from %s (%s) to %s",
+                            self.project, row["root"],
+                            "gone" if gone else "a worktree of it", root)
+                self._register()
+                return True
+        log.warning("tasks: %s is indexed from %s on %s; this checkout (%s "
+                    "on %s) leaves the index alone — `claude-hooks-tasks "
+                    "adopt` moves it here", self.project, row["root"],
+                    row["host"] or "?", root, host)
+        return False
+
+    def adopt(self) -> ReconcileStats:
+        """Make this checkout the one that indexes the project, then
+        reconcile. Refused in a mirror."""
+        self._refuse_in_mirror("adopt the project")
+        if self.index is None:
+            raise ValueError("no task index on this host")
+        self._register()
+        self._owner = True
+        return self.reconcile(force=True)
+
     def init(self, *, prefix: Optional[str] = None,
              project: Optional[str] = None) -> dict:
         if self.dir.exists:
             return self.dir.config()
+        self._refuse_in_mirror("tasks are started")
         taken: set[str] = set()
         name = project or self.dir.root.name
         if self.index is not None:
@@ -165,7 +279,8 @@ class TaskService:
         cfg = self.dir.init(prefix=prefix, project=project, taken=taken)
         # Per-host state and in-flight locks never belong in a commit.
         write_text_atomic(self.dir.dir / ".gitignore", GITIGNORE)
-        self._register()
+        self._owner = None          # the project exists now; decide afresh
+        self._writes_index()
         return cfg
 
     def _register(self) -> None:
@@ -211,7 +326,7 @@ class TaskService:
     # ─── index sync ──────────────────────────────────────────────────
 
     def _index_one(self, task: Task, path: Path, text: str) -> None:
-        if self.index is None:
+        if not self._writes_index():
             return
         try:
             self.index.upsert(self.project, task, root=str(self.dir.root),
@@ -242,17 +357,17 @@ class TaskService:
         state = read_state(self.dir.dir, STATE_FILE)
         return state if isinstance(state, dict) else {}
 
-    def reconcile(self) -> ReconcileStats:
+    def reconcile(self, *, force: bool = False) -> ReconcileStats:
         """Bring the index in line with the files; the files win.
 
         Unchanged files are recognised by ``(mtime_ns, size)`` from a
         per-host state file, so a quiet project costs one directory
-        scan, not a read of every task.
+        scan, not a read of every task. ``force`` rewrites every row
+        (after :meth:`adopt`, whose rows still name the old root).
         """
         stats = ReconcileStats()
-        if self.index is None or not self.dir.exists:
+        if not self.dir.exists or not self._writes_index():
             return stats
-        self._register()
         state = self._load_state()
         new_state: dict = {}
         known = self.index.hashes(self.project)
@@ -265,7 +380,7 @@ class TaskService:
                 h = cached[1]
             else:
                 h = None
-            if h is not None and known.get(tf.id) == h:
+            if not force and h is not None and known.get(tf.id) == h:
                 seen.add(tf.id)
                 new_state[tf.id] = [key, h]
                 continue
@@ -283,7 +398,7 @@ class TaskService:
             h = file_hash(text)
             seen.add(tf.id)
             new_state[tf.id] = [key, h]
-            if known.get(tf.id) != h:
+            if force or known.get(tf.id) != h:
                 self.index.upsert(self.project, task, root=str(self.dir.root),
                                   host=self.host, file_hash=h,
                                   archived=tf.archived)
@@ -300,7 +415,8 @@ class TaskService:
 
     def embed_pending(self, limit: int = 50) -> int:
         """Embed rows missing a current vector; returns how many."""
-        if self.index is None or self.embedder is None or not self.embed_model:
+        if (self.embedder is None or not self.embed_model
+                or not self._writes_index()):
             return 0
         n = 0
         for row in self.index.needing_embedding(
@@ -328,6 +444,7 @@ class TaskService:
         title = " ".join(str(title or "").split())
         if not title:
             raise ValueError("a task needs a title")
+        self._refuse_in_mirror("tasks are created")
         if not self.dir.exists:
             self.init()
         priority = (priority or "M").upper()[:1]
@@ -349,12 +466,26 @@ class TaskService:
             t.touch(self.session_id, now)
             return t
 
-        task, path, text = self.dir.create(make)
+        task, path, text = self.dir.create(make, floor=self._id_floor())
         self._index_one(task, path, text)
         self._refresh_board()
         return task
 
+    def _id_floor(self) -> int:
+        """The highest number the index holds for this project, read by
+        any checkout (reading is harmless): a clone behind the one that
+        indexes must not reuse a number it has not pulled yet."""
+        if self.index is None:
+            return 0
+        try:
+            return self.index.max_number(self.project, self.dir.prefix)
+        except Exception:
+            log.info("tasks: no id floor from the index", exc_info=True)
+            return 0
+
     def _modify(self, task_id: str, change: Callable[[Task], None]) -> Task:
+        if self.checkout.kind == "read-only":
+            self._refuse_in_mirror("tasks are changed")
         task_id = task_id.strip().lower()
         with self._locked(task_id):
             task, _, _ = self.dir.read(task_id)
@@ -376,6 +507,8 @@ class TaskService:
 
     def set_status(self, task_id: str, status: str, note: str = "") -> Task:
         status = normalise_status(status)
+        if status in CLOSED_STATUSES:
+            self._refuse_in_mirror("tasks are closed")
 
         def change(t: Task) -> None:
             if t.status == status and not note:
@@ -511,8 +644,9 @@ class TaskService:
         return task, path
 
     def snapshot(self) -> list[dict]:
-        """Every task as a row, from the index when there is one."""
-        if self.index is not None:
+        """Every task as a row, from the index when this checkout writes
+        it; otherwise from the files, which are what this checkout sees."""
+        if self._writes_index():
             try:
                 self.reconcile()
                 return self.index.all_rows(self.project)
@@ -567,6 +701,13 @@ class TaskService:
             out[k].sort(key=lambda r: (-r["urgency"], r.get("num", 0)))
         out["closed"].sort(key=lambda r: r.get("updated") or "", reverse=True)
         return out
+
+
+def _resolved(p: Path) -> Path:
+    try:
+        return Path(p).resolve()
+    except OSError:
+        return Path(p).absolute()
 
 
 def _clean_list(items) -> list[str]:

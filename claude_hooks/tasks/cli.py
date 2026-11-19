@@ -12,6 +12,8 @@ session calls produce the same files.
     claude-hooks-tasks note bm-42 "text"
     claude-hooks-tasks init [--prefix bm]
     claude-hooks-tasks reindex          # reconcile files → index, embed
+    claude-hooks-tasks where            # this checkout, and who indexes it
+    claude-hooks-tasks adopt            # index the project from this checkout
     claude-hooks-tasks board            # regenerate TASKS.md
     claude-hooks-tasks import --transcript <jsonl> [--dry-run]
 """
@@ -101,6 +103,12 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     sub.add_parser("reindex", help="sync files into the index and embed")
 
+    sub.add_parser("where", help="this checkout's standing and the "
+                                 "project's indexing checkout")
+
+    sub.add_parser("adopt", help="make this checkout the one that indexes "
+                                 "the project (after moving it)")
+
     sub.add_parser("board", help="regenerate TASKS.md")
 
     p = sub.add_parser("import", help="import Claude Code task calls")
@@ -151,10 +159,43 @@ def main(argv: Optional[list[str]] = None) -> int:
               f"{cfg['prefix']}")
         return 0
 
+    if cmd == "where":
+        svc = _service(args)
+        co = svc.checkout
+        print(f"checkout: {svc.origin} ({co.kind}"
+              + (f" worktree of {co.main_root})" if co.mirror else ")"))
+        if svc.dir.root != svc.origin:
+            print(f"reads:    {svc.dir.dir}")
+        if svc.dir.exists:
+            print(f"project:  {svc.project}, prefix {svc.dir.prefix}")
+        if svc.index is None:
+            print("index:    none on this host")
+        elif svc.dir.exists:
+            row = svc.index.project_row(svc.project)
+            print("indexed:  " + (f"from {row['root']} on {row['host']}"
+                                  if row else "not registered"))
+            print("writes:   " + ("yes" if svc._writes_index() else "no"))
+        return 0
+
+    if cmd == "adopt":
+        svc = _service(args)
+        try:
+            print(svc.adopt())
+        except ValueError as e:
+            print(e)
+            return 1
+        return 0
+
     if cmd == "reindex":
         svc = _service(args, embed=True)
         if svc.index is None:
             print("no SQL store configured; nothing to index")
+            return 1
+        if not svc._writes_index():
+            co = svc.checkout
+            print(f"{svc.origin} does not index {svc.project}"
+                  + (f": a {co.kind} worktree of {co.main_root}"
+                     if co.mirror else " (see `claude-hooks-tasks where`)"))
             return 1
         print(svc.reconcile())
         total = 0

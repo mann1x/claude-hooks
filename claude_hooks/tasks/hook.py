@@ -44,6 +44,9 @@ DEFAULTS = {
     "stop_nudge": True,
     "mirror_builtin": True,
     "session_ready": 5,
+    # Linked worktrees, by directory name, whose task tools change
+    # nothing even on a branch (a detached one never does).
+    "read_only_worktrees": [],
 }
 
 _MENTION = re.compile(r"(?<![\w-])([a-z][a-z0-9]{0,7})-(\d{1,6})(?![\w-])",
@@ -58,11 +61,14 @@ def settings(config: dict) -> dict:
 
 
 def _service(event: dict, config: dict, providers, *, embed: bool = False):
-    from claude_hooks.tasks import service_for, sql_provider
+    from claude_hooks.tasks import (
+        read_only_worktree_globs, service_for, sql_provider,
+    )
     root = os.environ.get("CLAUDE_PROJECT_DIR") or event.get("cwd") or None
     svc = service_for(sql_provider(providers), cwd=root,
                       session_id=str(event.get("session_id") or ""),
-                      embed=embed)
+                      embed=embed,
+                      read_only_worktrees=read_only_worktree_globs(config))
     svc.embed_on_write = False
     return svc
 

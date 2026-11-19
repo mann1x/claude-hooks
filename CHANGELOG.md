@@ -17,6 +17,20 @@ release with the auto-generated source archive
 ## [Unreleased]
 
 ### Added
+- **One checkout indexes a project's tasks.** Index rows are keyed on the
+  project name, which every checkout of a repository shares. A linked git
+  worktree now never writes them and never creates, finishes or cancels a
+  task (refused, naming the main checkout, which hands out the ids); on a
+  branch it may still edit the tasks it has, whose file changes travel on
+  its branch, and a detached one (or one named by
+  `hooks.tasks.read_only_worktrees`) is read-only and shows the main
+  checkout's list. Another clone or host never takes the rows from the
+  registered checkout (`claude-hooks-tasks adopt` moves them), and new ids
+  sit above the index's highest number. Before, a session in an older
+  release worktree rewrote the rows with that branch's copies and deleted
+  every row whose file the branch lacked, and a worktree could reuse a
+  number main had given out. `claude-hooks-tasks where` shows which
+  checkout indexes a project (ch-28, `docs/PLAN-task-graph.md`).
 - **Mail rings the doorbell.** The reply to `mailbox-send` and to a
   `mailbox-ack` with a note ends with a ready-made `SendMessage` call per
   recipient ("I've sent you mail #N — check your inbox"), so an idle

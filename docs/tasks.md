@@ -57,6 +57,43 @@ from before the move is read once and removed where that is allowed.
   - Set your own with `claude-hooks-tasks init --prefix xx` before the
     first task.
 
+## Worktrees and clones: one checkout indexes a project
+
+Index rows are keyed on the project name, which every checkout of a
+repository shares, so exactly one checkout writes them. Without that, a
+session in an older release worktree rewrote the rows with that branch's
+copies and deleted every row whose file the branch lacked (`reconcile()`
+lets the files win), and a worktree could hand out a number the main
+checkout had already given out.
+
+| checkout | reads | writes the index | create / done / cancel | edit an existing task |
+|---|---|---|---|---|
+| main worktree (or no git) | its folder | yes, if it owns the project | yes | yes |
+| linked worktree on a branch (**worker**) | its folder | never | refused, naming the main checkout | yes, in its own file (the change travels on its branch) |
+| detached linked worktree, or named by `read_only_worktrees` (**read-only**) | the main checkout's folder | never | refused | refused |
+
+- The kind is read from git's own files (`.git` → `gitdir:` →
+  `commondir`), no `git` subprocess: `checkout_of()` in
+  `claude_hooks/tasks/files.py`. A submodule or a bare repository's
+  worktree has no main checkout and counts as main.
+- A linked worktree with no task folder of its own is a mirror too:
+  creating there used to start a new project named after the worktree.
+  One whose own folder names a different project is its own main.
+- `hooks.tasks.read_only_worktrees` (directory-name globs, default `[]`)
+  makes branch worktrees read-only, e.g. `["opencoti-rel-*"]`, whose
+  release checkouts are partly on `release/*` branches.
+- **Ownership.** `task_projects` names the owner `(root, host)`. Another
+  root never takes the rows, another host's clone included; it works on
+  its files and leaves the index alone (logged once). The rows move only
+  when the registered root is on this host and is gone, or is a worktree
+  of this checkout, or with `claude-hooks-tasks adopt`, which rewrites
+  every row.
+- **Id floor.** A new id is above the local folder and the index's highest
+  number for the project, so a clone behind the owner never reuses a
+  number it has not pulled yet.
+- `claude-hooks-tasks where` prints the checkout's kind, which folder it
+  reads, who indexes the project and whether this checkout writes.
+
 ## The task file
 
 ```markdown
@@ -134,6 +171,8 @@ claude-hooks-tasks note bm-42 "text"
 claude-hooks-tasks link bm-42 commit 2f01f52
 claude-hooks-tasks init [--prefix xx]
 claude-hooks-tasks reindex                     # files → index, then embed what is missing
+claude-hooks-tasks where                       # checkout kind, who indexes the project
+claude-hooks-tasks adopt                       # index the project from this checkout
 claude-hooks-tasks board                       # regenerate TASKS.md
 claude-hooks-tasks import --transcript <session.jsonl> [--dry-run]
 ```

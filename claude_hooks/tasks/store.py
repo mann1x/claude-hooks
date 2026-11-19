@@ -147,6 +147,29 @@ class TaskIndex:
             return [dict(zip(cols, r)) for r in cur.fetchall()]
         return self._run(fn)
 
+    def project_row(self, project: str) -> Optional[dict]:
+        """The registered ``(prefix, root, host)`` of ``project``, or None."""
+        cols = schema.PROJECT_COLUMNS
+        sql = self._q(f"SELECT {', '.join(cols)} FROM task_projects "
+                      "WHERE project = ?")
+
+        def fn(cur):
+            cur.execute(sql, (project,))
+            r = cur.fetchone()
+            return dict(zip(cols, r)) if r else None
+        return self._run(fn)
+
+    def max_number(self, project: str, prefix: str) -> int:
+        """The highest task number the index holds for ``project``."""
+        sql = self._q("SELECT MAX(num) FROM tasks WHERE project = ? "
+                      "AND prefix = ?")
+
+        def fn(cur):
+            cur.execute(sql, (project, prefix))
+            r = cur.fetchone()
+            return int(r[0]) if r and r[0] is not None else 0
+        return self._run(fn)
+
     def prefixes_taken(self, *, except_project: str = "") -> set[str]:
         return {p["prefix"] for p in self.projects()
                 if p["project"] != except_project}

@@ -103,6 +103,97 @@ class TaskNotFound(LookupError):
     pass
 
 
+# ─── which checkout of the repository ────────────────────────────────
+
+#: A checkout's standing in its repository. ``main`` is the main worktree
+#: (or no git at all): it hands out ids and writes the index. A linked
+#: worktree is a mirror of the main one: ``worker`` (on a branch) may edit
+#: the tasks it already has, whose file changes travel on its branch;
+#: ``read-only`` (detached, or named by ``hooks.tasks.read_only_worktrees``)
+#: changes nothing.
+CHECKOUT_KINDS = ("main", "worker", "read-only")
+
+
+@dataclass(frozen=True)
+class Checkout:
+    kind: str = "main"
+    #: The main worktree of a linked one; None for ``main``.
+    main_root: Optional[Path] = None
+
+    @property
+    def mirror(self) -> bool:
+        return self.kind != "main"
+
+
+def _gitdir_of(root: Path) -> Optional[Path]:
+    """The admin dir a linked worktree's ``.git`` file points at."""
+    dotgit = Path(root) / ".git"
+    if not dotgit.is_file():
+        return None
+    try:
+        first = dotgit.read_text(encoding="utf-8").splitlines()[:1]
+    except (OSError, UnicodeDecodeError):
+        return None
+    m = re.match(r"\s*gitdir:\s*(.+?)\s*$", first[0] if first else "")
+    if not m:
+        return None
+    gd = Path(m.group(1))
+    return gd if gd.is_absolute() else Path(root) / gd
+
+
+def git_main_root(root: Path) -> Optional[Path]:
+    """The main worktree of the linked worktree at ``root``, or None.
+
+    Read from git's own files rather than a ``git`` subprocess: the
+    ``.git`` file names the admin dir, whose ``commondir`` names the
+    repository's ``.git``, whose parent is the main worktree. A submodule's
+    ``.git`` file has no ``commondir`` and a bare repository's common dir
+    is not named ``.git``; neither has a main worktree, so both are None.
+    """
+    gd = _gitdir_of(root)
+    if gd is None:
+        return None
+    try:
+        rel = (gd / "commondir").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    common = Path(rel)
+    if not common.is_absolute():
+        common = gd / common
+    try:
+        common = common.resolve()
+        here = Path(root).resolve()
+    except OSError:
+        return None
+    if common.name != ".git":
+        return None
+    main = common.parent
+    return None if main == here else main
+
+
+def _detached(root: Path) -> bool:
+    gd = _gitdir_of(root)
+    if gd is None:
+        return False
+    try:
+        head = (gd / "HEAD").read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return not head.startswith("ref:")
+
+
+def checkout_of(root: Path, read_only: Iterable[str] = ()) -> Checkout:
+    """Where the checkout at ``root`` stands; see :data:`CHECKOUT_KINDS`."""
+    from fnmatch import fnmatch
+    main = git_main_root(root)
+    if main is None:
+        return Checkout()
+    name = Path(root).name
+    if _detached(root) or any(fnmatch(name, g) for g in read_only if g):
+        return Checkout("read-only", main)
+    return Checkout("worker", main)
+
+
 def project_root(cwd: Optional[str] = None) -> Path:
     """The project a session works in.
 
@@ -293,15 +384,20 @@ class TaskDir:
                 n = max(n, num)
         return n
 
-    def create(self, task_factory) -> tuple[Task, Path, str]:
+    def create(self, task_factory, *, floor: int = 0
+               ) -> tuple[Task, Path, str]:
         """Claim the next free id with an exclusive create, then fill it.
 
         ``O_EXCL`` is the allocator: two sessions creating at the same
         moment both compute the same next number, one wins the create,
         the other moves on. No lock file to leave behind.
+
+        ``floor`` is the highest number known elsewhere (the index): a
+        checkout whose folder lags behind must not hand out a number
+        that already names another task.
         """
         self.archive.mkdir(parents=True, exist_ok=True)
-        n = self.max_number() + 1
+        n = max(self.max_number(), int(floor or 0)) + 1
         for _ in range(_ALLOCATE_ATTEMPTS):
             task_id = f"{self.prefix}-{n}"
             dest = self.path_for(task_id, archived=False)
