@@ -10,6 +10,8 @@ session calls produce the same files.
     claude-hooks-tasks add "title" [-p H] [--area R9] [--depends bm-41]
     claude-hooks-tasks start|done|wait|cancel bm-42 [-m "note"]
     claude-hooks-tasks note bm-42 "text"
+    claude-hooks-tasks gate bm-42 add mail:2331   # waits until answered
+    claude-hooks-tasks gates            # check every open gate, GitHub too
     claude-hooks-tasks init [--prefix bm]
     claude-hooks-tasks reindex          # reconcile files → index, embed
     claude-hooks-tasks where            # this checkout, and who indexes it
@@ -39,7 +41,30 @@ def _service(args, *, embed: bool = False):
 
 def _tools(args):
     from claude_hooks.tasks.tools import TaskTools
-    return TaskTools(lambda: _service(args), background_embed=False)
+    tools = TaskTools(lambda: _service(args), background_embed=False)
+    tools.mailer_fn = lambda: _MailStoreOnly(tools.svc)
+    return tools
+
+
+class _MailStoreOnly:
+    """The host's mailbox store without a sending identity: the CLI can
+    check mail gates but sends no mail (closing lists what it unblocks)."""
+
+    def __init__(self, svc):
+        self.store = None
+        if svc.index is not None:
+            try:
+                from claude_hooks.config import load_config
+                from claude_hooks.dispatcher import build_providers
+                from claude_hooks.mailbox.integration import store_for_provider
+                from claude_hooks.tasks import sql_provider
+                self.store = store_for_provider(
+                    sql_provider(build_providers(load_config())))
+            except Exception:
+                self.store = None
+
+    def call(self, name, args):
+        return "(the CLI sends no mail; the project sees it in task-ready)"
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -92,6 +117,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("id")
     p.add_argument("text")
 
+    p = sub.add_parser("gate", help="add / resolve / remove a gate on a "
+                                    "task (mail:<id>, human:<what>, …)")
+    p.add_argument("id")
+    p.add_argument("action", choices=["add", "resolve", "remove", "check"])
+    p.add_argument("gate", nargs="?", default="")
+    p.add_argument("-m", "--note", default="")
+
+    p = sub.add_parser("gates", help="check every open gate (GitHub too)")
+
     p = sub.add_parser("link", help="attach a commit/file/mail/plan/…")
     p.add_argument("id")
     p.add_argument("kind")
@@ -122,7 +156,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     cmd = args.cmd
 
     if cmd in ("ready", "list", "show", "add", "start", "done", "wait",
-               "cancel", "note", "link"):
+               "cancel", "note", "link", "gate", "gates"):
         a: dict = {}
         name = f"task-{cmd}"
         if cmd == "ready":
@@ -148,6 +182,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             a = {"id": args.id, "text": args.text}
         elif cmd == "link":
             a = {"id": args.id, "kind": args.kind, "value": args.value}
+        elif cmd == "gate":
+            name = "task-gate"
+            a = {"id": args.id, "action": args.action, "gate": args.gate,
+                 "note": args.note}
+        elif cmd == "gates":
+            name = "task-gate"
+            a = {"action": "check"}
         out = _tools(args).call(name, a)
         print(out)
         return 1 if out.startswith(("Not done", "no task")) else 0

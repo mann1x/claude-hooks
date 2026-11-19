@@ -122,7 +122,7 @@ class UnblockTests(_Two):
         self.tools.mailer_fn = None
         self.ch.create("x", depends=["op-1"])
         out = self.tools.call("task-done", {"id": "op-1"})
-        self.assertIn("no mailbox here", out)
+        self.assertIn("no mail sent from here", out)
 
 
 class SessionLookupTests(_Two):

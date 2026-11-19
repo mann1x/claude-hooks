@@ -26,7 +26,7 @@ log = logging.getLogger("claude_hooks.tasks.tools")
 TOOL_NAMES = (
     "task-create", "task-ready", "task-list", "task-show", "task-start",
     "task-done", "task-wait", "task-cancel", "task-note", "task-update",
-    "task-link",
+    "task-link", "task-gate",
 )
 
 _ID = {"type": "string", "description": "task id, e.g. bm-42"}
@@ -173,6 +173,27 @@ def tool_catalog() -> list[dict]:
                 "note": _NOTE,
             }, "required": ["id", "kind", "value"]},
         },
+        {
+            "name": "task-gate",
+            "description": (
+                "Make a task wait on something outside the task list; it "
+                "stays blocked until the gate opens. Gates: mail:<id> (mail "
+                "answered: acked with a note, or a reply naming #id), "
+                "human:<what> (a person's go-ahead; resolve it by hand), "
+                "timer:<ISO time>, commit:<sha>@<branch> (on the branch), "
+                "gh-pr:<owner/repo>#<n> (merged), gh-run:<owner/repo>#<id> "
+                "(succeeded). action: add / resolve / remove one gate, or "
+                "check (every gate of the task, or of the project without "
+                "id, GitHub included; resolved ones are recorded)."),
+            "inputSchema": {"type": "object", "properties": {
+                "id": _ID,
+                "action": {"type": "string",
+                           "enum": ["add", "resolve", "remove", "check"]},
+                "gate": {"type": "string",
+                         "description": "e.g. mail:2331, human:deploy"},
+                "note": _NOTE,
+            }, "required": ["action"]},
+        },
     ]
     return tools
 
@@ -264,6 +285,8 @@ class TaskTools:
             t = svc.update(_id(a), note=a.get("note", ""), **fields)
             self._after_write()
             return f"{row_line(_row(t))}\n{t.log_lines[0]}"
+        if name == "task-gate":
+            return self._gate(a)
         if name == "task-link":
             t = svc.link(_id(a), a.get("kind", ""), a.get("value", ""),
                          a.get("note", ""))
@@ -274,6 +297,22 @@ class TaskTools:
             extra = f"\n{t.log_lines[0]}" if t.log_lines[0] != line else ""
             return f"{t.id}: {line}{extra}"
         return f"unknown task tool {name}"
+
+    def _gate(self, a: dict) -> str:
+        svc = self.svc
+        action = str(a.get("action") or "").strip().lower()
+        if action == "check":
+            tid = _id(a) if a.get("id") else ""
+            mailer = self.mailer_fn() if self.mailer_fn else None
+            res = svc.check_gates(task_id=tid,
+                                  mail_store=getattr(mailer, "store", None))
+            self._after_write()
+            if not res:
+                return "No open gates" + (f" on {tid}." if tid else ".")
+            return "\n".join(gate_line(t, g, v) for t, g, v in res)
+        t = svc.gate(_id(a), action, a.get("gate", ""), a.get("note", ""))
+        self._after_write()
+        return f"{row_line(_row(t))}\n{t.log_lines[0]}"
 
     def _unblocked(self, t, status: str, nodes: list) -> str:
         """What this close made ready, and the mail to the other projects'
@@ -289,9 +328,11 @@ class TaskTools:
                          "waited for it still makes sense.)")
         if any(n["project"] != here for n in nodes) and _unblock_mail_on():
             mailer = self.mailer_fn() if self.mailer_fn else None
-            if mailer is None or svc.index is None:
-                lines.append("(no mailbox here: the other projects will see "
-                             "it in task-ready)")
+            if (mailer is None or svc.index is None
+                    or not getattr(mailer, "alias", None)):
+                # No mailbox, or no sending identity (the CLI).
+                lines.append("(no mail sent from here: the other projects "
+                             "will see it in task-ready)")
             else:
                 from claude_hooks.tasks.notify import mail_unblocked
                 lines += mail_unblocked(
@@ -366,6 +407,13 @@ class TaskTools:
             finally:
                 self._embedding.release()
         threading.Thread(target=run, name="task-embed", daemon=True).start()
+
+
+def gate_line(task_id: str, gate: str, v) -> str:
+    mark = {True: "open", False: "closed", None: "unchecked"}[v.resolved]
+    if v.failed:
+        mark = "stuck"
+    return f"{task_id} {gate}: {mark} — {v.why}"
 
 
 def _unblock_mail_on() -> bool:

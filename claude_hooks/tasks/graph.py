@@ -68,6 +68,8 @@ class _Node:
     title: str = ""
     depends: list = field(default_factory=list)
     links: dict = field(default_factory=dict)
+    #: Open gates (phase 3): it waits on something outside the graph.
+    gates: list = field(default_factory=list)
 
 
 def _ids(value) -> list[str]:
@@ -113,7 +115,8 @@ class Graph:
             project=project, id=tid, status=r.get("status") or "",
             title=r.get("title") or "", depends=_ids(r.get("depends")),
             links={k: _ids(v) for k, v in links.items()
-                   if k in TASK_LINK_KINDS})
+                   if k in TASK_LINK_KINDS},
+            gates=[str(g) for g in links.get("gates") or []])
 
     # ─── lookups ─────────────────────────────────────────────────────
 
@@ -168,7 +171,7 @@ class Graph:
         out = []
         for n in self.dependents_open(tid):
             rest = [r for r in self.open_depends(n.depends) if r.id != tid]
-            if not rest:
+            if not rest and not n.gates:
                 out.append(n)
         return out
 

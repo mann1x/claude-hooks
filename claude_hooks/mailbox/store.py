@@ -1631,6 +1631,37 @@ class MailboxStore:
 
     # ─── recipient-side ──────────────────────────────────────────────
 
+    def message_state(self, message_id: int) -> Optional[dict]:
+        """One message's delivery state, read-only, for a task's mail gate
+        (ch-28): who sent it to whom, read / acked / cancelled, and
+        ``reply_id`` — the first later message from its recipient back to
+        its sender naming ``#<id>`` — or None when there is no such
+        message."""
+        cols = ("id", "created_at", "from_alias", "from_host", "to_alias",
+                "to_host", "read_at", "ack_body", "ack_at", "cancelled_at")
+
+        def fn(cur):
+            cur.execute(self._q(f"SELECT {', '.join(cols)} FROM "
+                                "session_messages WHERE id = ?"),
+                        (int(message_id),))
+            rows = self._rows(cur, cols)
+            if not rows:
+                return None
+            row = rows[0]
+            row["reply_id"] = None
+            if row["to_alias"]:
+                cur.execute(self._q(
+                    "SELECT id FROM session_messages WHERE from_alias = ? "
+                    "AND to_alias = ? AND id > ? AND cancelled_at IS NULL "
+                    "AND (subject LIKE ? OR body LIKE ?) ORDER BY id LIMIT 1"),
+                    (row["to_alias"], row["from_alias"], int(message_id),
+                     f"%#{int(message_id)}%", f"%#{int(message_id)}%"))
+                r = cur.fetchone()
+                if r:
+                    row["reply_id"] = int(r[0])
+            return row
+        return self._read(fn)
+
     def ack(self, message_id: int, note: str, *, session_id: str,
             alias: str, host: Optional[str] = None) -> dict:
         """Attach or replace the short note the sender will see.

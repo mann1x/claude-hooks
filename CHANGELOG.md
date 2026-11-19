@@ -17,6 +17,15 @@ release with the auto-generated source archive
 ## [Unreleased]
 
 ### Added
+- **Gates: tasks that wait on something outside the task list.**
+  `task-gate` (CLI `claude-hooks-tasks gate|gates`) makes a task wait on
+  `mail:<id>` (answered: an ack note or a reply naming the id),
+  `human:<what>` (resolved by hand), `timer:<time>`,
+  `commit:<sha>@<branch>`, `gh-pr:<repo>#<n>` (merged) or
+  `gh-run:<repo>#<id>` (succeeded). An open gate blocks like an open
+  dependency; mail, timer and commit gates are checked at session start,
+  GitHub ones on request; a gate that cannot open by itself is reported,
+  never resolved (ch-28 phase 3).
 - **Closing a task tells the projects it unblocks.** `task-done` /
   `task-cancel` list every task, in any project, whose last open
   dependency it was, and mail the session working in each other project

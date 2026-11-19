@@ -40,6 +40,8 @@ def row_line(r: dict, *, project: bool = False,
         unresolved = r.get("unresolved") or {}
         tail.append("after " + ", ".join(
             d + ("?" if d in unresolved else "") for d in r["open_depends"]))
+    if r.get("open_gates"):
+        tail.append("waits " + ", ".join(r["open_gates"]))
     when = ago(r.get("updated") or "", now)
     if when:
         tail.append(when)

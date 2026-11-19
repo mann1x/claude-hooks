@@ -130,6 +130,29 @@ opencoti's task 347 from any project.
 - Cross-project answers are as fresh as the other project's last
   reconcile, which every task tool call and session start runs.
 
+### Gates: waiting on something outside the task list
+
+A task can wait on more than other tasks. `task-gate <id> add <gate>`
+(CLI: `claude-hooks-tasks gate <id> add <gate>`) adds one; it blocks like
+an open dependency until it opens, then it is removed and the log says
+why.
+
+| gate | opens when | checked |
+|---|---|---|
+| `mail:<id>` | the mail is answered: acked with a note, or a reply from its recipient naming `#<id>` | session start, `check` |
+| `human:<what>` | someone resolves it: `task-gate <id> resolve human:<what>` | by hand |
+| `timer:<ISO time>` | the time has passed | session start, `check` |
+| `commit:<sha>@<branch>` | the branch contains the commit (`git merge-base --is-ancestor`) | session start, `check` |
+| `gh-pr:<owner/repo>#<n>` | the pull request is merged | `check` only |
+| `gh-run:<owner/repo>#<id>` | the workflow run succeeded | `check` only |
+
+`task-gate` with `action: check` (CLI `claude-hooks-tasks gates`) checks
+every open gate of the project, GitHub included, and records what opened.
+A gate that will never open by itself (a PR closed unmerged, a failed
+run, cancelled mail) is logged once and stays, for a person to resolve or
+remove. Gates live in the task's `links` under `gates`, so older code
+keeps them. A read-only checkout reports but records nothing.
+
 ### Closing a task tells the projects it unblocks
 
 `task-done` / `task-cancel` end with `Ready now: …`: every open task, in
@@ -193,6 +216,7 @@ What and why, kept current.
 | `task-start` / `task-done` / `task-wait` / `task-cancel` | status change, with an optional log note |
 | `task-note` | append a log line |
 | `task-update` | change fields; `check` / `uncheck` tick acceptance items by number |
+| `task-gate` | add / resolve / remove a gate, or check them (mail, human, timer, commit, gh-pr, gh-run) |
 | `task-link` | attach a commit, file, mail, consultancy, plan, url or task; or a graph link to any project's task (`parent`, `discovered-from`, `related`, `caused-by`, `supersedes`, `duplicate-of`) |
 
 Writes return immediately; a background thread embeds what changed.

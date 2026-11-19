@@ -736,6 +736,71 @@ class TaskService:
                                  + " → ".join(path))
         return out
 
+    # ─── gates (phase 3) ─────────────────────────────────────────────
+
+    def gate(self, task_id: str, action: str, gate: str = "",
+             note: str = "") -> Task:
+        """``add`` / ``resolve`` / ``remove`` one gate on a task. Resolving
+        by hand is how a ``human`` gate opens; any gate may be resolved or
+        removed by hand, with the reason logged."""
+        from claude_hooks.tasks.gates import normalise
+        action = (action or "").strip().lower()
+        if action not in ("add", "resolve", "remove"):
+            raise ValueError("action is one of add, resolve, remove, check")
+        g = normalise(gate)
+
+        def change(t: Task) -> None:
+            gates = [str(x) for x in t.links.get("gates") or []]
+            if action == "add":
+                if g in gates:
+                    return
+                gates.append(g)
+                t.add_log(f"waits on gate {g}" + (f": {note}" if note
+                                                  else ""),
+                          session=self.session_id)
+            else:
+                if g not in gates:
+                    raise ValueError(f"{t.id} has no gate {g}; its gates: "
+                                     f"{', '.join(gates) or 'none'}")
+                gates.remove(g)
+                verb = "resolved" if action == "resolve" else "removed"
+                t.add_log(f"gate {g} {verb}: {note or 'by hand'}",
+                          session=self.session_id)
+            if gates:
+                t.links["gates"] = gates
+            else:
+                t.links.pop("gates", None)
+        return self._modify(task_id, change)
+
+    def check_gates(self, *, cheap_only: bool = False, mail_store=None,
+                    task_id: str = "", checker=None) -> list[tuple]:
+        """Evaluate the open gates of this project's open tasks (or of one
+        task) and record each that resolved: removed from the task, the
+        reason logged. A gate that will never resolve is logged once.
+        Returns ``(task_id, gate, Verdict)`` for every gate checked; a
+        read-only checkout only reports."""
+        from claude_hooks.tasks.gates import Checker
+        checker = checker or Checker(mail_store=mail_store,
+                                     root=self.dir.root)
+        results = []
+        for task, tf, _ in self.dir.iter_tasks():
+            if tf.archived or not task.is_open:
+                continue
+            if task_id and task.id != task_id.lower():
+                continue
+            for g in [str(x) for x in task.links.get("gates") or []]:
+                v = checker.check(g, cheap_only=cheap_only)
+                results.append((task.id, g, v))
+                if self.checkout.kind == "read-only":
+                    continue
+                if v.resolved:
+                    self.gate(task.id, "resolve", g, v.why)
+                elif v.failed:
+                    line = f"gate {g} will not open by itself: {v.why}"
+                    if not any(line in ln for ln in task.log_lines[:20]):
+                        self.note(task.id, line)
+        return results
+
     # ─── the graph ───────────────────────────────────────────────────
 
     def graph(self, rows: Optional[list[dict]] = None) -> Graph:
@@ -826,18 +891,20 @@ class TaskService:
                 continue
             refs = g.open_depends(r.get("depends") or [])
             open_deps = [x.id for x in refs]
-            r = dict(r, open_depends=open_deps,
+            gates = [str(x) for x in (r.get("links") or {}).get("gates")
+                     or []]
+            r = dict(r, open_depends=open_deps, open_gates=gates,
                      blocking=len(g.dependents_open(r["id"])))
             unresolved = {x.id: x.reason for x in refs if not x.found}
             if unresolved:
                 r["unresolved"] = unresolved
             r["urgency"] = urgency(r, blocking=r["blocking"],
-                                   blocked=bool(open_deps), now=now)
+                                   blocked=bool(open_deps or gates), now=now)
             if r["status"] == "active":
                 out["active"].append(r)
             elif r["status"] == "waiting":
                 out["waiting"].append(r)
-            elif open_deps:
+            elif open_deps or gates:
                 out["blocked"].append(r)
             else:
                 out["ready"].append(r)

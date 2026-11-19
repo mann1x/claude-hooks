@@ -488,6 +488,25 @@ class AckTests(StoreHarness):
         self.store.read([self.mid], reader_session="mine", alias="me",
                         host="solidpc")
 
+    def test_message_state_for_a_task_mail_gate(self):
+        """ch-28: a task waiting on this mail opens when it is answered —
+        acked with a note, or replied to by its recipient naming #id."""
+        st = self.store.message_state(self.mid)
+        self.assertEqual((st["to_alias"], st["from_alias"]), ("me", "them"))
+        self.assertIsNone(st["read_at"])
+        self.assertIsNone(st["reply_id"])
+        self.assertIsNone(self.store.message_state(self.mid + 999))
+        self.register("them", "solidpc", sid="theirs")
+        self.store.send("them", "unrelated", "no id here", from_alias="me")
+        self.assertIsNone(self.store.message_state(self.mid)["reply_id"])
+        self.store.send("them", f"re #{self.mid}: done", "b", from_alias="me")
+        self.assertIsNotNone(self.store.message_state(self.mid)["reply_id"])
+        self.read_it()
+        self.store.ack(self.mid, "confirmed", session_id="mine",
+                       alias="me", host="solidpc")
+        self.assertEqual(self.store.message_state(self.mid)["ack_body"],
+                         "confirmed")
+
     def test_read_without_an_ack_announces_nothing(self):
         self.read_it()
         self.assertEqual(self.store.pending_receipts(from_alias="them"), [])
