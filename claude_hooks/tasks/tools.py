@@ -61,7 +61,10 @@ def tool_catalog() -> list[dict]:
                 "area": {"type": "string",
                          "description": "dotted area, e.g. R9.gepo"},
                 "tags": _LIST,
-                "depends": {**_LIST, "description": "ids this waits for"},
+                "depends": {**_LIST, "description": (
+                    "ids this waits for, from any project on this host "
+                    "(e.g. op-347); it stays blocked until each is done "
+                    "or cancelled")},
                 "plan": {"type": "string",
                          "description": "path of the plan it belongs to"},
                 "due": {"type": "string", "description": "YYYY-MM-DD"},
@@ -105,7 +108,9 @@ def tool_catalog() -> list[dict]:
         {
             "name": "task-show",
             "description": "The whole task: fields, description, "
-                           "acceptance, log, and where its file is.",
+                           "acceptance, log, where its file is, and its "
+                           "graph across projects (dependencies, "
+                           "dependents, parent / children, related).",
             "inputSchema": {"type": "object", "properties": {"id": _ID},
                             "required": ["id"]},
         },
@@ -153,12 +158,17 @@ def tool_catalog() -> list[dict]:
             "name": "task-link",
             "description": (
                 "Attach something to a task: a commit, file, mail id, "
-                "consultancy, plan, url or another task."),
+                "consultancy, plan, url or another task. Graph links take "
+                "a task id from any project: parent (its epic; one), "
+                "discovered-from, related, caused-by, supersedes (closes "
+                "the replaced task when it is in this project), "
+                "duplicate-of (closes this one). Only depends blocks."),
             "inputSchema": {"type": "object", "properties": {
                 "id": _ID,
                 "kind": {"type": "string", "enum": [
                     "commit", "file", "mail", "consultancy", "plan", "url",
-                    "task"]},
+                    "task", "parent", "discovered-from", "related",
+                    "caused-by", "supersedes", "duplicate-of"]},
                 "value": {"type": "string"},
                 "note": _NOTE,
             }, "required": ["id", "kind", "value"]},
@@ -217,7 +227,15 @@ class TaskTools:
             return self._list(a)
         if name == "task-show":
             task, path = svc.show(_id(a))
-            return f"{path}\n\n{task.to_markdown()}"
+            text = f"{path}\n\n{task.to_markdown()}"
+            try:
+                lines = svc.relations(task.id)
+            except Exception:
+                log.info("tasks: graph view failed", exc_info=True)
+                lines = []
+            if lines:
+                text += "\n## Graph\n" + "\n".join(f"- {ln}" for ln in lines)
+            return text
         if name in ("task-start", "task-done", "task-wait", "task-cancel"):
             status = {"task-start": "active", "task-done": "done",
                       "task-wait": "waiting",
@@ -244,7 +262,11 @@ class TaskTools:
             t = svc.link(_id(a), a.get("kind", ""), a.get("value", ""),
                          a.get("note", ""))
             self._after_write()
-            return f"{t.id}: {t.log_lines[0]}"
+            # A closing link (duplicate-of) logs the close after the link.
+            line = next((ln for ln in t.log_lines[:2] if " linked " in ln),
+                        t.log_lines[0])
+            extra = f"\n{t.log_lines[0]}" if t.log_lines[0] != line else ""
+            return f"{t.id}: {line}{extra}"
         return f"unknown task tool {name}"
 
     def _ready(self, limit: int, area: Optional[str]) -> str:

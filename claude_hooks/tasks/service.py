@@ -25,9 +25,12 @@ from claude_hooks.tasks.files import (
     CONFIG, TASKS_DIR, Checkout, TaskDir, TaskNotFound, checkout_of,
     file_hash, git_main_root,
 )
+from claude_hooks.tasks.graph import (
+    REVERSE_NAMES, TASK_LINK_KINDS, Graph, Ref, describe,
+)
 from claude_hooks.tasks.model import (
-    ACCEPTANCE, CLOSED_STATUSES, DESCRIPTION, OPEN_STATUSES, PRIORITIES,
-    Task, normalise_status, parse_stamp, stamp, utcnow,
+    ACCEPTANCE, CLOSED_STATUSES, DESCRIPTION, PRIORITIES,
+    Task, is_task_id, normalise_status, parse_stamp, split_id, stamp, utcnow,
 )
 from claude_hooks.tasks.store import TaskIndex, embed_text
 
@@ -56,7 +59,7 @@ URGENCY = {
 }
 
 LINK_KINDS = ("commits", "files", "mail", "consultancies", "plans", "urls",
-              "tasks")
+              "tasks") + TASK_LINK_KINDS
 
 #: What a link kind is called in one entry, and every spelling accepted
 #: for it. The tool schema advertises the singular names, so each of
@@ -65,11 +68,22 @@ LINK_KINDS = ("commits", "files", "mail", "consultancies", "plans", "urls",
 _LINK_SINGULAR = {
     "commits": "commit", "files": "file", "mail": "mail",
     "consultancies": "consultancy", "plans": "plan", "urls": "url",
-    "tasks": "task",
+    "tasks": "task", **{k: k for k in TASK_LINK_KINDS},
 }
 _LINK_ALIASES = {**{k: k for k in LINK_KINDS},
                  **{v: k for k, v in _LINK_SINGULAR.items()},
-                 "mails": "mail"}
+                 "mails": "mail",
+                 # graph links (ch-28), every spelling a model reaches for
+                 "epic": "parent", "child-of": "parent",
+                 "discovered": "discovered-from", "found-in": "discovered-from",
+                 "relates-to": "related", "related-to": "related",
+                 "relates": "related", "relate": "related",
+                 "cause": "caused-by", "caused": "caused-by",
+                 "replaces": "supersedes", "supersede": "supersedes",
+                 "duplicate": "duplicate-of", "duplicates": "duplicate-of",
+                 "dup": "duplicate-of"}
+_LINK_ALIASES.update({k.replace("-", "_"): v for k, v in
+                      list(_LINK_ALIASES.items()) if "-" in k})
 
 
 @dataclass
@@ -609,10 +623,38 @@ class TaskService:
         value = str(value).strip()
         if not value:
             raise ValueError("a link needs a value")
+        task_id = task_id.strip().lower()
+        closes = ""            # the task this link closes, if any
+        if kind in TASK_LINK_KINDS:
+            value = value.lower().lstrip("#")
+            if not is_task_id(value):
+                raise ValueError(f"a {kind} link takes a task id, not "
+                                 f"{value!r}")
+            if value == task_id:
+                raise ValueError(f"a task cannot be its own {kind}")
+            g = self.graph()
+            ref = g.ref(value)
+            if not ref.found and not g.index_error:
+                raise ValueError(f"cannot link {kind} {value}: {ref.reason}")
+            if kind == "parent":
+                path = g.cycle_through(task_id, [value], kind="parent")
+                if path:
+                    raise ValueError("that parent would close a loop: "
+                                     + " → ".join(path))
+            if kind == "duplicate-of":
+                closes = task_id
+            elif kind == "supersedes" and g.is_local(value):
+                closes = value
+            if closes:
+                self._refuse_in_mirror("tasks are closed")
 
         def change(t: Task) -> None:
             if kind == "plans" and not t.plan:
                 t.plan = value
+            elif kind == "parent":
+                if t.links.get("parent") == [value]:
+                    return
+                t.links["parent"] = [value]
             else:
                 items = list(t.links.get(kind) or [])
                 if value in items:
@@ -620,21 +662,102 @@ class TaskService:
                 items.append(value)
                 t.links[kind] = items
             t.add_log(f"linked {_LINK_SINGULAR[kind]} {value}"
-                      + (f": {note}" if note
-                                                        else ""),
+                      + (f": {note}" if note else ""),
                       session=self.session_id)
-        return self._modify(task_id, change)
+        task = self._modify(task_id, change)
+        if closes == task_id and task.is_open:
+            task = self.set_status(task_id, "cancelled",
+                                   f"duplicate of {value}")
+        elif closes and closes != task_id:
+            try:
+                old, _ = self.show(closes)
+            except TaskNotFound:
+                old = None
+            if old is not None and old.is_open:
+                self.set_status(closes, "cancelled",
+                                f"superseded by {task_id}")
+        return task
 
     def _check_depends(self, deps: Optional[Iterable[str]], *,
                        self_id: str = "") -> list[str]:
-        out = []
+        """Validate dependency ids: this project's must exist; another
+        project's must resolve through the index (kept, and blocking, when
+        the index cannot be read); none may close a cycle, across
+        projects included."""
+        out, foreign = [], []
+        prefix = self.dir.prefix if self.dir.exists else ""
         for d in _clean_list(deps or ()):
-            d = d.lower()
+            d = d.lower().lstrip("#")
+            if not is_task_id(d):
+                raise ValueError(f"{d!r} is not a task id (e.g. op-347)")
             if d == self_id.lower():
                 raise ValueError("a task cannot depend on itself")
-            if self.dir.exists and self.dir.find(d) is None:
-                raise ValueError(f"no task {d} to depend on")
+            if split_id(d)[0] == prefix:
+                if self.dir.find(d) is None:
+                    raise ValueError(f"no task {d} to depend on")
+            else:
+                foreign.append(d)
             out.append(d)
+        if not foreign and not (self_id and out):
+            return out
+        g = self.graph()
+        for d in foreign:
+            ref = g.ref(d)
+            if not ref.found and not g.index_error:
+                raise ValueError(f"cannot depend on {d}: {ref.reason}")
+            if not ref.found:
+                log.warning("tasks: %s kept unresolved (%s); it blocks until "
+                            "it resolves", d, ref.reason)
+        if self_id and out:
+            path = g.cycle_through(self_id.lower(), out)
+            if path:
+                raise ValueError("that would close a cycle: "
+                                 + " → ".join(path))
+        return out
+
+    # ─── the graph ───────────────────────────────────────────────────
+
+    def graph(self, rows: Optional[list[dict]] = None) -> Graph:
+        """This project from its files (or its own rows), every other
+        project from the index. Reading the index is open to any
+        checkout; only writing it is not."""
+        rows = self.snapshot() if rows is None else rows
+        prefix = self.dir.prefix if self.dir.exists else ""
+        return Graph(self.project, prefix, rows, self.index)
+
+    def relations(self, task_id: str,
+                  graph: Optional[Graph] = None) -> list[str]:
+        """One line per edge kind, both directions, every project:
+        ``depends: op-2 (opencoti, active)``, ``children: ch-3 (pending)``."""
+        task, _ = self.show(task_id)
+        g = graph or self.graph()
+        here = self.project
+
+        def refs(ids):
+            return ", ".join(describe(g.ref(i), here=here) for i in ids)
+
+        def nodes(ns):
+            return ", ".join(describe(Ref(n.id, n.project, n.status,
+                                          n.title), here=here) for n in ns)
+        out = []
+        if task.depends:
+            out.append(f"depends: {refs(task.depends)}")
+        for kind in TASK_LINK_KINDS:
+            ids = [str(i).lower() for i in task.links.get(kind) or []]
+            back = g.reverse(task.id, kind)
+            if kind == "related":
+                back = [n for n in back if n.id not in ids]
+                parts = [p for p in (refs(ids), nodes(back)) if p]
+                if parts:
+                    out.append("related: " + ", ".join(parts))
+                continue
+            if ids:
+                out.append(f"{kind}: {refs(ids)}")
+            if back:
+                out.append(f"{REVERSE_NAMES[kind]}: {nodes(back)}")
+        dependents = g.reverse(task.id)
+        if dependents:
+            out.append(f"{REVERSE_NAMES['depends']}: {nodes(dependents)}")
         return out
 
     # ─── reads ───────────────────────────────────────────────────────
@@ -660,6 +783,7 @@ class TaskService:
                 "status": task.status, "priority": task.priority,
                 "area": task.area, "tags": task.tags,
                 "depends": task.depends, "plan": task.plan, "due": task.due,
+                "links": task.links,
                 "created": task.created, "updated": task.updated,
                 "archived": tf.archived,
                 "log": "\n".join(task.log_lines[:3]),
@@ -671,12 +795,7 @@ class TaskService:
         """Open tasks split into active / ready / waiting / blocked, each
         ordered by urgency, plus recently closed ones."""
         rows = self.snapshot() if rows is None else rows
-        status_of = {r["id"]: r["status"] for r in rows}
-        blocking: dict[str, int] = {}
-        for r in rows:
-            if r["status"] in OPEN_STATUSES:
-                for d in r.get("depends") or []:
-                    blocking[d] = blocking.get(d, 0) + 1
+        g = self.graph(rows)
         out: dict = {"active": [], "ready": [], "waiting": [], "blocked": [],
                      "closed": []}
         now = utcnow()
@@ -684,10 +803,14 @@ class TaskService:
             if r["status"] in CLOSED_STATUSES:
                 out["closed"].append(r)
                 continue
-            open_deps = [d for d in r.get("depends") or []
-                         if status_of.get(d) in OPEN_STATUSES]
-            r = dict(r, open_depends=open_deps)
-            r["urgency"] = urgency(r, blocking=blocking.get(r["id"], 0),
+            refs = g.open_depends(r.get("depends") or [])
+            open_deps = [x.id for x in refs]
+            r = dict(r, open_depends=open_deps,
+                     blocking=len(g.dependents_open(r["id"])))
+            unresolved = {x.id: x.reason for x in refs if not x.found}
+            if unresolved:
+                r["unresolved"] = unresolved
+            r["urgency"] = urgency(r, blocking=r["blocking"],
                                    blocked=bool(open_deps), now=now)
             if r["status"] == "active":
                 out["active"].append(r)

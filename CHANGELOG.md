@@ -17,6 +17,17 @@ release with the auto-generated source archive
 ## [Unreleased]
 
 ### Added
+- **Task dependencies across projects.** `depends` takes any project's id
+  on the host (`op-347` from a `bm-` task), resolved through the shared
+  index: an unknown project or task is refused while the index answers,
+  and an id that cannot be resolved stays blocking — never done. Cycles
+  are refused across projects, with the path. A task another project
+  waits for ranks higher in its own `task-ready`. Typed links join the
+  graph: `parent` (epic), `discovered-from`, `related`, `caused-by`,
+  `supersedes` (closes the replaced task when local) and `duplicate-of`
+  (closes this one). A task still writes only its own project's files;
+  `task-show` computes the other side (dependents, children, related…)
+  under `## Graph` (ch-28 phase 1).
 - **One checkout indexes a project's tasks.** Index rows are keyed on the
   project name, which every checkout of a repository shares. A linked git
   worktree now never writes them and never creates, finishes or cancels a

@@ -94,6 +94,42 @@ checkout had already given out.
 - `claude-hooks-tasks where` prints the checkout's kind, which folder it
   reads, who indexes the project and whether this checkout writes.
 
+## The graph: dependencies and links across projects
+
+Every project on a host indexes into the same store, and prefixes are
+unique there, so a task id names one task everywhere: `op-347` is
+opencoti's task 347 from any project.
+
+- **`depends` takes any project's ids.** This project's must exist.
+  Another project's must resolve through the index: an unknown prefix or
+  an unknown task is refused (typo guard). When the index cannot be read
+  the id is kept and blocks until it resolves.
+- **Unresolved is blocking, never done.** A dependency counts as met only
+  when it resolves to a `done` or `cancelled` task; `task-ready` marks an
+  unresolved one with `?` (`after op-347?`).
+- **Cycles are refused** on every write, across projects:
+  `that would close a cycle: op-1 → ch-1 → op-1`.
+- **Blocking counts reach across projects**: a task another project waits
+  for ranks higher in its own project's `task-ready`.
+- **Typed links** (`task-link <id> <kind> <task id>`), stored in `links`;
+  only `depends` blocks:
+
+  | kind | meaning | also |
+  |---|---|---|
+  | `parent` | the epic it belongs to | one value; a loop is refused |
+  | `discovered-from` | found while working on that task | |
+  | `related` | see also | shown from both sides |
+  | `caused-by` | root cause | |
+  | `supersedes` | replaces that task | closes it when it is in this project |
+  | `duplicate-of` | same as that task | closes this one |
+
+- **A task only writes its own project's files.** A link into another
+  project is stored on our side; `task-show` computes the other side
+  (dependents, children, related, led to, caused, superseded by,
+  duplicated by) from the index and lists it under `## Graph`.
+- Cross-project answers are as fresh as the other project's last
+  reconcile, which every task tool call and session start runs.
+
 ## The task file
 
 ```markdown
@@ -142,7 +178,7 @@ What and why, kept current.
 | `task-start` / `task-done` / `task-wait` / `task-cancel` | status change, with an optional log note |
 | `task-note` | append a log line |
 | `task-update` | change fields; `check` / `uncheck` tick acceptance items by number |
-| `task-link` | attach a commit, file, mail, consultancy, plan, url or task |
+| `task-link` | attach a commit, file, mail, consultancy, plan, url or task; or a graph link to any project's task (`parent`, `discovered-from`, `related`, `caused-by`, `supersedes`, `duplicate-of`) |
 
 Writes return immediately; a background thread embeds what changed.
 
@@ -169,6 +205,7 @@ claude-hooks-tasks add "title" -p H --area R9 --depends bm-41 --accept "a" "b"
 claude-hooks-tasks start|done|wait|cancel bm-42 -m "note"
 claude-hooks-tasks note bm-42 "text"
 claude-hooks-tasks link bm-42 commit 2f01f52
+claude-hooks-tasks link bm-42 parent bm-40     # graph links take any project's id
 claude-hooks-tasks init [--prefix xx]
 claude-hooks-tasks reindex                     # files → index, then embed what is missing
 claude-hooks-tasks where                       # checkout kind, who indexes the project

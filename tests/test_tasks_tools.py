@@ -111,6 +111,10 @@ class ToolTests(_Base):
         spec = next(t for t in tool_catalog() if t["name"] == "task-link")
         kinds = spec["inputSchema"]["properties"]["kind"]["enum"]
         values = {"task": "bm-2", "mail": "939"}
+        # Graph links (ch-28) take a task id; supersedes / duplicate-of
+        # also close one, which must not hide the link line.
+        from claude_hooks.tasks.graph import TASK_LINK_KINDS
+        values.update({k: "bm-2" for k in TASK_LINK_KINDS})
         for kind in kinds:
             out = self.call("task-link", id="bm-1", kind=kind,
                             value=values.get(kind, f"v-{kind}"))

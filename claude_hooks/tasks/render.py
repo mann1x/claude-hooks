@@ -37,7 +37,9 @@ def row_line(r: dict, *, project: bool = False,
     area = f"{r['area']} · " if r.get("area") else ""
     tail = []
     if r.get("open_depends"):
-        tail.append("after " + ", ".join(r["open_depends"]))
+        unresolved = r.get("unresolved") or {}
+        tail.append("after " + ", ".join(
+            d + ("?" if d in unresolved else "") for d in r["open_depends"]))
     when = ago(r.get("updated") or "", now)
     if when:
         tail.append(when)

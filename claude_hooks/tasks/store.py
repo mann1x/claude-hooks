@@ -170,6 +170,16 @@ class TaskIndex:
             return int(r[0]) if r and r[0] is not None else 0
         return self._run(fn)
 
+    def edges(self) -> list[dict]:
+        """Every row's graph fields, every project: the cross-project
+        graph (``claude_hooks.tasks.graph``) is built from this."""
+        cols = ("project", "id", "status", "title", "depends", "links")
+
+        def fn(cur):
+            cur.execute(f"SELECT {', '.join(cols)} FROM tasks")
+            return [self._decode(dict(zip(cols, r))) for r in cur.fetchall()]
+        return self._run(fn)
+
     def prefixes_taken(self, *, except_project: str = "") -> set[str]:
         return {p["prefix"] for p in self.projects()
                 if p["project"] != except_project}
