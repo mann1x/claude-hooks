@@ -130,6 +130,21 @@ opencoti's task 347 from any project.
 - Cross-project answers are as fresh as the other project's last
   reconcile, which every task tool call and session start runs.
 
+### Closing a task tells the projects it unblocks
+
+`task-done` / `task-cancel` end with `Ready now: …`: every open task, in
+any project, whose last open dependency was the one closed (worked out
+from the graph before the close). For each other project the closing
+session mails the session working there — the live registration whose
+working directory is that project's indexed checkout on its host, the
+most recently seen first — and the send's reply carries the doorbell
+line, so an idle terminal hears of it now. A cancelled dependency is
+said to be cancelled, not done. No session registered there: the reply
+says so, and the project sees the task ready in its own `task-ready`.
+Nothing is written into the other project. The mail goes out from the
+MCP tools (the memory servers hand the task tools the session's mailbox);
+the CLI only lists. `hooks.tasks.unblock_mail: false` turns the mail off.
+
 ## The task file
 
 ```markdown

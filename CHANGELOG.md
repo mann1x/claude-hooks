@@ -17,6 +17,13 @@ release with the auto-generated source archive
 ## [Unreleased]
 
 ### Added
+- **Closing a task tells the projects it unblocks.** `task-done` /
+  `task-cancel` list every task, in any project, whose last open
+  dependency it was, and mail the session working in each other project
+  (found by its working directory in the mailbox registry), with the
+  doorbell line so an idle terminal hears now. A cancelled dependency is
+  flagged as not done. `hooks.tasks.unblock_mail: false` turns the mail
+  off (ch-28 phase 2).
 - **Task dependencies across projects.** `depends` takes any project's id
   on the host (`op-347` from a `bm-` task), resolved through the shared
   index: an unknown project or task is refused while the index answers,

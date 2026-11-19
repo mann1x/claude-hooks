@@ -517,6 +517,10 @@ class McpServer:
                 from claude_hooks.tasks.tools import tools_for_provider
                 self._task_tools = (tools_for_provider(self.provider)
                                     if tasks_enabled() else None)
+                if self._task_tools is not None:
+                    # Closing a task mails the projects it unblocks, as
+                    # this session (ch-28 phase 2).
+                    self._task_tools.mailer_fn = self._mailbox
             except Exception:
                 log.warning("tasks unavailable", exc_info=True)
                 self._task_tools = None

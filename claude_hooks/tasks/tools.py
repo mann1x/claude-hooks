@@ -187,6 +187,9 @@ class TaskTools:
         self._background = background_embed
         self._embedding = threading.Lock()
         self.session_fn: Optional[Callable[[], str]] = None
+        #: Returns the session's mailbox tools (or None); set by the memory
+        #: servers so a close can mail the projects it unblocks.
+        self.mailer_fn: Optional[Callable[[], Any]] = None
 
     @property
     def svc(self):
@@ -242,7 +245,10 @@ class TaskTools:
                       "task-cancel": "cancelled"}[name]
             t = svc.set_status(_id(a), status, a.get("note", ""))
             self._after_write()
-            return row_line(_row(t))
+            out = row_line(_row(t))
+            if status in CLOSED_STATUSES and svc.last_unblocked:
+                out += "\n" + self._unblocked(t, status, svc.last_unblocked)
+            return out
         if name == "task-note":
             t = svc.note(_id(a), a.get("text", ""))
             self._after_write()
@@ -268,6 +274,30 @@ class TaskTools:
             extra = f"\n{t.log_lines[0]}" if t.log_lines[0] != line else ""
             return f"{t.id}: {line}{extra}"
         return f"unknown task tool {name}"
+
+    def _unblocked(self, t, status: str, nodes: list) -> str:
+        """What this close made ready, and the mail to the other projects'
+        sessions (ch-28 phase 2)."""
+        svc = self.svc
+        here = svc.project
+        items = ", ".join(n["id"] + (f" ({n['project']})"
+                                     if n["project"] != here else "")
+                          for n in nodes)
+        lines = [f"Ready now: {items}"]
+        if status != "done":
+            lines.append(f"({t.id} was {status}, not done: check that what "
+                         "waited for it still makes sense.)")
+        if any(n["project"] != here for n in nodes) and _unblock_mail_on():
+            mailer = self.mailer_fn() if self.mailer_fn else None
+            if mailer is None or svc.index is None:
+                lines.append("(no mailbox here: the other projects will see "
+                             "it in task-ready)")
+            else:
+                from claude_hooks.tasks.notify import mail_unblocked
+                lines += mail_unblocked(
+                    mailer, svc.index, closed_id=t.id, closed_title=t.title,
+                    closed_project=here, status=status, unblocked=nodes)
+        return "\n".join(lines)
 
     def _ready(self, limit: int, area: Optional[str]) -> str:
         svc = self.svc
@@ -336,6 +366,15 @@ class TaskTools:
             finally:
                 self._embedding.release()
         threading.Thread(target=run, name="task-embed", daemon=True).start()
+
+
+def _unblock_mail_on() -> bool:
+    try:
+        from claude_hooks.config import load_config
+        from claude_hooks.tasks.hook import settings
+        return bool(settings(load_config()).get("unblock_mail", True))
+    except Exception:
+        return True
 
 
 def _id(a: dict) -> str:

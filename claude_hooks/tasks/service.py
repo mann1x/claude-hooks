@@ -29,7 +29,7 @@ from claude_hooks.tasks.graph import (
     REVERSE_NAMES, TASK_LINK_KINDS, Graph, Ref, describe,
 )
 from claude_hooks.tasks.model import (
-    ACCEPTANCE, CLOSED_STATUSES, DESCRIPTION, PRIORITIES,
+    ACCEPTANCE, CLOSED_STATUSES, DESCRIPTION, OPEN_STATUSES, PRIORITIES,
     Task, is_task_id, normalise_status, parse_stamp, split_id, stamp, utcnow,
 )
 from claude_hooks.tasks.store import TaskIndex, embed_text
@@ -167,6 +167,8 @@ class TaskService:
         #: Regenerate TASKS.md after each write. Bulk callers (the
         #: importer) turn it off and write the board once at the end.
         self.board_on_write = True
+        #: What the last close made ready, every project (``set_status``).
+        self.last_unblocked: list[dict] = []
         # A read-only worktree (a release snapshot) shows the live list of
         # its main checkout; it writes nothing either way. A worker keeps
         # its own folder: its task's file travels on its branch.
@@ -520,9 +522,14 @@ class TaskService:
             log.warning("tasks: TASKS.md not regenerated", exc_info=True)
 
     def set_status(self, task_id: str, status: str, note: str = "") -> Task:
+        """Change a task's status. Closing one records, in
+        :attr:`last_unblocked`, the open tasks in every project whose last
+        open dependency it was (read before the close)."""
         status = normalise_status(status)
+        self.last_unblocked = []
         if status in CLOSED_STATUSES:
             self._refuse_in_mirror("tasks are closed")
+            self.last_unblocked = self._would_unblock(task_id)
 
         def change(t: Task) -> None:
             if t.status == status and not note:
@@ -533,6 +540,20 @@ class TaskService:
             t.add_log(f"{msg}: {note}" if note else msg,
                       session=self.session_id)
         return self._modify(task_id, change)
+
+    def _would_unblock(self, task_id: str) -> list[dict]:
+        tid = task_id.strip().lower()
+        try:
+            g = self.graph()
+            cur = g.nodes.get(tid)
+            if cur is not None and cur.status not in OPEN_STATUSES:
+                return []               # already closed: unblocks nothing new
+            return [{"id": n.id, "project": n.project, "title": n.title,
+                     "status": n.status} for n in g.unblocked_by(tid)]
+        except Exception:
+            log.info("tasks: could not work out what %s unblocks", tid,
+                     exc_info=True)
+            return []
 
     def note(self, task_id: str, text: str) -> Task:
         if not str(text or "").strip():

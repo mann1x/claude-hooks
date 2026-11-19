@@ -47,6 +47,8 @@ DEFAULTS = {
     # Linked worktrees, by directory name, whose task tools change
     # nothing even on a branch (a detached one never does).
     "read_only_worktrees": [],
+    # Closing a task mails the session of each other project it unblocks.
+    "unblock_mail": True,
 }
 
 _MENTION = re.compile(r"(?<![\w-])([a-z][a-z0-9]{0,7})-(\d{1,6})(?![\w-])",
