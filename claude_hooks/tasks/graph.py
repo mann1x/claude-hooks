@@ -213,3 +213,128 @@ def describe(ref: Ref, *, here: str) -> str:
         return f"{ref.id} (unresolved: {ref.reason})"
     where = f"{ref.project}, " if ref.project and ref.project != here else ""
     return f"{ref.id} ({where}{ref.status})"
+
+
+# ─── views (phase 4) ─────────────────────────────────────────────────
+
+
+def walk(graph: "Graph", start: str, direction: str = "both") -> set[str]:
+    """Ids reachable from ``start`` along ``depends``: ``down`` = what it
+    waits for, ``up`` = what waits for it, ``both``."""
+    start = start.lower()
+    out = {start}
+    if direction in ("down", "both"):
+        stack = [start]
+        while stack:
+            for d in graph._edges(stack.pop(), "depends"):
+                if d not in out:
+                    out.add(d)
+                    stack.append(d)
+    if direction in ("up", "both"):
+        stack = [start]
+        seen = {start}
+        while stack:
+            for n in graph.reverse(stack.pop()):
+                if n.id not in seen:
+                    seen.add(n.id)
+                    out.add(n.id)
+                    stack.append(n.id)
+    return out
+
+
+def layers(graph: "Graph", ids: Iterable[str], *,
+           open_only: bool = True) -> list[list[str]]:
+    """Execution order: layer 0 can start now (no open dependency inside
+    the set), layer k waits only on lower layers; one layer can run in
+    parallel. A dependency outside the set that is still open (or does
+    not resolve) is not drawn but keeps its dependent out of layer 0, so
+    a layer may be empty: the index is the layer number."""
+    ids = [i.lower() for i in ids]
+    if open_only:
+        ids = [i for i in ids if graph.ref(i).open]
+    keep = set(ids)
+    level: dict[str, int] = {}
+
+    def depth(i: str, trail: frozenset) -> int:
+        if i in level:
+            return level[i]
+        if i in trail:                  # a cycle written by hand
+            return 0
+        deps = [d for d in graph._edges(i, "depends") if graph.ref(d).open]
+        inside = [d for d in deps if d in keep]
+        outside = len(deps) - len(inside)
+        lv = 0
+        for d in inside:
+            lv = max(lv, depth(d, trail | {i}) + 1)
+        if outside and lv == 0:
+            lv = 1                      # waits on something not drawn
+        level[i] = lv
+        return lv
+    for i in ids:
+        depth(i, frozenset())
+    if not level:
+        return []
+    out: list[list[str]] = [[] for _ in range(max(level.values()) + 1)]
+    for i in sorted(level, key=lambda x: (graph.ref(x).project, x)):
+        out[level[i]].append(i)
+    return out
+
+
+def text_view(graph: "Graph", ids: Iterable[str], *, here: str,
+              open_only: bool = True) -> str:
+    rows = layers(graph, ids, open_only=open_only)
+    if not any(rows):
+        return "Nothing open in that graph."
+    out = []
+    for k, lv in enumerate(rows):
+        if not lv:
+            continue
+        head = ("Layer 0 — can start now" if k == 0
+                else f"Layer {k} — after the layers above")
+        out.append(f"{head} ({len(lv)}):")
+        for i in lv:
+            r = graph.ref(i)
+            n = graph.nodes.get(i)
+            deps = [d for d in (n.depends if n else []) if graph.ref(d).open]
+            where = f" ({r.project})" if r.project and r.project != here else ""
+            line = (f"  {i}{where} [{r.status or '?'}] · "
+                    f"{r.title or r.reason}")
+            if deps:
+                line += " ← " + ", ".join(deps)
+            if n is not None and n.gates:
+                line += " · waits " + ", ".join(n.gates)
+            out.append(line)
+    return "\n".join(out)
+
+
+def mermaid(graph: "Graph", ids: Iterable[str], *,
+            open_only: bool = True) -> str:
+    """A Mermaid flowchart: an arrow from each dependency to what waits
+    for it, nodes grouped by project."""
+    keep = [i.lower() for i in ids]
+    if open_only:
+        keep = [i for i in keep if graph.ref(i).open]
+    keep_set = set(keep)
+
+    def nid(i: str) -> str:
+        return i.replace("-", "_")
+
+    def label(i: str) -> str:
+        r = graph.ref(i)
+        t = (r.title or r.reason).replace('"', "'")
+        if len(t) > 48:
+            t = t[:47] + "…"
+        return f'{nid(i)}["{i} · {t}<br/>{r.status or "?"}"]'
+    by_project: dict[str, list[str]] = {}
+    for i in keep:
+        by_project.setdefault(graph.ref(i).project or "?", []).append(i)
+    lines = ["flowchart TD"]
+    for project, members in sorted(by_project.items()):
+        lines.append(f"  subgraph {project.replace(' ', '_')}")
+        lines += [f"    {label(i)}" for i in sorted(members)]
+        lines.append("  end")
+    for i in keep:
+        for d in graph._edges(i, "depends"):
+            if d in keep_set:
+                lines.append(f"  {nid(d)} --> {nid(i)}")
+    return "\n".join(lines)

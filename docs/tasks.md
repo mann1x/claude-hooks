@@ -153,6 +153,32 @@ run, cancelled mail) is logged once and stays, for a person to resolve or
 remove. Gates live in the task's `links` under `gates`, so older code
 keeps them. A read-only checkout reports but records nothing.
 
+### Views: layers, blocked, Mermaid
+
+`task-graph` (CLI `claude-hooks-tasks graph [id] [--up|--down] [--all]
+[--mermaid]`) prints the graph in layers: layer 0 can start now, a layer
+waits only on the ones above it, and the tasks of one layer can run in
+parallel. Without an id it shows this project's open work with what it
+waits for in other projects; with one, what that task waits for
+(`down`), what waits for it (`up`) or both; `all` takes every project on
+the host. A dependency left out of the drawing that is still open keeps
+its dependent out of layer 0. `format: mermaid` draws a flowchart grouped
+by project. `view: blocked` (CLI `claude-hooks-tasks blocked`) lists every
+blocked task with each dependency and gate that holds it.
+
+### Claims and defer
+
+- `task-start` from a session claims the task (`claimed_by: alias@host`
+  in its file). Another session starting it is refused while the holder's
+  session is live in the mailbox registry; `force: true` takes it over
+  (logged). Closing clears the claim. The CLI starts without claiming.
+- `task-update defer=YYYY-MM-DD` hides a task, and every task whose
+  `parent` it is, from `task-ready` until the date (a `Deferred` section);
+  an empty value clears it. An active task is never deferred.
+- `claimed_by` and `defer` ride the index row inside its `links` JSON
+  (`_claimed_by`, `_defer`) rather than as new columns: other hosts' older
+  code writes that table with a fixed column list.
+
 ### Closing a task tells the projects it unblocks
 
 `task-done` / `task-cancel` end with `Ready now: …`: every open task, in
@@ -216,6 +242,7 @@ What and why, kept current.
 | `task-start` / `task-done` / `task-wait` / `task-cancel` | status change, with an optional log note |
 | `task-note` | append a log line |
 | `task-update` | change fields; `check` / `uncheck` tick acceptance items by number |
+| `task-graph` | layers of the dependency graph (one task up / down, this project, or all), Mermaid, or every blocked task with its blockers |
 | `task-gate` | add / resolve / remove a gate, or check them (mail, human, timer, commit, gh-pr, gh-run) |
 | `task-link` | attach a commit, file, mail, consultancy, plan, url or task; or a graph link to any project's task (`parent`, `discovered-from`, `related`, `caused-by`, `supersedes`, `duplicate-of`) |
 

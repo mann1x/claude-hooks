@@ -37,6 +37,21 @@ _EMBED_MAX_CHARS = 800
 _EMBED_DESC_CHARS = 500
 
 
+#: Task fields the index carries inside the ``links`` JSON as ``_<name>``
+#: rather than as columns (ch-28 phase 4): a column would need DDL on a
+#: table that other hosts' older code writes with a fixed column list.
+_ROW_ONLY_KEYS = ("claimed_by", "defer")
+
+
+def _links_for_row(task: Task) -> dict:
+    links = dict(task.links)
+    for key in _ROW_ONLY_KEYS:
+        v = getattr(task, key, "")
+        if v:
+            links[f"_{key}"] = v
+    return links
+
+
 def embed_text(task: Task) -> str:
     parts = [task.title]
     if task.area:
@@ -122,6 +137,11 @@ class TaskIndex:
                     row[k] = json.loads(row[k])
                 except ValueError:
                     row[k] = [] if k != "links" else {}
+        links = row.get("links")
+        if isinstance(links, dict):
+            for key in _ROW_ONLY_KEYS:
+                v = links.pop(f"_{key}", "")
+                row.setdefault(key, v)
         if "archived" in row:
             row["archived"] = bool(row["archived"])
         return row
@@ -194,7 +214,8 @@ class TaskIndex:
             "priority": task.priority, "area": task.area,
             "tags": json.dumps(task.tags), "depends": json.dumps(task.depends),
             "plan": task.plan, "due": task.due,
-            "links": json.dumps(task.links), "created": task.created,
+            "links": json.dumps(_links_for_row(task)),
+            "created": task.created,
             "updated": task.updated, "sessions": json.dumps(task.sessions),
             "description": task.description, "acceptance": task.acceptance,
             "log": "\n".join(task.log_lines), "body": task.to_markdown(),

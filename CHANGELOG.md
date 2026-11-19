@@ -17,6 +17,14 @@ release with the auto-generated source archive
 ## [Unreleased]
 
 ### Added
+- **Task graph views, claims and defer.** `task-graph` (CLI
+  `claude-hooks-tasks graph|blocked`) prints the dependency graph in
+  layers — layer 0 can start now, one layer can run in parallel — for a
+  task (up / down), this project or every project, as text or Mermaid,
+  and lists every blocked task with what holds it. `task-start` claims a
+  task for the session (`claimed_by`) and refuses one another live
+  session holds unless `force`. `defer` hides a task and its children
+  from `task-ready` until a date (ch-28 phase 4).
 - **Gates: tasks that wait on something outside the task list.**
   `task-gate` (CLI `claude-hooks-tasks gate|gates`) makes a task wait on
   `mail:<id>` (answered: an ack note or a reply naming the id),

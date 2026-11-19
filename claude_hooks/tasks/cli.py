@@ -12,6 +12,8 @@ session calls produce the same files.
     claude-hooks-tasks note bm-42 "text"
     claude-hooks-tasks gate bm-42 add mail:2331   # waits until answered
     claude-hooks-tasks gates            # check every open gate, GitHub too
+    claude-hooks-tasks graph [bm-42] [--up|--down] [--all] [--mermaid]
+    claude-hooks-tasks blocked          # what blocks each blocked task
     claude-hooks-tasks init [--prefix bm]
     claude-hooks-tasks reindex          # reconcile files → index, embed
     claude-hooks-tasks where            # this checkout, and who indexes it
@@ -126,6 +128,15 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     p = sub.add_parser("gates", help="check every open gate (GitHub too)")
 
+    p = sub.add_parser("graph", help="dependency layers across projects")
+    p.add_argument("id", nargs="?")
+    p.add_argument("--up", action="store_true", help="what waits for it")
+    p.add_argument("--down", action="store_true", help="what it waits for")
+    p.add_argument("--all", action="store_true", help="every project")
+    p.add_argument("--mermaid", action="store_true")
+
+    sub.add_parser("blocked", help="every blocked task and what blocks it")
+
     p = sub.add_parser("link", help="attach a commit/file/mail/plan/…")
     p.add_argument("id")
     p.add_argument("kind")
@@ -156,7 +167,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     cmd = args.cmd
 
     if cmd in ("ready", "list", "show", "add", "start", "done", "wait",
-               "cancel", "note", "link", "gate", "gates"):
+               "cancel", "note", "link", "gate", "gates", "graph",
+               "blocked"):
         a: dict = {}
         name = f"task-{cmd}"
         if cmd == "ready":
@@ -189,6 +201,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif cmd == "gates":
             name = "task-gate"
             a = {"action": "check"}
+        elif cmd in ("graph", "blocked"):
+            name = "task-graph"
+            a = {"view": "blocked"} if cmd == "blocked" else {
+                "id": args.id, "all": args.all,
+                "format": "mermaid" if args.mermaid else "text",
+                "direction": ("up" if args.up and not args.down else
+                              "down" if args.down and not args.up
+                              else "both")}
         out = _tools(args).call(name, a)
         print(out)
         return 1 if out.startswith(("Not done", "no task")) else 0

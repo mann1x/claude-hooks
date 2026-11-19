@@ -26,7 +26,7 @@ log = logging.getLogger("claude_hooks.tasks.tools")
 TOOL_NAMES = (
     "task-create", "task-ready", "task-list", "task-show", "task-start",
     "task-done", "task-wait", "task-cancel", "task-note", "task-update",
-    "task-link", "task-gate",
+    "task-link", "task-graph", "task-gate",
 )
 
 _ID = {"type": "string", "description": "task id, e.g. bm-42"}
@@ -115,10 +115,18 @@ def tool_catalog() -> list[dict]:
                             "required": ["id"]},
         },
     ]
+    status_tool["task-start"] += (
+        " Claims it for this session; a task another live session holds is "
+        "refused unless force is true.")
     for name, desc in status_tool.items():
+        props = {"id": _ID, "note": _NOTE}
+        if name == "task-start":
+            props["force"] = {"type": "boolean", "default": False,
+                              "description": "take over another live "
+                                             "session's claim"}
         tools.append({"name": name, "description": desc,
-                      "inputSchema": {"type": "object", "properties": {
-                          "id": _ID, "note": _NOTE}, "required": ["id"]}})
+                      "inputSchema": {"type": "object", "properties": props,
+                                      "required": ["id"]}})
     tools += [
         {
             "name": "task-note",
@@ -145,6 +153,9 @@ def tool_catalog() -> list[dict]:
                 "add_depends": _LIST, "remove_depends": _LIST,
                 "plan": {"type": "string"},
                 "due": {"type": "string"},
+                "defer": {"type": "string", "description": (
+                    "YYYY-MM-DD: hide it (and its children) from "
+                    "task-ready until then; empty clears")},
                 "description": {"type": "string",
                                 "description": "replaces the description"},
                 "acceptance": {**_LIST,
@@ -172,6 +183,28 @@ def tool_catalog() -> list[dict]:
                 "value": {"type": "string"},
                 "note": _NOTE,
             }, "required": ["id", "kind", "value"]},
+        },
+        {
+            "name": "task-graph",
+            "description": (
+                "The dependency graph across projects, in layers: layer 0 "
+                "can start now, tasks in one layer can run in parallel. "
+                "With id: what it waits for (down), what waits for it (up) "
+                "or both; without: this project's open work (all: every "
+                "project on this host). format mermaid draws it. view "
+                "blocked lists every blocked task with what blocks it "
+                "(dependencies and gates)."),
+            "inputSchema": {"type": "object", "properties": {
+                "id": _ID,
+                "direction": {"type": "string",
+                              "enum": ["both", "down", "up"],
+                              "default": "both"},
+                "all": {"type": "boolean", "default": False},
+                "format": {"type": "string", "enum": ["text", "mermaid"],
+                           "default": "text"},
+                "view": {"type": "string", "enum": ["graph", "blocked"],
+                         "default": "graph"},
+            }},
         },
         {
             "name": "task-gate",
@@ -260,6 +293,12 @@ class TaskTools:
             if lines:
                 text += "\n## Graph\n" + "\n".join(f"- {ln}" for ln in lines)
             return text
+        if name == "task-start":
+            me = self._me()
+            if me:
+                return self._claim(_id(a), me, a)
+        if name == "task-graph":
+            return self._graph(a)
         if name in ("task-start", "task-done", "task-wait", "task-cancel"):
             status = {"task-start": "active", "task-done": "done",
                       "task-wait": "waiting",
@@ -276,8 +315,8 @@ class TaskTools:
             return f"noted on {t.id}: {t.log_lines[0]}"
         if name == "task-update":
             fields = {k: a[k] for k in (
-                "title", "priority", "area", "plan", "due", "description",
-                "acceptance") if k in a and a[k] is not None}
+                "title", "priority", "area", "plan", "due", "defer",
+                "description", "acceptance") if k in a and a[k] is not None}
             for k in ("add_tags", "remove_tags", "add_depends",
                       "remove_depends", "check", "uncheck"):
                 if a.get(k):
@@ -297,6 +336,81 @@ class TaskTools:
             extra = f"\n{t.log_lines[0]}" if t.log_lines[0] != line else ""
             return f"{t.id}: {line}{extra}"
         return f"unknown task tool {name}"
+
+    # ─── claims (phase 4) ────────────────────────────────────────────
+
+    def _me(self) -> str:
+        """``alias@host`` of this session, when the server gave us its
+        mailbox; the CLI has none and starts tasks without claiming."""
+        mailer = self.mailer_fn() if self.mailer_fn else None
+        alias = getattr(mailer, "alias", None)
+        host = getattr(mailer, "host", None)
+        return f"{alias}@{host}" if alias and host else ""
+
+    def _holder_live(self, owner: str) -> bool:
+        alias, _, host = owner.partition("@")
+        mailer = self.mailer_fn() if self.mailer_fn else None
+        store = getattr(mailer, "store", None)
+        if store is None:
+            return False
+        try:
+            return any(s.host == host for s in store.sessions(alias=alias))
+        except Exception:
+            log.info("tasks: claim liveness unknown", exc_info=True)
+            return False
+
+    def _claim(self, task_id: str, me: str, a: dict) -> str:
+        svc = self.svc
+        task, _ = svc.show(task_id)
+        owner = task.claimed_by
+        if (owner and owner != me and not a.get("force")
+                and task.is_open and self._holder_live(owner)):
+            return (f"Not done: {task_id} is claimed by {owner}, a live "
+                    "session. Ask it (mailbox-send), or task-start with "
+                    "force: true to take it over.")
+        if not task.is_open:
+            svc.set_status(task_id, "active", a.get("note", ""))
+        t = svc.claim(task_id, me, a.get("note", ""))
+        self._after_write()
+        return row_line(_row(t))
+
+    # ─── views (phase 4) ─────────────────────────────────────────────
+
+    def _graph(self, a: dict) -> str:
+        from claude_hooks.tasks.graph import mermaid, text_view, walk
+        svc = self.svc
+        g = svc.graph()
+        if str(a.get("view") or "graph") == "blocked":
+            return self._blocked(g)
+        if a.get("id"):
+            ids = walk(g, _id(a), str(a.get("direction") or "both"))
+        elif a.get("all"):
+            ids = [i for i, n in g.nodes.items() if g.ref(i).open]
+        else:
+            seeds = [i for i, n in g.nodes.items()
+                     if n.project == svc.project and g.ref(i).open]
+            ids = set()
+            for s in seeds:
+                ids |= walk(g, s, "down")
+        if str(a.get("format") or "text") == "mermaid":
+            return mermaid(g, ids)
+        return text_view(g, ids, here=svc.project)
+
+    def _blocked(self, g) -> str:
+        from claude_hooks.tasks.graph import describe
+        svc = self.svc
+        board = svc.board()
+        rows = board.get("blocked") or []
+        if not rows:
+            return f"Nothing blocked in {svc.project}."
+        out = [f"Blocked in {svc.project} ({len(rows)}):"]
+        for r in rows:
+            out.append(f"  {r['id']} · {r.get('title', '')}")
+            for d in r.get("open_depends") or []:
+                out.append(f"    waits for {describe(g.ref(d), here=svc.project)}")
+            for gt in r.get("open_gates") or []:
+                out.append(f"    gate {gt}")
+        return "\n".join(out)
 
     def _gate(self, a: dict) -> str:
         svc = self.svc
@@ -434,7 +548,8 @@ def _id(a: dict) -> str:
 
 def _row(t) -> dict:
     return {"id": t.id, "status": t.status, "priority": t.priority,
-            "area": t.area, "title": t.title, "updated": t.updated}
+            "area": t.area, "title": t.title, "updated": t.updated,
+            "claimed_by": t.claimed_by, "defer": t.defer}
 
 
 def _rel(svc, task_id: str) -> str:

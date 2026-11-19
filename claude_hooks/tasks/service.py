@@ -536,6 +536,8 @@ class TaskService:
                 return
             prev = t.status
             t.status = status
+            if status in CLOSED_STATUSES:
+                t.claimed_by = ""
             msg = f"{prev} → {status}" if prev != status else status
             t.add_log(f"{msg}: {note}" if note else msg,
                       session=self.session_id)
@@ -555,6 +557,21 @@ class TaskService:
                      exc_info=True)
             return []
 
+    def claim(self, task_id: str, owner: str, note: str = "") -> Task:
+        """Start a task as ``owner`` (``alias@host``). Whether another live
+        session already holds it is the caller's check (it knows the
+        mailbox); this records the claim."""
+        def change(t: Task) -> None:
+            prev, before = t.status, t.claimed_by
+            t.status, t.claimed_by = "active", owner
+            what = f"{prev} → active" if prev != "active" else "active"
+            if before and before != owner:
+                what += f", taken over from {before}"
+            t.add_log(f"{what}, claimed by {owner}"
+                      + (f": {note}" if note else ""),
+                      session=self.session_id)
+        return self._modify(task_id, change)
+
     def note(self, task_id: str, text: str) -> Task:
         if not str(text or "").strip():
             raise ValueError("a note needs text")
@@ -569,6 +586,7 @@ class TaskService:
                add_depends: Sequence[str] = (),
                remove_depends: Sequence[str] = (),
                plan: Optional[str] = None, due: Optional[str] = None,
+               defer: Optional[str] = None,
                description: Optional[str] = None, acceptance=None,
                check: Sequence[int] = (), uncheck: Sequence[int] = (),
                note: str = "") -> Task:
@@ -619,6 +637,10 @@ class TaskService:
             if due is not None:
                 t.due = _due(due)
                 what.append(f"due {t.due or '-'}")
+            if defer is not None:
+                t.defer = _due(defer)
+                what.append(f"deferred until {t.defer}" if t.defer
+                            else "no longer deferred")
             if description is not None:
                 t.set_section(DESCRIPTION, description)
                 what.append("description")
@@ -869,7 +891,8 @@ class TaskService:
                 "status": task.status, "priority": task.priority,
                 "area": task.area, "tags": task.tags,
                 "depends": task.depends, "plan": task.plan, "due": task.due,
-                "links": task.links,
+                "links": task.links, "claimed_by": task.claimed_by,
+                "defer": task.defer,
                 "created": task.created, "updated": task.updated,
                 "archived": tf.archived,
                 "log": "\n".join(task.log_lines[:3]),
@@ -883,8 +906,16 @@ class TaskService:
         rows = self.snapshot() if rows is None else rows
         g = self.graph(rows)
         out: dict = {"active": [], "ready": [], "waiting": [], "blocked": [],
-                     "closed": []}
+                     "deferred": [], "closed": []}
         now = utcnow()
+
+        def deferred(r) -> bool:
+            dt = parse_stamp(r.get("defer") or "")
+            return dt is not None and dt > now
+        held = {r["id"] for r in rows
+                if r["status"] in OPEN_STATUSES and deferred(r)}
+        parent_of = {r["id"]: ((r.get("links") or {}).get("parent") or [""])[0]
+                     for r in rows}
         for r in rows:
             if r["status"] in CLOSED_STATUSES:
                 out["closed"].append(r)
@@ -902,13 +933,15 @@ class TaskService:
                                    blocked=bool(open_deps or gates), now=now)
             if r["status"] == "active":
                 out["active"].append(r)
+            elif r["id"] in held or parent_of.get(r["id"]) in held:
+                out["deferred"].append(r)
             elif r["status"] == "waiting":
                 out["waiting"].append(r)
             elif open_deps or gates:
                 out["blocked"].append(r)
             else:
                 out["ready"].append(r)
-        for k in ("active", "ready", "waiting", "blocked"):
+        for k in ("active", "ready", "waiting", "blocked", "deferred"):
             out[k].sort(key=lambda r: (-r["urgency"], r.get("num", 0)))
         out["closed"].sort(key=lambda r: r.get("updated") or "", reverse=True)
         return out

@@ -40,6 +40,10 @@ def row_line(r: dict, *, project: bool = False,
         unresolved = r.get("unresolved") or {}
         tail.append("after " + ", ".join(
             d + ("?" if d in unresolved else "") for d in r["open_depends"]))
+    if r.get("defer") and r.get("status") != "active":
+        tail.append(f"until {r['defer'][:10]}")
+    if r.get("claimed_by") and r.get("status") == "active":
+        tail.append(f"by {r['claimed_by']}")
     if r.get("open_gates"):
         tail.append("waits " + ", ".join(r["open_gates"]))
     when = ago(r.get("updated") or "", now)
@@ -55,7 +59,7 @@ def rows_text(rows: Iterable[dict], **kw) -> str:
 
 def counts_line(board: dict) -> str:
     parts = []
-    for k in ("active", "ready", "waiting", "blocked"):
+    for k in ("active", "ready", "waiting", "blocked", "deferred"):
         if board.get(k):
             parts.append(f"{len(board[k])} {k}")
     return " · ".join(parts) or "nothing open"
@@ -64,7 +68,7 @@ def counts_line(board: dict) -> str:
 def board_text(board: dict, project: str, *, per_section: int = 10,
                closed: int = 5) -> str:
     out = [f"Tasks — {project}: {counts_line(board)}"]
-    for k in ("active", "ready", "waiting", "blocked"):
+    for k in ("active", "ready", "waiting", "blocked", "deferred"):
         rows = board.get(k) or []
         if not rows:
             continue

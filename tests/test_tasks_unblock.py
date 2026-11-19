@@ -28,8 +28,8 @@ class _Store:
     def __init__(self, sessions):
         self._s = sessions
 
-    def sessions(self):
-        return list(self._s)
+    def sessions(self, *, alias=None):
+        return [s for s in self._s if alias is None or s.alias == alias]
 
 
 class _Mailer:

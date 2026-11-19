@@ -1,5 +1,10 @@
 # Plan: task graph (ch-28)
 
+Status 2026-11-19: phases 0–4 built on `dev` (774cc39, 6bec7b7, f3f6383,
+8391d57, then phase 4); see `docs/tasks.md` for the shipped behaviour.
+Differs from this plan: gates are checked at session start and on
+request, not by a daemon sweep; the claim field is `claimed_by`.
+
 Long-horizon, cross-project work needs a dependency graph that reaches
 across projects and something that tells a session when its work is
 unblocked. [beads](https://github.com/gastownhall/beads) (MIT) has the
