@@ -10,6 +10,7 @@ session calls produce the same files.
     claude-hooks-tasks add "title" [-p H] [--area R9] [--depends bm-41]
     claude-hooks-tasks start|done|wait|cancel bm-42 [-m "note"]
     claude-hooks-tasks note bm-42 "text"
+    claude-hooks-tasks update bm-42 [--add-depends op-296] [-p H] [--defer 2026-12-01] [--check 1 2] [-m "why"]
     claude-hooks-tasks gate bm-42 add mail:2331   # waits until answered
     claude-hooks-tasks gates            # check every open gate, GitHub too
     claude-hooks-tasks graph [bm-42] [--up|--down] [--all] [--mermaid]
@@ -115,6 +116,31 @@ def main(argv: Optional[list[str]] = None) -> int:
         p.add_argument("id")
         p.add_argument("-m", "--note", default="")
 
+    p = sub.add_parser("update", help="change fields of a task (only what "
+                                      "you pass changes; logged)")
+    p.add_argument("id")
+    p.add_argument("-t", "--title")
+    p.add_argument("-p", "--priority", choices=["H", "M", "L", "h", "m", "l"])
+    p.add_argument("--area")
+    p.add_argument("--plan")
+    p.add_argument("--due", help="YYYY-MM-DD; empty clears")
+    p.add_argument("--defer", help="YYYY-MM-DD: hide from ready until "
+                                   "then; empty clears")
+    p.add_argument("-d", "--description", help="replaces the description")
+    p.add_argument("--accept", nargs="*", default=None,
+                   help="replaces the acceptance checklist")
+    p.add_argument("--add-depends", nargs="+", default=[], metavar="ID",
+                   help="any project's id (op-296); unknown ids and "
+                        "cycles are refused")
+    p.add_argument("--remove-depends", nargs="+", default=[], metavar="ID")
+    p.add_argument("--add-tags", nargs="+", default=[], metavar="TAG")
+    p.add_argument("--remove-tags", nargs="+", default=[], metavar="TAG")
+    p.add_argument("--check", nargs="+", type=int, default=[], metavar="N",
+                   help="tick acceptance items (1-based)")
+    p.add_argument("--uncheck", nargs="+", type=int, default=[],
+                   metavar="N")
+    p.add_argument("-m", "--note", default="", help="log line: why")
+
     p = sub.add_parser("note", help="append a log line")
     p.add_argument("id")
     p.add_argument("text")
@@ -168,7 +194,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if cmd in ("ready", "list", "show", "add", "start", "done", "wait",
                "cancel", "note", "link", "gate", "gates", "graph",
-               "blocked"):
+               "blocked", "update"):
         a: dict = {}
         name = f"task-{cmd}"
         if cmd == "ready":
@@ -192,6 +218,22 @@ def main(argv: Optional[list[str]] = None) -> int:
             a = {"id": args.id, "note": args.note}
         elif cmd == "note":
             a = {"id": args.id, "text": args.text}
+        elif cmd == "update":
+            a = {"id": args.id, "note": args.note,
+                 "title": args.title, "area": args.area, "plan": args.plan,
+                 "due": args.due, "defer": args.defer,
+                 "description": args.description, "acceptance": args.accept,
+                 "priority": args.priority.upper() if args.priority else None,
+                 "add_depends": args.add_depends,
+                 "remove_depends": args.remove_depends,
+                 "add_tags": args.add_tags, "remove_tags": args.remove_tags,
+                 "check": args.check, "uncheck": args.uncheck}
+            # "" is a change (it clears); None and [] were not passed.
+            if all(v is None or v == [] for k, v in a.items()
+                   if k not in ("id", "note")):
+                print("Not done: nothing to change — pass a field "
+                      "(see claude-hooks-tasks update -h)")
+                return 1
         elif cmd == "link":
             a = {"id": args.id, "kind": args.kind, "value": args.value}
         elif cmd == "gate":

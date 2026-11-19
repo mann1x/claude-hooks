@@ -270,6 +270,7 @@ claude-hooks-tasks show bm-42
 claude-hooks-tasks add "title" -p H --area R9 --depends bm-41 --accept "a" "b"
 claude-hooks-tasks start|done|wait|cancel bm-42 -m "note"
 claude-hooks-tasks note bm-42 "text"
+claude-hooks-tasks update bm-42 --add-depends op-296 -p H --defer 2026-12-01 --check 1 -m "why"
 claude-hooks-tasks link bm-42 commit 2f01f52
 claude-hooks-tasks link bm-42 parent bm-40     # graph links take any project's id
 claude-hooks-tasks init [--prefix xx]

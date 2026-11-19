@@ -315,6 +315,36 @@ class CliTests(_Base):
         rc, out = self.run_cli("done", "bm-7")
         self.assertEqual(rc, 1)
 
+    def test_update_changes_only_what_is_passed(self):
+        self.run_cli("add", "x", "--accept", "one", "two")
+        self.run_cli("add", "y")
+        rc, out = self.run_cli("update", "bm-2", "-p", "h", "--add-depends",
+                               "bm-1", "--add-tags", "infra", "--defer",
+                               "2999-01-01", "-m", "after x")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("[pending H]", out)
+        self.assertIn("after x", out)
+        rc, out = self.run_cli("update", "bm-1", "--check", "2")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("✓2", out)
+        t = self.svc.show("bm-2")[0]
+        self.assertEqual((t.priority, t.depends, t.tags, t.defer[:10]),
+                         ("H", ["bm-1"], ["infra"], "2999-01-01"))
+        self.run_cli("update", "bm-2", "--defer", "")
+        self.assertEqual(self.svc.show("bm-2")[0].defer, "")
+
+    def test_update_refuses_cycles_unknown_ids_and_nothing(self):
+        self.run_cli("add", "x")
+        self.run_cli("add", "y", "--depends", "bm-1")
+        rc, out = self.run_cli("update", "bm-1", "--add-depends", "bm-2")
+        self.assertEqual(rc, 1)
+        self.assertIn("cycle", out)
+        rc, out = self.run_cli("update", "bm-1", "--add-depends", "bm-9")
+        self.assertEqual(rc, 1, out)
+        rc, out = self.run_cli("update", "bm-1")
+        self.assertEqual(rc, 1)
+        self.assertIn("nothing to change", out)
+
     def test_init_with_prefix(self):
         rc, out = self.run_cli("init", "--prefix", "bk")
         self.assertIn("prefix bk", out)

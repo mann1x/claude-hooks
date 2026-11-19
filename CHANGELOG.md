@@ -17,6 +17,12 @@ release with the auto-generated source archive
 ## [Unreleased]
 
 ### Added
+- **`claude-hooks-tasks update`.** The CLI can change a task's fields
+  (title, priority, area, plan, due, defer, description, acceptance,
+  depends, tags, checked items) through `task-update`, so a dependency
+  typed in a terminal gets the same checks as one from a session: an
+  unknown project or task and a cycle across projects are refused.
+  Before, the only way was editing the file, which skips them.
 - **Task graph views, claims and defer.** `task-graph` (CLI
   `claude-hooks-tasks graph|blocked`) prints the dependency graph in
   layers — layer 0 can start now, one layer can run in parallel — for a
