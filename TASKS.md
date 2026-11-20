@@ -2,30 +2,29 @@
 
 # Tasks — claude-hooks
 
-2 active · 2 ready · prefix `ch`
+1 active · 2 ready · prefix `ch`
 
-## Active (2)
+## Active (1)
 
-- [ch-28](.claude-hooks/tasks/ch-28.md) **H** `tasks.graph` Task graph from beads: one canonical root per project, cross-project depends, typed links, gates, unblock doorbell, graph views — 1m
 - [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 7d
 
 ## Ready (2)
 
 - [ch-26](.claude-hooks/tasks/ch-26.md) **L** `mailbox.identity` ch-18 follow-up: run the durable-alias check from a linked cloud thread (osync@cloud) when the owner is back on pandorum — 25d
-- [ch-23](.claude-hooks/tasks/ch-23.md) **L** `consultants.polykv` PolyKV: re-run arms A/B at ~655k cells once opencoti c14 (op-296 KV spill to host RAM) ships — 6m
+- [ch-23](.claude-hooks/tasks/ch-23.md) **L** `consultants.polykv` PolyKV: re-run arms A/B at ~655k cells once opencoti c14 (op-296 KV spill to host RAM) ships — 7h
 
 ## By plan
 
 - `docs/PLAN-council-cerebriline.md`: [ch-9](.claude-hooks/tasks/ch-9.md)
-- `docs/PLAN-task-graph.md`: [ch-28](.claude-hooks/tasks/ch-28.md)
 
-## Recently closed (15 of 24)
+## Recently closed (15 of 25)
 
-- [ch-27](.claude-hooks/tasks/archive/ch-27.md) **H** `consultants.directives` Binding injects: audit silently passes a multi-directive doc; bound the audit call — 19d
-- [ch-13](.claude-hooks/tasks/archive/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 23d
+- [ch-28](.claude-hooks/tasks/archive/ch-28.md) **H** `tasks.graph` Task graph from beads: one canonical root per project, cross-project depends, typed links, gates, unblock doorbell, graph views — 1m
+- [ch-27](.claude-hooks/tasks/archive/ch-27.md) **H** `consultants.directives` Binding injects: audit silently passes a multi-directive doc; bound the audit call — 20d
+- [ch-13](.claude-hooks/tasks/archive/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 24d
 - [ch-25](.claude-hooks/tasks/archive/ch-25.md) `consultants.compaction` Compaction at 32k windows: a fold every 2–3 research calls — ~5k between where a fold lands and the trigger — 25d
 - [ch-18](.claude-hooks/tasks/archive/ch-18.md) **H** `mailbox.identity` Mailbox: lasting cloud aliases — a linked cloud thread registers and sends as <alias>@cloud without a per-session approval — 25d
-- [ch-11](.claude-hooks/tasks/archive/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 25d
+- [ch-11](.claude-hooks/tasks/archive/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 26d
 - [ch-24](.claude-hooks/tasks/archive/ch-24.md) `consultants.budget` Council grounding sized by the role's window — 50 KB anchors fill 56% of a 32k head that compaction never folds — 26d
 - [ch-12](.claude-hooks/tasks/archive/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 26d
 - [ch-15](.claude-hooks/tasks/archive/ch-15.md) **H** `consultants.providers` Ollama Cloud direct (https://ollama.com, no local Ollama) for consultants / get-advice / caliber — 26d
@@ -35,4 +34,3 @@
 - [ch-10](.claude-hooks/tasks/archive/ch-10.md) `consultants.polykv` Council F — PolyKV, complete (opencoti + xOllama), last — 26d
 - [ch-20](.claude-hooks/tasks/archive/ch-20.md) **H** `security.secrets` Commit secret gate — gitleaks + .gitleaks.toml config rules + host-secret search, on every host and in CI — 26d
 - [ch-16](.claude-hooks/tasks/archive/ch-16.md) **H** `resources` Resource manager: shared/exclusive/quiet locks on hosts, GPUs, pods, cloud — real-time waiters, no mail — 27d
-- [ch-17](.claude-hooks/tasks/archive/ch-17.md) `benchmarks.models` Model eval 2026-10-22: minimax-m3.1-flash full bench + gemma4 council re-run with thinking fixed — 27d
