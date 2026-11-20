@@ -12,6 +12,7 @@ worker's change travels on its branch); detached, or named by
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -19,7 +20,7 @@ import unittest
 from pathlib import Path
 
 from claude_hooks.tasks.files import (
-    Checkout, TaskDir, checkout_of, git_main_root,
+    Checkout, TaskDir, checkout_of, git_main_root, native_git_path,
 )
 from claude_hooks.tasks.service import TaskService
 from claude_hooks.tasks.store import TaskIndex
@@ -114,6 +115,28 @@ class CheckoutKindTests(_Repo):
         w.mkdir()
         (w / ".git").write_text(f"gitdir: {bare / 'worktrees' / 'w'}\n")
         self.assertIsNone(git_main_root(w))
+
+    def test_an_msys_git_path_is_read_in_windows_spelling(self):
+        # pandorum's MSYS2 git 2.55 writes "gitdir: /c/Users/..." and Path
+        # read it as C:\c\Users\..., so a worktree passed for main.
+        self.assertEqual(native_git_path("/c/Users/m/r/.git/worktrees/w",
+                                         windows=True),
+                         "C:/Users/m/r/.git/worktrees/w")
+        self.assertEqual(native_git_path("/cygdrive/d/x", windows=True),
+                         "D:/x")
+        self.assertEqual(native_git_path("/d", windows=True), "D:/")
+        for keep in ("C:/Users/m/r", "../..", "/srv/dev/repo/.git"):
+            self.assertEqual(native_git_path(keep, windows=True), keep)
+        self.assertEqual(native_git_path("/c/Users/m", windows=False),
+                         "/c/Users/m")
+
+    @unittest.skipUnless(os.name == "nt", "the MSYS spelling is Windows-only")
+    def test_a_worktree_written_by_msys_git_is_a_worker(self):
+        wt = make_worktree(self.main, self.tmp / "msys-wt")
+        admin = (self.main / ".git" / "worktrees" / "msys-wt").resolve()
+        drive, rest = admin.as_posix().split(":", 1)
+        (wt / ".git").write_text(f"gitdir: /{drive.lower()}{rest}\n")
+        self.assertEqual(checkout_of(wt), Checkout("worker", self.main))
 
     def test_a_relative_gitdir_resolves(self):
         wt = self.tmp / "rel-wt"

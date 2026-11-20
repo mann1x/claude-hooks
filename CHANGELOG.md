@@ -80,6 +80,11 @@ release with the auto-generated source archive
   "Ringing the doorbell".
 
 ### Fixed
+- **A linked worktree on Windows passed for a main checkout.** An MSYS2
+  `git` writes the worktree's `.git` file as `gitdir: /c/Users/...`, which
+  Python reads as `C:\c\Users\...`, so a session there would have indexed
+  the project as its owner. `native_git_path()` reads git's paths in the
+  Windows spelling. Found by the ch-28 Pandorum smoke.
 - **The secret gate passed every commit on Windows.** An MSYS `git` spells the
   worktree `/c/Users/...`; the native `gitleaks.exe` could not open it, logged
   an error, scanned 0 bytes and exited 0. The gate now hands gitleaks the

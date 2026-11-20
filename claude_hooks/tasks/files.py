@@ -125,6 +125,24 @@ class Checkout:
         return self.kind != "main"
 
 
+_MSYS_DRIVE = re.compile(r"^/(?:cygdrive/)?([A-Za-z])(/.*)?$")
+
+
+def native_git_path(text: str, windows: Optional[bool] = None) -> str:
+    """A path as git wrote it, in this OS's spelling.
+
+    An MSYS2 / Cygwin build of git on Windows writes ``/c/Users/...`` (or
+    ``/cygdrive/c/...``) into a worktree's ``.git`` file; ``Path`` reads
+    that as rooted on the current drive, ``C:\\c\\Users\\...``, which does
+    not exist, and the worktree passed for a main checkout. Git for
+    Windows writes ``C:/...`` and is left alone, as is every path off
+    Windows."""
+    if windows is None:
+        windows = os.name == "nt"
+    m = _MSYS_DRIVE.match(text) if windows else None
+    return f"{m.group(1).upper()}:{m.group(2) or '/'}" if m else text
+
+
 def _gitdir_of(root: Path) -> Optional[Path]:
     """The admin dir a linked worktree's ``.git`` file points at."""
     dotgit = Path(root) / ".git"
@@ -137,7 +155,7 @@ def _gitdir_of(root: Path) -> Optional[Path]:
     m = re.match(r"\s*gitdir:\s*(.+?)\s*$", first[0] if first else "")
     if not m:
         return None
-    gd = Path(m.group(1))
+    gd = Path(native_git_path(m.group(1)))
     return gd if gd.is_absolute() else Path(root) / gd
 
 
@@ -157,7 +175,7 @@ def git_main_root(root: Path) -> Optional[Path]:
         rel = (gd / "commondir").read_text(encoding="utf-8").strip()
     except OSError:
         return None
-    common = Path(rel)
+    common = Path(native_git_path(rel))
     if not common.is_absolute():
         common = gd / common
     try:
