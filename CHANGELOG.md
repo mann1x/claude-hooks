@@ -80,6 +80,22 @@ release with the auto-generated source archive
   "Ringing the doorbell".
 
 ### Fixed
+- **Episodic search failed on every call, and nothing was indexed, for
+  26 days — behind a healthy `/health`.** transformers.js cached the
+  embedding model inside its own package directory, so the Oct 31
+  `npm install` of the vendored `episodic-memory/` deleted it, and the
+  sandboxed `episodic-server` could not download it back
+  (`ENOENT: mkdir '.../transformers/.cache'`). Each sync skipped indexing
+  and still printed "Sync complete!". The cache now lives in
+  `~/.config/superpowers/models` (`EPISODIC_MEMORY_MODEL_CACHE`
+  overrides). `/health` now probes with a vector search rather than
+  `stats`, which never loads the model, and `verify_deploy` shows the
+  CLI's last stderr line.
+- **SessionEnd on the episodic server host started no sync.** The hook
+  daemon may write only `~/.claude`, so the `episodic-memory sync` it
+  spawned died on `EROFS` opening its log before logging anything. The
+  hook now asks the server for `POST /sync?background=1` (new) and spawns
+  locally only when the server does not answer.
 - **A linked worktree on Windows passed for a main checkout.** An MSYS2
   `git` writes the worktree's `.git` file as `gitdir: /c/Users/...`, which
   Python reads as `C:\c\Users\...`, so a session there would have indexed

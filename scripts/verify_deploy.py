@@ -401,7 +401,9 @@ def check_episodic(r: Results) -> None:
     The server's ``/health`` used to report ``ok`` whenever the archive
     directory existed. On solidpc better-sqlite3 was built for Node 22,
     Node went to 26, and every CLI call threw for 12 days behind that
-    ``ok``. ``/health?fresh=1`` now runs the CLI, and this reads it. On a
+    ``ok``. ``/health?fresh=1`` now runs a vector search (``stats`` never
+    loads the embedding model, so it passed for 26 days while the model
+    cache was gone and every search failed), and this reads it. On a
     server host a dead CLI fails the deploy; on a client it only warns,
     because the fix is on another machine.
     """
@@ -416,15 +418,11 @@ def check_episodic(r: Results) -> None:
     except Exception as e:
         r.add(WARN, "episodic", f"config unavailable: {type(e).__name__}")
         return
-    mode = ep.get("mode") or "off"
-    if mode == "server":
-        host = ep.get("server_host") or "127.0.0.1"
-        if host in ("0.0.0.0", "::"):
-            host = "127.0.0.1"
-        url = f"http://{host}:{int(ep.get('server_port') or 11435)}"
-    elif mode == "client" and ep.get("server_url"):
-        url = ep["server_url"].rstrip("/")
-    else:
+    from claude_hooks.episodic_url import server_base_url
+
+    mode = (ep.get("mode") or "off").lower()
+    url = server_base_url(ep)
+    if url is None:
         r.add(PASS, "episodic", f"mode {mode!r}: nothing to check")
         return
     bad = FAIL if mode == "server" else WARN
@@ -446,7 +444,9 @@ def check_episodic(r: Results) -> None:
         else:
             r.add(PASS, "episodic CLI", f"vendored ({vendored})")
     try:
-        with urllib.request.urlopen(f"{url}/health?fresh=1", timeout=90) as resp:
+        # Above the server's own bound on a probe search (SEARCH_TIMEOUT_S,
+        # 180 s): the first search of a process loads the embedding model.
+        with urllib.request.urlopen(f"{url}/health?fresh=1", timeout=200) as resp:
             body = json.loads(resp.read())
     except urllib.error.HTTPError as e:
         try:
@@ -464,11 +464,14 @@ def check_episodic(r: Results) -> None:
         return
     if not body.get("cli_ok"):
         detail = body.get("hint") or body.get("error") or "CLI failed"
+        tail = (body.get("stderr") or "").strip().splitlines()
+        if tail:
+            detail += f": {tail[-1][:300]}"
         r.add(bad, f"episodic {url}", detail)
         return
     age = body.get("index_age_hours")
     r.add(PASS, f"episodic {url}",
-          "CLI ok" + (f", index updated {age} h ago" if age is not None else ""))
+          "search ok" + (f", index updated {age} h ago" if age is not None else ""))
 
 
 def check_version(r: Results) -> None:

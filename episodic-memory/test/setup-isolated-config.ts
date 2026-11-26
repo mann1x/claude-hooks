@@ -1,6 +1,7 @@
 import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { fileURLToPath } from 'url';
 
 /**
  * Isolate every test run from the developer's real ~/.config/superpowers.
@@ -13,6 +14,14 @@ const isolatedRoot = mkdtempSync(join(tmpdir(), 'episodic-memory-vitest-'));
 process.env.EPISODIC_MEMORY_CONFIG_DIR = join(isolatedRoot, 'superpowers');
 process.env.CLAUDE_CONFIG_DIR = join(isolatedRoot, 'claude');
 process.env.CODEX_HOME = join(isolatedRoot, 'codex');
+
+// The embedding model cache follows the superpowers dir (getModelCacheDir()),
+// which tests isolate per run and often per test: without one shared cache
+// every embedding test downloads the model again and times out. The model is
+// read-only data, so sharing it isolates nothing away.
+process.env.EPISODIC_MEMORY_MODEL_CACHE ??= fileURLToPath(
+  new URL('../node_modules/.cache/episodic-test-models', import.meta.url)
+);
 
 // Clear any ambient summarizer-billing signals so tests get deterministic
 // cost-guard (#104) and timeout (#160) behavior regardless of the developer's

@@ -1,3 +1,4 @@
+import { getModelCacheDir } from './paths.js';
 /**
  * Embedding model configuration.
  *
@@ -77,6 +78,8 @@ export async function initEmbeddings() {
         // MCP context, where stdout is reserved for JSON-RPC communication.
         transformers.env.allowLocalModels = true;
         transformers.env.useBrowserCache = false;
+        // Never the package's own `.cache`: see getModelCacheDir().
+        transformers.env.cacheDir = getModelCacheDir();
         pipeline = transformers.pipeline;
     }
     catch (error) {

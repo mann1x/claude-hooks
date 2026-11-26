@@ -3,9 +3,10 @@
 Tiny HTTP server that fronts episodic-memory with two endpoints:
 
     POST /ingest   — accept a transcript JSONL, save to archive, re-index
+    POST /sync     — re-index (``?background=1``: start it and answer 202)
     GET  /search    — semantic search across all indexed conversations
     GET  /stats     — ``episodic-memory stats``
-    GET  /health    — does the CLI actually run? (cached probe)
+    GET  /health    — does a search actually run? (cached probe)
 
 Every endpoint that shells out to the CLI answers 502 with the CLI's
 stderr when it exits non-zero. It used to answer 200 with an empty
@@ -13,6 +14,12 @@ stderr when it exits non-zero. It used to answer 200 with an empty
 directory existed — so from 2026-09-14 to 09-26, with better-sqlite3
 built for the wrong Node ABI and every CLI call throwing, the server
 looked healthy while nothing was indexed.
+
+The probe is a real vector search, not ``stats``: ``stats`` never loads
+the embedding model, so from 2026-10-31 to 11-26, with the model cache
+gone (it lived inside ``node_modules``, which deploy reinstalled, and the
+sandboxed service cannot write there), ``/health`` said ``ok`` while every
+search and every sync's indexing failed.
 
 Stdlib only. Designed to run as a systemd service or Docker container on
 the host that has episodic-memory installed.
@@ -55,9 +62,12 @@ INDEX_DB = Path(
 # episodic-memory binary.
 EPISODIC_BIN = os.environ.get("EPISODIC_BIN", "episodic-memory")
 
-# ``stats`` takes ~4 s, so /health reuses a probe this young (?fresh=1
-# forces a new one).
+# The probe searches (it loads the embedding model), so /health reuses a
+# probe this young (?fresh=1 forces a new one).
 HEALTH_PROBE_TTL_S = 300.0
+# A vector search for this loads the model and reads the vector index —
+# the path a dead model cache breaks while ``stats`` still answers.
+PROBE_ARGS = ["search", "--vector", "--limit", "1", "episodic health probe"]
 STATS_TIMEOUT_S = 60
 # The first search in a process loads the embedding model: ~35 s on
 # solidpc. 60 s left no margin.
@@ -100,6 +110,17 @@ def sync_env() -> dict:
     return env
 
 
+def start_background_sync() -> None:
+    """Start ``sync --background`` from this service, which may write the
+    archive and the index. stderr stays on the service's (the journal):
+    discarding it is how a failing sync went unseen."""
+    subprocess.Popen(
+        [EPISODIC_BIN, "sync", "--background"],
+        stdout=subprocess.DEVNULL,
+        env=sync_env(),
+    )
+
+
 def _run_cli(args: list[str], timeout: float, env: dict | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [EPISODIC_BIN, *args],
@@ -123,19 +144,20 @@ def cli_failure(result: subprocess.CompletedProcess) -> dict:
 
 
 def probe(*, fresh: bool = False, now: float | None = None) -> dict:
-    """Run ``episodic-memory stats`` and say whether it worked. Cached for
-    HEALTH_PROBE_TTL_S."""
+    """Run one vector search (``PROBE_ARGS``) and say whether it worked.
+    Cached for HEALTH_PROBE_TTL_S."""
     now = time.time() if now is None else now
     cached = _probe_cache.get("result")
     if cached and not fresh and now - cached["checked_at"] < HEALTH_PROBE_TTL_S:
         return cached
     try:
-        r = _run_cli(["stats"], STATS_TIMEOUT_S)
+        r = _run_cli(PROBE_ARGS, SEARCH_TIMEOUT_S)
         res = {"cli_ok": r.returncode == 0}
         if r.returncode != 0:
             res.update(cli_failure(r))
     except subprocess.TimeoutExpired:
-        res = {"cli_ok": False, "error": f"stats timed out after {STATS_TIMEOUT_S}s"}
+        res = {"cli_ok": False,
+               "error": f"probe search timed out after {SEARCH_TIMEOUT_S}s"}
     except OSError as e:
         res = {"cli_ok": False, "error": f"cannot run {EPISODIC_BIN}: {e}"}
     res["checked_at"] = now
@@ -189,7 +211,7 @@ class EpisodicHandler(BaseHTTPRequestHandler):
         if parsed.path == "/ingest":
             self._ingest()
         elif parsed.path == "/sync":
-            self._sync()
+            self._sync(parsed)
         else:
             self._json_response(404, {"error": "not found"})
 
@@ -278,13 +300,7 @@ class EpisodicHandler(BaseHTTPRequestHandler):
         Path(f"{dest}.zst").unlink(missing_ok=True)
         size = len(body)
 
-        # Trigger re-index in background. stderr stays on the service's
-        # (the journal): discarding it is how a failing sync went unseen.
-        subprocess.Popen(
-            [EPISODIC_BIN, "sync", "--background"],
-            stdout=subprocess.DEVNULL,
-            env=sync_env(),
-        )
+        start_background_sync()
 
         self._json_response(200, {
             "status": "ingested",
@@ -294,8 +310,20 @@ class EpisodicHandler(BaseHTTPRequestHandler):
             "session_id": session_id,
         })
 
-    def _sync(self):
-        """Trigger a manual sync/re-index."""
+    def _sync(self, parsed):
+        """Re-index. ``?background=1`` starts the sync and answers 202 at
+        once: that is how a SessionEnd hook asks for one, since the hook
+        daemon's sandbox cannot write the archive, the index or the sync
+        log itself."""
+        background = (parse_qs(parsed.query).get("background") or ["0"])[0]
+        if background not in ("0", ""):
+            try:
+                start_background_sync()
+            except OSError as e:
+                self._json_response(500, {"error": f"cannot run {EPISODIC_BIN}: {e}"})
+                return
+            self._json_response(202, {"status": "started"})
+            return
         try:
             result = _run_cli(["sync"], SYNC_TIMEOUT_S, env=sync_env())
         except subprocess.TimeoutExpired:

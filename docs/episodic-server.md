@@ -123,17 +123,20 @@ All endpoints return JSON.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Runs `episodic-memory stats` (cached 5 min; `?fresh=1` forces it). 200 `ok`, or **503 `degraded`** with the CLI's stderr and a `hint`. Also reports `index_age_hours` |
+| `GET` | `/health` | Runs one vector search, `episodic-memory search --vector --limit 1` (cached 5 min; `?fresh=1` forces it), so the embedding model is loaded. 200 `ok`, or **503 `degraded`** with the CLI's stderr and a `hint`. Also reports `index_age_hours` |
 | `GET` | `/stats` | Runs `episodic-memory stats` and returns stdout |
 | `GET` | `/search?q=<query>&limit=<N>` | Search across all indexed conversations. `limit` defaults to 10 |
 | `POST` | `/ingest` | Save a transcript JSONL and trigger re-index |
-| `POST` | `/sync` | Force a synchronous `episodic-memory sync` (timeout 120 s) |
+| `POST` | `/sync` | Force a synchronous `episodic-memory sync` (timeout 120 s); `?background=1` starts `sync --background` and answers **202** at once |
 
 When the CLI exits non-zero, `/stats`, `/search` and `/sync` answer
 **502** with `returncode`, the tail of `stderr`, and a `hint` for known
 causes. Until 2026-09-26 they answered 200 with an empty `stdout` and
 dropped stderr, and `/health` only checked that the archive directory
 existed, so a CLI that threw on every call looked healthy for 12 days.
+Until 2026-11-26 the probe was `stats`, which never loads the embedding
+model: from 2026-10-31 the model cache was gone and every search and every
+sync's indexing failed while `/health` said `ok` (see "Model cache").
 The first `/search` in a process loads the embedding model (~35 s on
 solidpc); give any probe of it at least 60 s.
 
@@ -199,8 +202,14 @@ CLI args:
 ```
 
 `mode: off` (the default) → SessionEnd does nothing for episodic.
-`mode: server` → SessionEnd triggers `episodic-memory sync
---background` locally, no HTTP push.
+`mode: server` → SessionEnd asks the server on this host
+(`server_host` / `server_port`, `claude_hooks/episodic_url.py`) for
+`POST /sync?background=1`, and runs `episodic-memory sync --background`
+itself only when the server does not answer 202. The hook daemon runs
+under `ProtectSystem=strict` and may write only `~/.claude`: a sync it
+spawned died on `EROFS` opening its log before writing a line, so no
+session end on the server host started a sync from at least 2026-11-20
+to 11-26.
 `mode: client` → SessionEnd reads the transcript and POSTs it to
 `server_url/ingest`.
 
@@ -364,3 +373,19 @@ sudo systemctl daemon-reload
 Client side: set `episodic.mode: "off"` in
 `config/claude-hooks.json`. SessionEnd becomes a no-op for episodic;
 no other hook is affected.
+
+## Model cache
+
+The embedding model (`Xenova/bge-small-en-v1.5`, ~145 MB) is downloaded on first use
+into `<superpowers>/models` (`~/.config/superpowers/models`), set by
+`getModelCacheDir()` in `episodic-memory/src/paths.ts`;
+`EPISODIC_MEMORY_MODEL_CACHE` overrides it. transformers.js defaults to
+`.cache` inside its own package directory, which every `npm install` in the
+vendored tree deletes and which `episodic-server.service`
+(`ProtectSystem=strict`) cannot write: after the 2026-10-31 reinstall every
+search failed with `ENOENT: mkdir
+'.../node_modules/@huggingface/transformers/.cache'`, and every sync
+reported "Sync complete!" with "Indexed: 0" (it skips semantic indexing
+when the embedder is unavailable). The first search after a fresh cache
+takes ~2 min (the download). The vitest suite shares one cache under
+`node_modules/.cache/episodic-test-models` (`test/setup-isolated-config.ts`).

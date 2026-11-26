@@ -357,3 +357,63 @@ def test_session_end_sync_env():
     assert sync_env({})["EPISODIC_MEMORY_COMPRESS_AFTER_DAYS"] == "7"
     assert "EPISODIC_MEMORY_COMPRESS_AFTER_DAYS" not in sync_env({"compress_after_days": 0})
     assert "EPISODIC_MEMORY_COMPRESS_AFTER_DAYS" not in sync_env({"compress_after_days": "x"})
+
+
+# ------------------------------------------------------------------ #
+# The probe must load the embedding model (2026-10-31 .. 11-26: the
+# model cache was gone, every search and every sync's indexing failed,
+# and a ``stats`` probe kept answering ok).
+# ------------------------------------------------------------------ #
+def test_the_probe_is_a_vector_search_not_stats(archive):
+    with mock.patch.object(es, "_run_cli", return_value=_cp(0)) as run:
+        es.probe(fresh=True)
+    args = run.call_args.args[0]
+    assert args[0] == "search" and "--vector" in args
+    assert "stats" not in args
+    assert run.call_args.args[1] == es.SEARCH_TIMEOUT_S
+
+
+def test_a_search_that_cannot_load_the_model_is_degraded(archive):
+    err = ("Error searching: Error: ENOENT: no such file or directory, mkdir "
+           "'/x/node_modules/@huggingface/transformers/.cache'")
+    with mock.patch.object(es, "_run_cli", return_value=_cp(1, err=err)):
+        code, body = es.health(fresh=True)
+    assert (code, body["status"], body["cli_ok"]) == (503, "degraded", False)
+    assert "transformers/.cache" in body["stderr"]
+
+
+# ------------------------------------------------------------------ #
+# POST /sync?background=1: the hook daemon's sandbox cannot write the
+# sync log, the archive or the index, so SessionEnd asks the server.
+# ------------------------------------------------------------------ #
+def _post(url: str) -> tuple[int, dict]:
+    req = urllib.request.Request(url, data=b"", method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def test_a_background_sync_is_started_and_answered_202(http):
+    with mock.patch.object(es.subprocess, "Popen") as popen, \
+            mock.patch.object(es, "_run_cli") as run:
+        code, body = _post(http + "/sync?background=1")
+    assert (code, body["status"]) == (202, "started")
+    assert popen.call_args.args[0][1:] == ["sync", "--background"]
+    assert "stderr" not in popen.call_args.kwargs   # stays on the journal
+    run.assert_not_called()
+
+
+def test_a_plain_sync_still_runs_in_the_request(http):
+    with mock.patch.object(es.subprocess, "Popen") as popen, \
+            mock.patch.object(es, "_run_cli", return_value=_cp(0, out="done")):
+        code, body = _post(http + "/sync")
+    assert (code, body["status"]) == (200, "synced")
+    popen.assert_not_called()
+
+
+def test_a_background_sync_that_cannot_start_is_a_500(http):
+    with mock.patch.object(es.subprocess, "Popen", side_effect=FileNotFoundError("nope")):
+        code, body = _post(http + "/sync?background=1")
+    assert code == 500 and "cannot run" in body["error"]

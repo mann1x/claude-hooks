@@ -30388,6 +30388,11 @@ function getSuperpowersDir() {
 function getIndexDir() {
   return ensureDir(path.join(getSuperpowersDir(), "conversation-index"));
 }
+function getModelCacheDir() {
+  return ensureDir(
+    process.env.EPISODIC_MEMORY_MODEL_CACHE || path.join(getSuperpowersDir(), "models")
+  );
+}
 function getDbPath() {
   if (process.env.EPISODIC_MEMORY_DB_PATH || process.env.TEST_DB_PATH) {
     return process.env.EPISODIC_MEMORY_DB_PATH || process.env.TEST_DB_PATH;
@@ -30588,6 +30593,7 @@ async function initEmbeddings() {
     const transformers = await import("@huggingface/transformers");
     transformers.env.allowLocalModels = true;
     transformers.env.useBrowserCache = false;
+    transformers.env.cacheDir = getModelCacheDir();
     pipeline = transformers.pipeline;
   } catch (error62) {
     throw new EmbeddingsUnavailableError(
