@@ -125,7 +125,7 @@ All endpoints return JSON.
 |---|---|---|
 | `GET` | `/health` | Answers at once. Reports the last probe (one vector search, `episodic-memory search --vector --limit 1`, so the embedding model is loaded; refreshed on its own thread every 5 min, `?fresh=1` waits for a new one), `searches` (`running` / `waiting` / `max`), `indexing` (read from the sync lock: `running`, `pid`, `since`), `last_sync` (the last completed background sync in the sync log: `started_at`, counts, `indexing_skipped`), `activity` (`idle` / `searching` / `indexing`), `index_bytes`, `exchanges`, `index_age_hours`. 200 `ok`; **503** `degraded` (probe failed, or the last sync skipped semantic indexing) or `probing` (no probe has finished since start) |
 | `GET` | `/stats` | Runs `episodic-memory stats` and returns stdout |
-| `GET` | `/search?q=<query>&limit=<N>` | Search across all indexed conversations. `limit` defaults to 10 |
+| `GET` | `/search?q=<query>&limit=<N>` | Search across all indexed conversations: vector and BM25 keyword ranks fused (RRF). `limit` defaults to 10 |
 | `POST` | `/ingest` | Save a transcript JSONL and trigger re-index |
 | `POST` | `/sync` | Force a synchronous `episodic-memory sync` (timeout 120 s); `?background=1` starts `sync --background` and answers **202** at once |
 

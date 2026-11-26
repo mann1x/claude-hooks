@@ -30,6 +30,49 @@ export interface SearchOptions {
 const SIDECHAIN_DISTANCE_PENALTY = 0.05;
 
 /**
+ * Default search (`both`) ranks by reciprocal rank fusion of the vector list
+ * and the BM25 keyword list: score = sum of 1 / (RRF_K + rank). Each list is
+ * drawn from a pool larger than the limit so fusion has room to reorder.
+ * Measured on benchmarks/episodic (judged pool, 28 queries): vector alone
+ * nDCG@10 0.37, fused 0.55 — keyword ranking finds ids, file names and
+ * error strings an embedding blurs.
+ */
+const RRF_K = 60;
+const FUSION_POOL_MIN = 50;
+
+/**
+ * The FTS5 query for a free-text search: every token as a quoted term, OR-ed,
+ * so BM25 ranks rows holding more (and rarer) terms first. Quoting makes
+ * operators and punctuation literal; the tokenizer splits `op-296` into the
+ * phrase "op 296". Null when the query has no token.
+ */
+export function buildFtsQuery(query: string): string | null {
+  const terms = (query.match(/[\p{L}\p{N}_]+(?:[-.:/][\p{L}\p{N}_]+)*/gu) || [])
+    .map((t) => t.toLowerCase());
+  const unique = [...new Set(terms)];
+  return unique.length ? unique.map((t) => `"${t.replace(/"/g, '""')}"`).join(' OR ') : null;
+}
+
+/** Reciprocal rank fusion of ranked row lists (rows keyed by `id`). */
+export function fuseByRank<T extends { id: string }>(lists: T[][], limit: number): T[] {
+  const scored = new Map<string, { row: T; score: number }>();
+  for (const list of lists) {
+    list.forEach((row, i) => {
+      const hit = scored.get(row.id);
+      const add = 1 / (RRF_K + i + 1);
+      if (hit) {
+        hit.score += add;
+        // Keep the vector row (it carries the distance) when both lists have it.
+        if ((hit.row as any).distance == null && (row as any).distance != null) hit.row = row;
+      } else {
+        scored.set(row.id, { row, score: add });
+      }
+    });
+  }
+  return [...scored.values()].sort((a, b) => b.score - a.score).slice(0, limit).map((x) => x.row);
+}
+
+/**
  * Build the AND-clause and bound-parameter list that constrains a search
  * by the optional time and metadata filters. Bound parameters keep us
  * safe from SQL injection without regex-based input scrubbing.
@@ -200,7 +243,7 @@ export async function searchConversations(
     // de-rank, so we over-fetch candidates and trim after the final ordering.
     await initEmbeddings();
     const queryEmbedding = await generateQueryEmbedding(query);
-    const k = limit * 3;
+    const k = mode === 'both' ? Math.max(limit * 5, FUSION_POOL_MIN) : limit * 3;
 
     const stmt = db.prepare(`
       SELECT
@@ -221,12 +264,32 @@ export async function searchConversations(
       ...filterParams,
       SIDECHAIN_DISTANCE_PENALTY
     );
-    if (results.length > limit) {
+    if (mode === 'vector' && results.length > limit) {
       results = results.slice(0, limit);
     }
   }
 
-  if (mode === 'text' || mode === 'both') {
+  if (mode === 'both') {
+    const ftsQuery = buildFtsQuery(query);
+    let keywordRows: any[] = [];
+    if (ftsQuery) {
+      keywordRows = db.prepare(`
+        SELECT
+          ${EXCHANGE_SELECT_COLUMNS},
+          NULL AS distance
+        FROM exchanges_fts AS f
+        JOIN exchanges AS e ON e.rowid = f.rowid
+        WHERE exchanges_fts MATCH ?
+          ${sidechainClause}
+          ${filterClause}
+        ORDER BY bm25(exchanges_fts)
+        LIMIT ?
+      `).all(ftsQuery, ...filterParams, Math.max(limit * 5, FUSION_POOL_MIN));
+    }
+    results = fuseByRank([results, keywordRows], limit);
+  }
+
+  if (mode === 'text') {
     // Text search: AND of per-token LIKE patterns so multi-word queries match
     // when every term appears somewhere in the exchange (any order, either field).
     // See #127 — whole-query contiguous substring matching returned empty for
@@ -245,19 +308,7 @@ export async function searchConversations(
       LIMIT ?
     `);
 
-    const textResults = textStmt.all(...textMatchParams, ...filterParams, limit);
-
-    if (mode === 'both') {
-      // Merge and deduplicate by ID
-      const seenIds = new Set(results.map(r => r.id));
-      for (const textResult of textResults) {
-        if (!seenIds.has((textResult as any).id)) {
-          results.push(textResult);
-        }
-      }
-    } else {
-      results = textResults;
-    }
+    results = textStmt.all(...textMatchParams, ...filterParams, limit);
   }
 
   const lastLines = lastIndexedLines(db, results.map((row: any) => row.archive_path));
@@ -283,7 +334,9 @@ export async function searchConversations(
 
     return {
       exchange,
-      similarity: mode === 'text' ? undefined : l2DistanceToCosineSimilarity(row.distance),
+      similarity: mode === 'text' || row.distance == null
+        ? undefined
+        : l2DistanceToCosineSimilarity(row.distance),
       snippet,
       summary,
       lastLine: lastLines.get(row.archive_path)

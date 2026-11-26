@@ -91,6 +91,16 @@ release with the auto-generated source archive
   overrides). `/health` now probes with a vector search rather than
   `stats`, which never loads the model, and `verify_deploy` shows the
   CLI's last stderr line.
+- **Episodic search ranks keyword matches.** The default search used the
+  vector list and appended plain substring hits after it, unranked, so they
+  never reached the top 10: a relevant conversation was in the top 10 for 32%
+  of the eval's queries, and 1 of 6 searches for an id (`ch-28`, a commit)
+  found it. It now fuses the vector ranks with BM25 ranks from an FTS5 index
+  (reciprocal rank fusion): top-10 hits 0.32 → 0.64, judged nDCG@10
+  0.26 → 0.47, ids 6 of 6, on the same embeddings. The index is built once on
+  first open (11 s, ~110 MB on 71,807 exchanges) and kept in step by
+  triggers. `--text` keeps its exact all-terms matching. Eval:
+  `benchmarks/episodic/`.
 - **An episodic search took up to 4 minutes and blocked the server.**
   Formatting each result read its whole transcript to print a line count;
   one 6.4 GB live transcript cost ~97 s per search (the model itself loads

@@ -30564,7 +30564,50 @@ function initDatabase() {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_tool_exchange ON tool_calls(exchange_id)
   `);
+  ensureFtsIndex(db);
   return db;
+}
+var FTS_VERSION = "1";
+function ensureFtsIndex(db) {
+  db.pragma("recursive_triggers = ON");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
+      user_message, assistant_message,
+      content='exchanges', content_rowid='rowid',
+      tokenize='unicode61 remove_diacritics 2'
+    );
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_ai AFTER INSERT ON exchanges BEGIN
+      INSERT INTO exchanges_fts(rowid, user_message, assistant_message)
+      VALUES (new.rowid, new.user_message, new.assistant_message);
+    END;
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_ad AFTER DELETE ON exchanges BEGIN
+      INSERT INTO exchanges_fts(exchanges_fts, rowid, user_message, assistant_message)
+      VALUES ('delete', old.rowid, old.user_message, old.assistant_message);
+    END;
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_au
+    AFTER UPDATE OF user_message, assistant_message ON exchanges BEGIN
+      INSERT INTO exchanges_fts(exchanges_fts, rowid, user_message, assistant_message)
+      VALUES ('delete', old.rowid, old.user_message, old.assistant_message);
+      INSERT INTO exchanges_fts(rowid, user_message, assistant_message)
+      VALUES (new.rowid, new.user_message, new.assistant_message);
+    END;
+  `);
+  const built = db.prepare(`SELECT value FROM index_meta WHERE key = 'fts_version'`).get();
+  if (built?.value === FTS_VERSION) return;
+  try {
+    db.transaction(() => {
+      const again = db.prepare(`SELECT value FROM index_meta WHERE key = 'fts_version'`).get();
+      if (again?.value === FTS_VERSION) return;
+      rebuildFtsIndex(db);
+    }).immediate();
+  } catch (err) {
+    if (err?.code !== "SQLITE_BUSY") throw err;
+  }
+}
+function rebuildFtsIndex(db) {
+  db.exec(`INSERT INTO exchanges_fts(exchanges_fts) VALUES ('rebuild')`);
+  db.prepare(`INSERT OR REPLACE INTO index_meta (key, value) VALUES ('fts_version', ?)`).run(FTS_VERSION);
 }
 
 // src/embeddings.ts
@@ -30698,6 +30741,29 @@ async function readTranscript(canonical) {
 
 // src/search.ts
 var SIDECHAIN_DISTANCE_PENALTY = 0.05;
+var RRF_K = 60;
+var FUSION_POOL_MIN = 50;
+function buildFtsQuery(query) {
+  const terms = (query.match(/[\p{L}\p{N}_]+(?:[-.:/][\p{L}\p{N}_]+)*/gu) || []).map((t) => t.toLowerCase());
+  const unique = [...new Set(terms)];
+  return unique.length ? unique.map((t) => `"${t.replace(/"/g, '""')}"`).join(" OR ") : null;
+}
+function fuseByRank(lists, limit) {
+  const scored = /* @__PURE__ */ new Map();
+  for (const list of lists) {
+    list.forEach((row, i) => {
+      const hit = scored.get(row.id);
+      const add = 1 / (RRF_K + i + 1);
+      if (hit) {
+        hit.score += add;
+        if (hit.row.distance == null && row.distance != null) hit.row = row;
+      } else {
+        scored.set(row.id, { row, score: add });
+      }
+    });
+  }
+  return [...scored.values()].sort((a, b2) => b2.score - a.score).slice(0, limit).map((x2) => x2.row);
+}
 function buildSearchFilters(options) {
   const parts = [];
   const params = [];
@@ -30819,7 +30885,7 @@ async function searchConversations(query, options = {}) {
   if (mode === "vector" || mode === "both") {
     await initEmbeddings();
     const queryEmbedding = await generateQueryEmbedding(query);
-    const k2 = limit * 3;
+    const k2 = mode === "both" ? Math.max(limit * 5, FUSION_POOL_MIN) : limit * 3;
     const stmt = db.prepare(`
       SELECT
         ${EXCHANGE_SELECT_COLUMNS},
@@ -30838,11 +30904,30 @@ async function searchConversations(query, options = {}) {
       ...filterParams,
       SIDECHAIN_DISTANCE_PENALTY
     );
-    if (results.length > limit) {
+    if (mode === "vector" && results.length > limit) {
       results = results.slice(0, limit);
     }
   }
-  if (mode === "text" || mode === "both") {
+  if (mode === "both") {
+    const ftsQuery = buildFtsQuery(query);
+    let keywordRows = [];
+    if (ftsQuery) {
+      keywordRows = db.prepare(`
+        SELECT
+          ${EXCHANGE_SELECT_COLUMNS},
+          NULL AS distance
+        FROM exchanges_fts AS f
+        JOIN exchanges AS e ON e.rowid = f.rowid
+        WHERE exchanges_fts MATCH ?
+          ${sidechainClause}
+          ${filterClause}
+        ORDER BY bm25(exchanges_fts)
+        LIMIT ?
+      `).all(ftsQuery, ...filterParams, Math.max(limit * 5, FUSION_POOL_MIN));
+    }
+    results = fuseByRank([results, keywordRows], limit);
+  }
+  if (mode === "text") {
     const { sql: textMatchSql, params: textMatchParams } = buildTextMatchClause(query);
     const textStmt = db.prepare(`
       SELECT
@@ -30855,17 +30940,7 @@ async function searchConversations(query, options = {}) {
       ORDER BY e.is_sidechain ASC, e.timestamp DESC
       LIMIT ?
     `);
-    const textResults = textStmt.all(...textMatchParams, ...filterParams, limit);
-    if (mode === "both") {
-      const seenIds = new Set(results.map((r) => r.id));
-      for (const textResult of textResults) {
-        if (!seenIds.has(textResult.id)) {
-          results.push(textResult);
-        }
-      }
-    } else {
-      results = textResults;
-    }
+    results = textStmt.all(...textMatchParams, ...filterParams, limit);
   }
   const lastLines = lastIndexedLines(db, results.map((row) => row.archive_path));
   db.close();
@@ -30883,7 +30958,7 @@ async function searchConversations(query, options = {}) {
     const snippet = snippetText + (exchange.userMessage.length > 200 ? "..." : "");
     return {
       exchange,
-      similarity: mode === "text" ? void 0 : l2DistanceToCosineSimilarity(row.distance),
+      similarity: mode === "text" || row.distance == null ? void 0 : l2DistanceToCosineSimilarity(row.distance),
       snippet,
       summary,
       lastLine: lastLines.get(row.archive_path)

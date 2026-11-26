@@ -1,0 +1,33 @@
+{
+  "about": "Episodic search eval. Each query is asked the way the owner would ask it; a hit is any result from a conversation whose assistant text contains `marker` (and whose project contains `project`, when set). Markers were chosen to name 1-12 conversations on 2026-11-26. `kind`: semantic = the query avoids the marker; keyword = the query names an id.",
+  "queries": [
+    {"q": "a git worktree on Windows was treated as the main checkout because git wrote a /c/Users style path", "marker": "native_git_path", "kind": "semantic"},
+    {"q": "episodic memory native sqlite module compiled for a different Node version", "marker": "NODE_MODULE_VERSION 147", "kind": "semantic"},
+    {"q": "hook daemon memory stayed at 20 GB because glibc keeps freed pages", "marker": "malloc_trim", "kind": "semantic"},
+    {"q": "automaticum seed list paired by task and seed", "marker": "D159", "project": "automaticum", "kind": "semantic"},
+    {"q": "the pgvector DSN password was pushed to the public repo in a config backup file", "marker": "c2f2caa", "kind": "semantic"},
+    {"q": "typescript language server rooted at the whole monorepo found zero references after a long time", "marker": "81.7 s", "kind": "semantic"},
+    {"q": "npm .cmd shims not found on Windows because CreateProcess ignores the executable extensions list", "marker": "PATHEXT", "kind": "semantic"},
+    {"q": "deploy restarting the consultants engine would kill running councils", "marker": "suspends_on_shutdown", "kind": "semantic"},
+    {"q": "resource claims take a transaction-scoped advisory lock in postgres", "marker": "pg_advisory_xact_lock", "kind": "semantic"},
+    {"q": "stop hook parsed a 5 GB transcript on every turn", "marker": "transcript_tail", "kind": "semantic"},
+    {"q": "a mailbox alias that lasts without a session behind it", "marker": "durable_until", "kind": "semantic"},
+    {"q": "gemini tool calls carry an extra field that must round trip through the proxy", "marker": "thought_signature", "kind": "semantic"},
+    {"q": "caliber hooks stopped working on pandorum after an npm install deleted the launcher", "marker": "hook-launcher.exe", "kind": "semantic"},
+    {"q": "language server diagnostics filed under a differently spelled file URI on Windows", "marker": "uri_key", "kind": "semantic"},
+    {"q": "PolyKV fork refused because its parent pool no longer exists", "marker": "Invalid pool ID", "kind": "semantic"},
+    {"q": "how xollama reports the share of the prompt served from cache", "marker": "prompt_eval_cached_count", "kind": "semantic"},
+    {"q": "debian bullseye security packages return 404 so apt needs an archive snapshot", "marker": "snapshot.debian.org", "kind": "semantic"},
+    {"q": "rebuild a bcache superblock", "marker": "make-bcache", "kind": "semantic"},
+    {"q": "summarizer subprocesses crash on Windows when the desktop heap is exhausted", "marker": "STATUS_DLL", "kind": "semantic"},
+    {"q": "raise hnsw ef_search for pgvector recall", "marker": "hnsw.ef_search", "kind": "semantic"},
+    {"q": "calibre libraries would not open because of directory ownership", "marker": "drwxrwsrwx", "kind": "semantic"},
+    {"q": "compaction benchmark second generation on gemma 256k", "marker": "compaction-v7-g2", "kind": "semantic"},
+    {"q": "ch-28 task graph", "marker": "ch-28", "kind": "keyword"},
+    {"q": "op-296 KV spill to host RAM", "marker": "op-296", "kind": "keyword"},
+    {"q": "D159", "marker": "D159", "project": "automaticum", "kind": "keyword"},
+    {"q": "c2f2caa", "marker": "c2f2caa", "kind": "keyword"},
+    {"q": "native_git_path", "marker": "native_git_path", "kind": "keyword"},
+    {"q": "suspends_on_shutdown deploy", "marker": "suspends_on_shutdown", "kind": "keyword"}
+  ]
+}

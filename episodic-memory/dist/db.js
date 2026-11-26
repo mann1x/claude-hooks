@@ -188,7 +188,73 @@ export function initDatabase() {
     db.exec(`
     CREATE INDEX IF NOT EXISTS idx_tool_exchange ON tool_calls(exchange_id)
   `);
+    ensureFtsIndex(db);
     return db;
+}
+/**
+ * Bump to rebuild every database's keyword index on its next open (a change
+ * to the FTS table's columns or tokenizer).
+ */
+export const FTS_VERSION = '1';
+/**
+ * The ranked keyword index (FTS5, BM25) over exchanges, kept in step with
+ * the table by triggers. It indexes `exchanges` by reference (no second copy
+ * of the text), keyed on rowid, so:
+ *  - `recursive_triggers` is on: `INSERT OR REPLACE` deletes the old row, and
+ *    SQLite fires that delete's trigger only with it on — without it the
+ *    index keeps the replaced text;
+ *  - `VACUUM` (compact's `VACUUM INTO`) may renumber rowids, so compact calls
+ *    rebuildFtsIndex() after the swap.
+ * Built once per database (or FTS_VERSION), recorded in `index_meta`. When
+ * another process holds the write lock the build is left to a later open:
+ * vector search works meanwhile and keyword ranking finds nothing new.
+ */
+export function ensureFtsIndex(db) {
+    db.pragma('recursive_triggers = ON');
+    db.exec(`
+    CREATE TABLE IF NOT EXISTS index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
+      user_message, assistant_message,
+      content='exchanges', content_rowid='rowid',
+      tokenize='unicode61 remove_diacritics 2'
+    );
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_ai AFTER INSERT ON exchanges BEGIN
+      INSERT INTO exchanges_fts(rowid, user_message, assistant_message)
+      VALUES (new.rowid, new.user_message, new.assistant_message);
+    END;
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_ad AFTER DELETE ON exchanges BEGIN
+      INSERT INTO exchanges_fts(exchanges_fts, rowid, user_message, assistant_message)
+      VALUES ('delete', old.rowid, old.user_message, old.assistant_message);
+    END;
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_au
+    AFTER UPDATE OF user_message, assistant_message ON exchanges BEGIN
+      INSERT INTO exchanges_fts(exchanges_fts, rowid, user_message, assistant_message)
+      VALUES ('delete', old.rowid, old.user_message, old.assistant_message);
+      INSERT INTO exchanges_fts(rowid, user_message, assistant_message)
+      VALUES (new.rowid, new.user_message, new.assistant_message);
+    END;
+  `);
+    const built = db.prepare(`SELECT value FROM index_meta WHERE key = 'fts_version'`).get();
+    if (built?.value === FTS_VERSION)
+        return;
+    try {
+        db.transaction(() => {
+            const again = db.prepare(`SELECT value FROM index_meta WHERE key = 'fts_version'`).get();
+            if (again?.value === FTS_VERSION)
+                return;
+            rebuildFtsIndex(db);
+        }).immediate();
+    }
+    catch (err) {
+        if (err?.code !== 'SQLITE_BUSY')
+            throw err;
+    }
+}
+/** Rebuild the keyword index from `exchanges` and record it as current. */
+export function rebuildFtsIndex(db) {
+    db.exec(`INSERT INTO exchanges_fts(exchanges_fts) VALUES ('rebuild')`);
+    db.prepare(`INSERT OR REPLACE INTO index_meta (key, value) VALUES ('fts_version', ?)`)
+        .run(FTS_VERSION);
 }
 export function insertExchange(db, exchange, embedding, toolNames) {
     const now = Date.now();

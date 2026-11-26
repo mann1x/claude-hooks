@@ -11,6 +11,17 @@ export interface SearchOptions {
     include_sidechains?: boolean;
 }
 /**
+ * The FTS5 query for a free-text search: every token as a quoted term, OR-ed,
+ * so BM25 ranks rows holding more (and rarer) terms first. Quoting makes
+ * operators and punctuation literal; the tokenizer splits `op-296` into the
+ * phrase "op 296". Null when the query has no token.
+ */
+export declare function buildFtsQuery(query: string): string | null;
+/** Reciprocal rank fusion of ranked row lists (rows keyed by `id`). */
+export declare function fuseByRank<T extends {
+    id: string;
+}>(lists: T[][], limit: number): T[];
+/**
  * Escape LIKE wildcards so user input is treated as a literal substring.
  * Callers must use `ESCAPE '\\'` on the LIKE expression.
  */

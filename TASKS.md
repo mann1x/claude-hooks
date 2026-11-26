@@ -2,11 +2,12 @@
 
 # Tasks — claude-hooks
 
-2 active · 2 ready · prefix `ch`
+3 active · 2 ready · prefix `ch`
 
-## Active (2)
+## Active (3)
 
-- [ch-29](.claude-hooks/tasks/ch-29.md) **H** `episodic` Episodic search dead 26 days: model cache in node_modules + SessionEnd sync dies in the daemon sandbox — 1m
+- [ch-29](.claude-hooks/tasks/ch-29.md) **H** `episodic` Episodic search dead 26 days: model cache in node_modules + SessionEnd sync dies in the daemon sandbox — 40m
+- [ch-30](.claude-hooks/tasks/ch-30.md) **H** `episodic` Episodic search quality: clean inputs, chunking, BM25 hybrid, better embedder — rebuild the index — 1m
 - [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 13d
 
 ## Ready (2)

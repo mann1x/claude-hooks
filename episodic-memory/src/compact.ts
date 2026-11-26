@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import Database from 'better-sqlite3';
 import * as sqliteVec from 'sqlite-vec';
+import { rebuildFtsIndex } from './db.js';
 
 export interface CompactOptions {
   /** Keep at most this many characters of tool_input / tool_result (0 = none). */
@@ -104,6 +105,17 @@ export function compactDatabase(dbPath: string, opts: CompactOptions): CompactRe
   // rename() replaces atomically, so the database path never goes missing:
   // a reader opening it mid-swap would otherwise create an empty database.
   fs.renameSync(target, dbPath);
+  // The keyword index is keyed on rowid, and SQLite documents that VACUUM
+  // may change the rowids of a table without an INTEGER PRIMARY KEY (the
+  // current build keeps them); a rebuild costs seconds and removes the doubt.
+  const rebuilt = new Database(dbPath);
+  try {
+    const hasFts = rebuilt.prepare(
+      `SELECT 1 FROM sqlite_master WHERE name = 'exchanges_fts'`).get();
+    if (hasFts) rebuildFtsIndex(rebuilt);
+  } finally {
+    rebuilt.close();
+  }
   const bytesAfter = dbBytes(dbPath);
   log(`${(bytesBefore / 1e9).toFixed(2)} GB -> ${(bytesAfter / 1e9).toFixed(2)} GB`);
   return { rowsTrimmed, bytesBefore, bytesAfter, backupPath };
