@@ -36,10 +36,22 @@ export interface SearchResult {
     exchange: ConversationExchange;
     similarity: number;
     snippet: string;
+    /**
+     * The transcript's last indexed line (`max(line_end)` over its exchanges),
+     * read from the index. Never counted by reading the file: a live transcript
+     * can be gigabytes, and counting a 6.4 GB one took ~97 s per search.
+     */
+    lastLine?: number;
 }
 export interface MultiConceptResult {
     exchange: ConversationExchange;
     snippet: string;
     conceptSimilarities: number[];
     averageSimilarity: number;
+    /**
+     * The transcript's last indexed line (`max(line_end)` over its exchanges),
+     * read from the index. Never counted by reading the file: a live transcript
+     * can be gigabytes, and counting a 6.4 GB one took ~97 s per search.
+     */
+    lastLine?: number;
 }

@@ -469,6 +469,13 @@ def check_episodic(r: Results) -> None:
             detail += f": {tail[-1][:300]}"
         r.add(bad, f"episodic {url}", detail)
         return
+    if (body.get("last_sync") or {}).get("indexing_skipped"):
+        # A sync that cannot embed still prints "Sync complete!"; 26 days
+        # of them indexed nothing (2026-10-31 .. 11-26).
+        r.add(bad, f"episodic {url}",
+              "the last sync skipped semantic indexing: "
+              + body["last_sync"].get("error", "see the sync log"))
+        return
     age = body.get("index_age_hours")
     r.add(PASS, f"episodic {url}",
           "search ok" + (f", index updated {age} h ago" if age is not None else ""))

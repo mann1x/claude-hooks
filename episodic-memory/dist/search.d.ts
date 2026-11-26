@@ -1,3 +1,4 @@
+import Database from 'better-sqlite3';
 import { SearchResult, MultiConceptResult } from './types.js';
 export interface SearchOptions {
     limit?: number;
@@ -40,6 +41,13 @@ export declare function buildTextMatchClause(query: string): {
  */
 export declare function l2DistanceToCosineSimilarity(distance: number): number;
 export declare function searchConversations(query: string, options?: SearchOptions): Promise<SearchResult[]>;
+/**
+ * Each transcript's last indexed line, in one query over the index
+ * (`idx_archive_path`). Result formatting used to read every result's whole
+ * transcript to count its lines; one 6.4 GB live transcript made a search
+ * take ~97 s.
+ */
+export declare function lastIndexedLines(db: Database.Database, archivePaths: string[]): Map<string, number>;
 export declare function formatResults(results: Array<SearchResult & {
     summary?: string;
 }>): Promise<string>;

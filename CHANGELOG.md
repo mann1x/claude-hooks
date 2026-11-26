@@ -91,6 +91,15 @@ release with the auto-generated source archive
   overrides). `/health` now probes with a vector search rather than
   `stats`, which never loads the model, and `verify_deploy` shows the
   CLI's last stderr line.
+- **An episodic search took up to 4 minutes and blocked the server.**
+  Formatting each result read its whole transcript to print a line count;
+  one 6.4 GB live transcript cost ~97 s per search (the model itself loads
+  in 0.6 s). The count now comes from the index: searches take 1–3 s. The
+  server was single-threaded, so `/health` waited behind any search; it is
+  now threaded, `/health` answers at once with what is running (searches
+  in flight, a sync and since when, the last sync's counts, the index
+  size), searches share capped slots, and a sync that skipped indexing
+  makes it `degraded` and fails `verify_deploy`.
 - **SessionEnd on the episodic server host started no sync.** The hook
   daemon may write only `~/.claude`, so the `episodic-memory sync` it
   spawned died on `EROFS` opening its log before logging anything. The

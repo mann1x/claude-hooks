@@ -30556,6 +30556,9 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_git_branch ON exchanges(git_branch)
   `);
   db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_archive_path ON exchanges(archive_path)
+  `);
+  db.exec(`
     CREATE INDEX IF NOT EXISTS idx_tool_name ON tool_calls(tool_name)
   `);
   db.exec(`
@@ -30646,7 +30649,6 @@ function isErroredSentinel(content) {
 
 // src/search.ts
 import fs4 from "fs";
-import readline from "readline";
 
 // src/transcript-io.ts
 import fs3 from "fs";
@@ -30865,6 +30867,7 @@ async function searchConversations(query, options = {}) {
       results = textResults;
     }
   }
+  const lastLines = lastIndexedLines(db, results.map((row) => row.archive_path));
   db.close();
   return results.map((row) => {
     const exchange = exchangeFromRow(row);
@@ -30882,25 +30885,27 @@ async function searchConversations(query, options = {}) {
       exchange,
       similarity: mode === "text" ? void 0 : l2DistanceToCosineSimilarity(row.distance),
       snippet,
-      summary
+      summary,
+      lastLine: lastLines.get(row.archive_path)
     };
   });
 }
-async function countLines(filePath) {
-  try {
-    const fileStream = openTranscriptStream(filePath);
-    const rl = readline.createInterface({
-      input: fileStream,
-      crlfDelay: Infinity
-    });
-    let count = 0;
-    for await (const line of rl) {
-      if (line.trim()) count++;
-    }
-    return count;
-  } catch (error62) {
-    return 0;
+function lastIndexedLines(db, archivePaths) {
+  const unique = [...new Set(archivePaths)];
+  const out = /* @__PURE__ */ new Map();
+  if (unique.length === 0) return out;
+  const rows = db.prepare(
+    `SELECT archive_path, MAX(line_end) AS last_line FROM exchanges
+       WHERE archive_path IN (${unique.map(() => "?").join(", ")})
+       GROUP BY archive_path`
+  ).all(...unique);
+  for (const row of rows) {
+    if (row.last_line !== null) out.set(row.archive_path, row.last_line);
   }
+  return out;
+}
+function fileInfo(sizeKB, lastLine) {
+  return lastLine !== void 0 ? `${sizeKB}KB, ${lastLine} lines` : `${sizeKB}KB`;
 }
 function getFileSizeInKB(filePath) {
   try {
@@ -30943,9 +30948,8 @@ async function formatResults(results) {
 `;
     }
     const fileSizeKB = getFileSizeInKB(result.exchange.archivePath);
-    const totalLines = await countLines(result.exchange.archivePath);
     const lineRange = `${result.exchange.lineStart}-${result.exchange.lineEnd}`;
-    output2 += `   Lines ${lineRange} in ${result.exchange.archivePath} (${fileSizeKB}KB, ${totalLines} lines)
+    output2 += `   Lines ${lineRange} in ${result.exchange.archivePath} (${fileInfo(fileSizeKB, result.lastLine)})
 
 `;
   }
@@ -30983,7 +30987,8 @@ async function searchMultipleConcepts(concepts, options = {}) {
         exchange: firstResult.exchange,
         snippet: firstResult.snippet,
         conceptSimilarities,
-        averageSimilarity
+        averageSimilarity,
+        lastLine: firstResult.lastLine
       });
     }
   }
@@ -31018,9 +31023,8 @@ async function formatMultiConceptResults(results, concepts) {
 `;
     }
     const fileSizeKB = getFileSizeInKB(result.exchange.archivePath);
-    const totalLines = await countLines(result.exchange.archivePath);
     const lineRange = `${result.exchange.lineStart}-${result.exchange.lineEnd}`;
-    output2 += `   Lines ${lineRange} in ${result.exchange.archivePath} (${fileSizeKB}KB, ${totalLines} lines)
+    output2 += `   Lines ${lineRange} in ${result.exchange.archivePath} (${fileInfo(fileSizeKB, result.lastLine)})
 
 `;
   }

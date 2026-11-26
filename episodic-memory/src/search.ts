@@ -4,8 +4,7 @@ import { initEmbeddings, generateQueryEmbedding } from './embeddings.js';
 import { SearchResult, ConversationExchange, MultiConceptResult } from './types.js';
 import { isErroredSentinel } from './summary-sentinel.js';
 import fs from 'fs';
-import readline from 'readline';
-import { openTranscriptStream, statTranscript } from './transcript-io.js';
+import { statTranscript } from './transcript-io.js';
 
 export interface SearchOptions {
   limit?: number;
@@ -261,6 +260,7 @@ export async function searchConversations(
     }
   }
 
+  const lastLines = lastIndexedLines(db, results.map((row: any) => row.archive_path));
   db.close();
 
   return results.map((row: any) => {
@@ -285,28 +285,40 @@ export async function searchConversations(
       exchange,
       similarity: mode === 'text' ? undefined : l2DistanceToCosineSimilarity(row.distance),
       snippet,
-      summary
+      summary,
+      lastLine: lastLines.get(row.archive_path)
     } as SearchResult & { summary?: string };
   });
 }
 
-// Helper function to count lines in a file efficiently
-async function countLines(filePath: string): Promise<number> {
-  try {
-    const fileStream = openTranscriptStream(filePath);
-    const rl = readline.createInterface({
-      input: fileStream,
-      crlfDelay: Infinity
-    });
-
-    let count = 0;
-    for await (const line of rl) {
-      if (line.trim()) count++;
-    }
-    return count;
-  } catch (error) {
-    return 0; // Return 0 if file can't be read
+/**
+ * Each transcript's last indexed line, in one query over the index
+ * (`idx_archive_path`). Result formatting used to read every result's whole
+ * transcript to count its lines; one 6.4 GB live transcript made a search
+ * take ~97 s.
+ */
+export function lastIndexedLines(
+  db: Database.Database,
+  archivePaths: string[]
+): Map<string, number> {
+  const unique = [...new Set(archivePaths)];
+  const out = new Map<string, number>();
+  if (unique.length === 0) return out;
+  const rows = db
+    .prepare(
+      `SELECT archive_path, MAX(line_end) AS last_line FROM exchanges
+       WHERE archive_path IN (${unique.map(() => '?').join(', ')})
+       GROUP BY archive_path`
+    )
+    .all(...unique) as Array<{ archive_path: string; last_line: number | null }>;
+  for (const row of rows) {
+    if (row.last_line !== null) out.set(row.archive_path, row.last_line);
   }
+  return out;
+}
+
+function fileInfo(sizeKB: number, lastLine: number | undefined): string {
+  return lastLine !== undefined ? `${sizeKB}KB, ${lastLine} lines` : `${sizeKB}KB`;
 }
 
 // Helper function to get file size in KB
@@ -360,13 +372,12 @@ export async function formatResults(results: Array<SearchResult & { summary?: st
       output += `   Tools: ${toolSummary}\n`;
     }
 
-    // Get file metadata
+    // Get file metadata (the line count comes from the index, never the file)
     const fileSizeKB = getFileSizeInKB(result.exchange.archivePath);
-    const totalLines = await countLines(result.exchange.archivePath);
     const lineRange = `${result.exchange.lineStart}-${result.exchange.lineEnd}`;
 
     // File information with metadata (clean format for smart tool selection)
-    output += `   Lines ${lineRange} in ${result.exchange.archivePath} (${fileSizeKB}KB, ${totalLines} lines)\n\n`;
+    output += `   Lines ${lineRange} in ${result.exchange.archivePath} (${fileInfo(fileSizeKB, result.lastLine)})\n\n`;
   }
 
   return output;
@@ -422,7 +433,8 @@ export async function searchMultipleConcepts(
         exchange: firstResult.exchange,
         snippet: firstResult.snippet,
         conceptSimilarities,
-        averageSimilarity
+        averageSimilarity,
+        lastLine: firstResult.lastLine
       });
     }
   }
@@ -474,13 +486,12 @@ export async function formatMultiConceptResults(
       output += `   Tools: ${toolSummary}\n`;
     }
 
-    // Get file metadata
+    // Get file metadata (the line count comes from the index, never the file)
     const fileSizeKB = getFileSizeInKB(result.exchange.archivePath);
-    const totalLines = await countLines(result.exchange.archivePath);
     const lineRange = `${result.exchange.lineStart}-${result.exchange.lineEnd}`;
 
     // File information with metadata (clean format for smart tool selection)
-    output += `   Lines ${lineRange} in ${result.exchange.archivePath} (${fileSizeKB}KB, ${totalLines} lines)\n\n`;
+    output += `   Lines ${lineRange} in ${result.exchange.archivePath} (${fileInfo(fileSizeKB, result.lastLine)})\n\n`;
   }
 
   return output;
