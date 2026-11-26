@@ -90,6 +90,8 @@ The `exchanges.embedding_version` column tracks which encoder produced each row'
 
 If you change anything in the embedding pipeline (model, dtype, prefix, pooling, normalization, truncation), **bump `EMBEDDING_VERSION`**. That triggers automatic re-embedding for everyone on upgrade. Don't change pipeline behavior silently — search results would degrade against indexed vectors from the old pipeline.
 
+The model cache is `getModelCacheDir()` in `src/paths.ts` (`EPISODIC_MEMORY_MODEL_CACHE`, else `<superpowers>/models`); `initEmbeddings()` sets `transformers.env.cacheDir` to it. Never leave it at transformers.js's default `.cache` inside its package: `npm install` deletes it, and a sandboxed server cannot write there to fetch it back. Spec: `test/model-cache-dir.test.ts`.
+
 ### Stored tool inputs and `compact`
 
 `tool_calls.tool_input` / `tool_result` are not read back by search, show, or the embedding migration — only `tool_name` is. `src/tool-input.ts` caps what `insertExchange` keeps to `EPISODIC_MEMORY_TOOL_INPUT_CHARS` (default `0` = store `NULL`). `src/compact.ts` / `src/compact-cli.ts` apply the cap to existing rows and rebuild the file via `VACUUM INTO` + atomic rename under the sync lock; it refuses the swap while another connection holds the database open. Don't add readers of those columns without raising the default. Spec: `test/compact.test.ts`.
@@ -104,7 +106,7 @@ Hand-edits to `dist/` get clobbered by `npm run build`. Always edit `src/`, then
 
 ### Test isolation
 
-Tests use `mkdtempSync`, set `TEST_DB_PATH`/`TEST_PROJECTS_DIR`/`EPISODIC_MEMORY_CONFIG_DIR` per-test, and clean up in `afterEach`. Don't reach for the real `~/.config/superpowers/`. The `test-utils.ts` helpers cover the common patterns.
+Tests use `mkdtempSync`, set `TEST_DB_PATH`/`TEST_PROJECTS_DIR`/`EPISODIC_MEMORY_CONFIG_DIR` per-test, and clean up in `afterEach`. Don't reach for the real `~/.config/superpowers/`. The `test-utils.ts` helpers cover the common patterns. `test/setup-isolated-config.ts` points `EPISODIC_MEMORY_MODEL_CACHE` at a shared `node_modules/.cache/episodic-test-models`, so embedding tests don't re-download the model per isolated config dir.
 
 ## File layout
 
@@ -121,7 +123,7 @@ src/
   compact.ts / compact-cli.ts  # trim stored tool inputs + VACUUM INTO rebuild
   transcript-io.ts       # open/stat/read transcripts, .jsonl or .jsonl.zst
   compress-archive.ts / compress-archive-cli.ts  # zstd idle archived transcripts
-  paths.ts               # config/index/archive directory resolution
+  paths.ts               # config/index/archive/model-cache directory resolution
   parser.ts              # JSONL transcript → exchanges
   mcp-server.ts          # MCP tool surface (search, read)
   version.ts             # GENERATED — do not edit
@@ -139,3 +141,41 @@ scripts/
 ## When in doubt
 
 Read the relevant test file. Tests in this repo are the executable spec — particularly `test/embedding-migration.test.ts`, `test/sync-cli-reentrancy.test.ts`, `test/tool-calls-cascade.test.ts`, and `test/compact.test.ts`. They cover the load-bearing invariants (lock contention, recursion-guard, schema migrations, index compaction) and exercise the real subsystems rather than mocking them.
+
+<!-- caliber:managed:pre-commit -->
+## Before Committing
+
+**IMPORTANT:** Before every git commit, you MUST ensure Caliber syncs agent configs with the latest code changes.
+
+First, check if the pre-commit hook is already installed:
+```bash
+grep -q "caliber" .git/hooks/pre-commit 2>/dev/null && echo "hook-active" || echo "no-hook"
+```
+
+- If **hook-active**: the hook handles sync automatically — just commit normally. Tell the user: "Caliber will sync your agent configs automatically via the pre-commit hook."
+- If **no-hook**: run Caliber manually before committing:
+  1. Tell the user: "Caliber: Syncing agent configs with your latest changes..."
+  2. Run: `caliber refresh && git add CALIBER_LEARNINGS.md CLAUDE.md .claude/ 2>/dev/null`
+  3. After it completes, briefly tell the user what Caliber updated. Then proceed with the commit.
+
+**Valid `caliber refresh` options:** `--quiet` (suppress output) and `--dry-run` (preview without writing). Do not pass any other flags — options like `--auto-approve`, `--debug`, or `--force` do not exist and will cause errors.
+
+**`caliber config`** takes no flags — it runs an interactive provider setup. Do not pass `--provider`, `--api-key`, or `--endpoint`.
+
+If `caliber` is not found, tell the user: "This project uses Caliber for agent config sync. Run /setup-caliber to get set up."
+<!-- /caliber:managed:pre-commit -->
+
+<!-- caliber:managed:learnings -->
+## Session Learnings
+
+Read `CALIBER_LEARNINGS.md` for patterns and anti-patterns learned from previous sessions.
+These are auto-extracted from real tool usage — treat them as project-specific rules.
+<!-- /caliber:managed:learnings -->
+
+<!-- caliber:managed:sync -->
+## Context Sync
+
+This project uses [Caliber](https://github.com/caliber-ai-org/ai-setup) to keep AI agent configs in sync across Claude Code, Cursor, Copilot, and Codex.
+Configs update automatically before each commit via `caliber refresh`.
+If the pre-commit hook is not set up, run `/setup-caliber` to configure everything automatically.
+<!-- /caliber:managed:sync -->
