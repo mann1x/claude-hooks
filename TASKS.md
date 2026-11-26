@@ -6,13 +6,13 @@
 
 ## Active (3)
 
-- [ch-29](.claude-hooks/tasks/ch-29.md) **H** `episodic` Episodic search dead 26 days: model cache in node_modules + SessionEnd sync dies in the daemon sandbox — 40m
+- [ch-29](.claude-hooks/tasks/ch-29.md) **H** `episodic` Episodic search dead 26 days: model cache in node_modules + SessionEnd sync dies in the daemon sandbox — 4h
 - [ch-30](.claude-hooks/tasks/ch-30.md) **H** `episodic` Episodic search quality: clean inputs, chunking, BM25 hybrid, better embedder — rebuild the index — 1m
 - [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 13d
 
 ## Ready (2)
 
-- [ch-26](.claude-hooks/tasks/ch-26.md) **L** `mailbox.identity` ch-18 follow-up: run the durable-alias check from a linked cloud thread (osync@cloud) when the owner is back on pandorum — 31d
+- [ch-26](.claude-hooks/tasks/ch-26.md) **L** `mailbox.identity` ch-18 follow-up: run the durable-alias check from a linked cloud thread (osync@cloud) when the owner is back on pandorum — 32d
 - [ch-23](.claude-hooks/tasks/ch-23.md) **L** `consultants.polykv` PolyKV: re-run arms A/B at ~655k cells once opencoti c14 (op-296 KV spill to host RAM) ships — 6d
 
 ## By plan
@@ -21,12 +21,12 @@
 
 ## Recently closed (15 of 25)
 
-- [ch-28](.claude-hooks/tasks/archive/ch-28.md) **H** `tasks.graph` Task graph from beads: one canonical root per project, cross-project depends, typed links, gates, unblock doorbell, graph views — 5d
+- [ch-28](.claude-hooks/tasks/archive/ch-28.md) **H** `tasks.graph` Task graph from beads: one canonical root per project, cross-project depends, typed links, gates, unblock doorbell, graph views — 6d
 - [ch-27](.claude-hooks/tasks/archive/ch-27.md) **H** `consultants.directives` Binding injects: audit silently passes a multi-directive doc; bound the audit call — 26d
 - [ch-13](.claude-hooks/tasks/archive/ch-13.md) **H** `consultants.memory` Council memory — findings ledger (M1-M2), comment at cited lines (M3), critic shell (M4), cross-examination (M5) — 30d
 - [ch-25](.claude-hooks/tasks/archive/ch-25.md) `consultants.compaction` Compaction at 32k windows: a fold every 2–3 research calls — ~5k between where a fold lands and the trigger — 31d
-- [ch-18](.claude-hooks/tasks/archive/ch-18.md) **H** `mailbox.identity` Mailbox: lasting cloud aliases — a linked cloud thread registers and sends as <alias>@cloud without a per-session approval — 31d
-- [ch-11](.claude-hooks/tasks/archive/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 31d
+- [ch-18](.claude-hooks/tasks/archive/ch-18.md) **H** `mailbox.identity` Mailbox: lasting cloud aliases — a linked cloud thread registers and sends as <alias>@cloud without a per-session approval — 32d
+- [ch-11](.claude-hooks/tasks/archive/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 32d
 - [ch-24](.claude-hooks/tasks/archive/ch-24.md) `consultants.budget` Council grounding sized by the role's window — 50 KB anchors fill 56% of a 32k head that compaction never folds — 32d
 - [ch-12](.claude-hooks/tasks/archive/ch-12.md) `consultants.decision` Council H6 — decision models re-benched on real councils; confidence mapping per server open — 32d
 - [ch-15](.claude-hooks/tasks/archive/ch-15.md) **H** `consultants.providers` Ollama Cloud direct (https://ollama.com, no local Ollama) for consultants / get-advice / caliber — 32d

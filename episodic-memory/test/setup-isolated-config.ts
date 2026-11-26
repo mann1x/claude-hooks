@@ -32,3 +32,6 @@ delete process.env.EPISODIC_MEMORY_ALLOW_METERED_API;
 delete process.env.EPISODIC_MEMORY_API_BASE_URL;
 delete process.env.EPISODIC_MEMORY_API_TOKEN;
 delete process.env.EPISODIC_MEMORY_SUMMARY_TIMEOUT_MS;
+// The host's embedder (claude-hooks writes embedder.json, or this variable):
+// tests that need one set it themselves.
+delete process.env.EPISODIC_MEMORY_EMBEDDER;

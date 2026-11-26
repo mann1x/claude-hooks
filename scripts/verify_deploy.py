@@ -443,6 +443,7 @@ def check_episodic(r: Results) -> None:
                   "(scripts/deploy.py links it)")
         else:
             r.add(PASS, "episodic CLI", f"vendored ({vendored})")
+        check_episodic_embedder(r)
     try:
         # Above the server's own bound on a probe search (SEARCH_TIMEOUT_S,
         # 180 s): the first search of a process loads the embedding model.
@@ -479,6 +480,48 @@ def check_episodic(r: Results) -> None:
     age = body.get("index_age_hours")
     r.add(PASS, f"episodic {url}",
           "search ok" + (f", index updated {age} h ago" if age is not None else ""))
+
+
+def check_episodic_embedder(r: Results) -> None:
+    """Does episodic-memory embed with the user's configured embedder?
+
+    It reads ``<superpowers>/embedder.json``, which deploy writes from the
+    memory provider's embedder (claude_hooks/episodic_embedder.py); without
+    it the package falls back to its bundled bge-small. A file that differs
+    from the config fails. An index still holding another model's vectors
+    only warns: the syncs (or episodic_doctor --rebuild-embeddings) are
+    re-embedding it, and search uses keyword ranking until they have."""
+    from claude_hooks import episodic_embedder as ee
+    from claude_hooks.config import load_config as load_hooks_config
+
+    cfg = load_hooks_config()
+    want, why = ee.spec_for(cfg)
+    have = ee.read_current()
+    path = ee.config_path()
+    if isinstance(have, dict) and have.get("_managed_by") != ee.MARKER:
+        r.add(PASS, "episodic embedder", f"{path} is the user's own ({have.get('model')})")
+        space = ee.space_of(have) if have.get("model") else ee.LEGACY_SPACE
+    elif want is None:
+        if have is not None:
+            r.add(FAIL, "episodic embedder", f"{path} is left over ({why}); deploy removes it")
+            return
+        r.add(PASS, "episodic embedder", f"bundled model ({why})")
+        space = ee.LEGACY_SPACE
+    elif have != want:
+        r.add(FAIL, "episodic embedder",
+              f"{path} does not match providers' {want['model']} via {want['kind']}; "
+              "scripts/deploy.py writes it")
+        return
+    else:
+        r.add(PASS, "episodic embedder", f"{want['model']} via {want['kind']} {want['url']}")
+        space = ee.space_of(want)
+    held = ee.index_space()
+    if held is not None and held != space:
+        r.add(WARN, "episodic index",
+              f"holds {held} vectors, the embedder writes {space}: being re-embedded "
+              "(scripts/episodic_doctor.py --rebuild-embeddings <server> does it at once)")
+    elif held is not None:
+        r.add(PASS, "episodic index", f"vectors from {held}")
 
 
 def check_version(r: Results) -> None:

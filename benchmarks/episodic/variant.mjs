@@ -9,6 +9,8 @@
 //        [--doc-prefix ''] [--query-prefix '...'] [--batch 16]
 //        [--embed-url http://127.0.0.1:11434/api/embed]   (Ollama; else local ONNX)
 //   node variant.mjs eval --db <variant.sqlite> [--json out.json]
+//        [--query-url http://127.0.0.1:38092/embedding]  (queries from another
+//        server of the same model: llamafile /embedding or Ollama /api/embed)
 //
 // The subset holds every exchange of every conversation the queries count as
 // relevant, plus a seeded random sample of the rest (natural proportions, so
@@ -30,6 +32,19 @@ env.cacheDir = process.env.EPISODIC_MEMORY_MODEL_CACHE || path.join(process.env.
 // An embedder: local ONNX through transformers.js, or Ollama's /api/embed
 // (the same model the claude-hooks embedder serves). Both return unit vectors.
 async function embedder({ model, dtype, pooling, url }) {
+  if (url && /\/embedding\/?$/.test(url)) {
+    // llama.cpp / llamafile server: {"content": [...]}, one result per text.
+    return async (texts) => {
+      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: texts }) });
+      if (!r.ok) throw new Error(`${url}: HTTP ${r.status} ${await r.text()}`);
+      return (await r.json()).sort((a, b) => (a.index ?? 0) - (b.index ?? 0)).map(({ embedding: e }) => {
+        const v = Array.isArray(e[0]) ? e[0] : e;
+        const n = Math.hypot(...v) || 1;
+        return Float32Array.from(v, (x) => x / n);
+      });
+    };
+  }
   if (url) {
     return async (texts) => {
       const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -187,7 +202,7 @@ async function evaluate() {
   const db = new Database(opt('db'), { readonly: true });
   sqliteVec.load(db);
   const meta = Object.fromEntries(db.prepare('SELECT k, v FROM meta').all().map((r) => [r.k, r.v]));
-  const embed = await embedder({ model: meta.model, dtype: meta.dtype, pooling: meta.pooling, url: meta.url });
+  const embed = await embedder({ model: meta.model, dtype: meta.dtype, pooling: meta.pooling, url: opt('query-url', meta.url) });
   const K = 100, limit = 10, RRF_K = 60;
   const exArchive = db.prepare('SELECT archive_path FROM exchanges WHERE n = ?');
   const relevantFor = (q) => new Set(db.prepare(

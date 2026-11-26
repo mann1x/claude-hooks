@@ -7,7 +7,15 @@ import {
 } from './paths.js';
 import { shouldSkipReentrantSync } from './summarizer.js';
 import { initDatabase } from './db.js';
-import { generateExchangeEmbedding, initEmbeddings } from './embeddings.js';
+import {
+  generateEmbedding,
+  generateExchangeEmbedding,
+  generateExchangeEmbeddings,
+  getEmbedderConfig,
+  initEmbeddings,
+} from './embeddings.js';
+import { spaceId } from './embedder-config.js';
+import { ensureVectorSpace, storedSpace } from './vector-space.js';
 import { runMigrationBatch, countStale } from './embedding-migration.js';
 import { exportOpencodeSessions } from './opencode-sync.js';
 import { spawn } from 'child_process';
@@ -269,13 +277,21 @@ const MIGRATION_BATCH_SIZE = parseInt(process.env.EPISODIC_MEMORY_MIGRATION_BATC
 async function runEmbeddingMigrationPhase(): Promise<void> {
   const db = initDatabase();
   try {
+    // A configured embedder of another model: switch the index to its space
+    // (every exchange becomes stale) before counting. One probe learns the width.
+    if (storedSpace(db).id !== spaceId(getEmbedderConfig())) {
+      await initEmbeddings();
+      await generateEmbedding('episodic-memory vector space probe');
+      ensureVectorSpace(db);
+    }
     const stale = countStale(db);
     if (stale === 0) return;
 
-    console.error(`\nepisodic-memory: ${stale} exchange(s) on the old embedding model — migrating up to ${MIGRATION_BATCH_SIZE} this run`);
+    console.error(`\nepisodic-memory: ${stale} exchange(s) to (re-)embed — up to ${MIGRATION_BATCH_SIZE} this run`);
     await initEmbeddings();
     const indexDir = getIndexDir();
-    const done = await runMigrationBatch(db, indexDir, MIGRATION_BATCH_SIZE, generateExchangeEmbedding);
+    const done = await runMigrationBatch(db, indexDir, MIGRATION_BATCH_SIZE, generateExchangeEmbedding,
+      { embedMany: generateExchangeEmbeddings });
     if (done > 0) {
       const after = countStale(db);
       console.error(`episodic-memory: re-embedded ${done} (${after} still stale; will resume on next sync)`);

@@ -92,6 +92,20 @@ If you change anything in the embedding pipeline (model, dtype, prefix, pooling,
 
 The model cache is `getModelCacheDir()` in `src/paths.ts` (`EPISODIC_MEMORY_MODEL_CACHE`, else `<superpowers>/models`); `initEmbeddings()` sets `transformers.env.cacheDir` to it. Never leave it at transformers.js's default `.cache` inside its package: `npm install` deletes it, and a sandboxed server cannot write there to fetch it back. Spec: `test/model-cache-dir.test.ts`.
 
+A change of *model* is not a version bump: it is a new vector space. `index_meta.embedder` names the space the index holds (an index without the key holds bge-small), `vec_exchanges` is declared at that model's width, and `ensureVectorSpace()` in `src/vector-space.ts` switches the index (recreate the table at the new width, mark every exchange stale) before the first vector from another space is written. Search never compares across spaces: when the index holds another model's vectors, or the embedder is unreachable, default search keeps its BM25 half and `--vector` refuses. Never write vectors outside `writeExchangeVectors()` (it also removes an exchange's old windows), and never assume 384 dimensions. Spec: `test/configured-embedder.test.ts`.
+
+### Configured embedder
+
+`src/embedder-config.ts` resolves the embedder: `EPISODIC_MEMORY_EMBEDDER` (JSON or `local`), else `<superpowers>/embedder.json`, else the bundled bge-small. HTTP backends: `llamafile` (`/embedding`), `ollama` (`/api/embed`), `openai` (`/v1/embeddings`), optional `fallback` of the same model. `model` names the space, not the server, so a rebuild may run on a faster server of the same model. An unreadable config is an error (semantic search off), never a fallback to bge-small, which would switch the space and drop every vector. Query / document prefixes default per model (`modelPrefixes()`: qwen3-embedding gets its instruction). In claude-hooks, `claude_hooks/episodic_embedder.py` writes the file from the memory provider's embedder.
+
+### Exchange text and windows
+
+`src/exchange-text.ts` decides what is embedded: no user side for harness turns (task notifications, continued-session summaries, Stop hook feedback), no system reminders, no tool names, the question capped at 600 characters, and long answers cut into overlapping windows (`composeExchangeChunks()`, ≤ `MAX_CHUNKS`), one vector each, ids `<exchange id>` then `<exchange id>#<k>`. Search maps a window back to its exchange and keeps each exchange once. An exchange with nothing worth a vector gets none and is still found by BM25.
+
+### Keyword fusion (BM25) search
+
+Default search (`both` mode) is reciprocal rank fusion (`fuseByRank()`) of the vector-similarity list and a BM25 keyword list from the `exchanges_fts` FTS5 index. `ensureFtsIndex()` in `src/db.ts` builds and keeps that index in step via triggers (needs `recursive_triggers = ON`); `src/compact.ts` rebuilds it after `VACUUM INTO`. `--text` keeps the exact whole-query substring match. Spec: `test/keyword-fusion.test.ts`.
+
 ### Stored tool inputs and `compact`
 
 `tool_calls.tool_input` / `tool_result` are not read back by search, show, or the embedding migration — only `tool_name` is. `src/tool-input.ts` caps what `insertExchange` keeps to `EPISODIC_MEMORY_TOOL_INPUT_CHARS` (default `0` = store `NULL`). `src/compact.ts` / `src/compact-cli.ts` apply the cap to existing rows and rebuild the file via `VACUUM INTO` + atomic rename under the sync lock; it refuses the swap while another connection holds the database open. Don't add readers of those columns without raising the default. Spec: `test/compact.test.ts`.
@@ -112,13 +126,16 @@ Tests use `mkdtempSync`, set `TEST_DB_PATH`/`TEST_PROJECTS_DIR`/`EPISODIC_MEMORY
 
 ```
 src/
-  embeddings.ts          # encoder pipeline; query and exchange embedders
+  embeddings.ts          # encoder pipeline (bundled ONNX or a configured server); query and exchange embedders
+  embedder-config.ts     # which embedder: EPISODIC_MEMORY_EMBEDDER / <superpowers>/embedder.json / bundled
+  vector-space.ts        # the index's vector space (model + width), switch + re-embed, window vectors
+  exchange-text.ts       # what an exchange is embedded as: cleaned text, overlapping windows
   embedding-migration.ts # version constant + lock + batch migration
-  search.ts              # vector + text search; multi-concept aggregation
+  search.ts              # vector + BM25 keyword fusion (RRF); multi-concept aggregation
   indexer.ts             # incremental index from sources to vec_exchanges
   sync.ts / sync-cli.ts  # source→archive copy + index, with reentrancy guard
   summarizer.ts          # Claude Agent SDK calls; persistSession: false guard
-  db.ts                  # schema + migrations (incl. cascade + embedding_version)
+  db.ts                  # schema + migrations (incl. cascade, embedding_version, exchanges_fts)
   tool-input.ts          # EPISODIC_MEMORY_TOOL_INPUT_CHARS cap for tool_input/tool_result
   compact.ts / compact-cli.ts  # trim stored tool inputs + VACUUM INTO rebuild
   transcript-io.ts       # open/stat/read transcripts, .jsonl or .jsonl.zst

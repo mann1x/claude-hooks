@@ -395,3 +395,64 @@ reported "Sync complete!" with "Indexed: 0" (it skips semantic indexing
 when the embedder is unavailable). The first search after a fresh cache
 takes ~2 min (the download). The vitest suite shares one cache under
 `node_modules/.cache/episodic-test-models` (`test/setup-isolated-config.ts`).
+
+## Search and the embedder
+
+Default search fuses two rankings (reciprocal rank fusion): vector
+similarity, and BM25 over an FTS5 index of the exchanges. `--text` is an
+exact all-terms match; `--vector` is the vector half alone.
+
+**The embedder is the one you configured for memory.** `scripts/deploy.py`
+writes `~/.config/superpowers/embedder.json` from the enabled memory
+provider's embedder (`providers.pgvector`, else `providers.sqlite_vec`;
+`claude_hooks/episodic_embedder.py`), so episodic search and memory recall
+share one model and one server. On solidpc that is qwen3-embedding:0.6b on
+the daemon-managed llamafile (`:38092`, CPU). Without a configured embedder
+the package keeps its bundled bge-small. A file without `"_managed_by":
+"claude-hooks"` is your own and deploy leaves it alone.
+
+```json
+{"kind": "llamafile", "url": "http://127.0.0.1:38092/embedding",
+ "model": "qwen3-embedding:0.6b", "timeout_ms": 180000,
+ "_managed_by": "claude-hooks", "_source": "providers.pgvector"}
+```
+
+`kind` is `llamafile` (`/embedding`), `ollama` (`/api/embed`) or `openai`
+(`/v1/embeddings`, optional `api_key`); `max_chars` (2000), `batch` (16
+texts a request), `query_prefix` / `document_prefix` (per model by default:
+qwen3 gets its retrieval instruction) and a `fallback` of the same model are
+optional. `EPISODIC_MEMORY_EMBEDDER` (JSON, or `local`) overrides the file
+for one process.
+
+**The index records the model, never the server.** `index_meta.embedder`
+names it and `vec_exchanges` is declared at its width. When the configured
+model changes, the next sync recreates the vector table and re-embeds every
+exchange, 500 per sync; until it is done, vectors are used where they exist
+and keyword ranking covers the rest — vectors from two models are never
+compared. On a CPU embedder a whole index takes days (solidpc: ~6 s an
+exchange), so rebuild it on a faster server of the same model:
+
+```bash
+python scripts/episodic_doctor.py --rebuild-embeddings http://127.0.0.1:11434   # GPU Ollama
+```
+
+It refuses unless both servers give the same vectors (lowest cosine ≥
+0.995 on probe texts; solidpc's GPU Ollama and CPU llamafile load the same
+Q8_0 file and agree at 0.998), then loops `sync` until nothing is stale.
+Queries keep going to the configured server: on the bench, an index built
+on the GPU and queried on the llamafile returned the same top result for
+28 of 28 queries. Claim `solidpc/gpu0` first.
+
+**What is embedded.** Harness turns (task notifications, continued-session
+summaries, Stop hook feedback) lose their user side, system reminders and
+tool names are dropped, the question is capped at 600 characters, and a
+long answer is cut into overlapping 2000-character windows (at most 8),
+each with its own vector (`episodic-memory/src/exchange-text.ts`). About
+1.6 vectors an exchange. The episodic server wakes a daemon-managed
+llamafile before every search and sync (it idles out after an hour and only
+the daemon restarts it); a CLI call that finds the embedder down falls back
+to keyword ranking.
+
+`verify_deploy` FAILs when `embedder.json` does not match the config and
+WARNs while the index still holds another model's vectors. Measurements:
+[`benchmarks/episodic/README.md`](../benchmarks/episodic/README.md).

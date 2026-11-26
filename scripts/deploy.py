@@ -469,7 +469,34 @@ def step_episodic(dry: bool) -> Step:
         sys.path.pop(0)
     if not episodic_doctor.install_vendored(dry=dry, note=s.note):
         s.ok = False
+    _sync_episodic_embedder(s, dry)
     return s
+
+
+def _sync_episodic_embedder(s: Step, dry: bool) -> None:
+    """episodic-memory embeds with the embedder the user configured for
+    memory (``<superpowers>/embedder.json``, claude_hooks/episodic_embedder.py),
+    not its bundled bge-small. A new model means re-embedding the index;
+    the configured server may be far too slow for that, so say how to do it
+    on a faster server of the same model."""
+    sys.path.insert(0, str(REPO))
+    try:
+        from claude_hooks import episodic_embedder as ee
+    finally:
+        sys.path.pop(0)
+    try:
+        cfg = json.loads((REPO / "config" / "claude-hooks.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        s.fail(f"cannot read config/claude-hooks.json: {e}")
+        return
+    ee.sync_file(cfg, dry=dry, note=s.note)
+    spec, _ = ee.spec_for(cfg)
+    want = ee.space_of(spec) if spec else ee.LEGACY_SPACE
+    have = ee.index_space()
+    if have is not None and have != want:
+        s.note(f"the episodic index holds {have} vectors; syncs now re-embed it "
+               f"with {want}, 500 exchanges a sync (slow on a CPU embedder). Faster: "
+               "scripts/episodic_doctor.py --rebuild-embeddings <GPU server URL>")
 
 
 # --------------------------------------------------------------------- #

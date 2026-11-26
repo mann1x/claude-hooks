@@ -239,10 +239,37 @@ def sync_env() -> dict:
     return env
 
 
+ENSURE_EVERY_S = 30.0
+_ensured_at = 0.0
+
+
+def ensure_embedder(now: float | None = None) -> None:
+    """Before the CLI embeds (a search, a sync): the host's configured
+    embedder may be a daemon-managed llamafile that idled out, and only the
+    claude-hooks daemon can start it again — the CLI would otherwise find
+    it down and search by keywords alone. Best effort; at most every
+    ENSURE_EVERY_S, since each call also keeps the embedder's idle timer."""
+    global _ensured_at
+    now = time.time() if now is None else now
+    if now - _ensured_at < ENSURE_EVERY_S:
+        return
+    _ensured_at = now
+    try:
+        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        root = str(Path(__file__).resolve().parent.parent)
+        if root not in sys.path:
+            sys.path.append(root)
+        from claude_hooks.episodic_embedder import ensure_embedder as _ensure
+        _ensure(cfg)
+    except Exception:
+        pass
+
+
 def start_background_sync() -> None:
     """Start ``sync --background`` from this service, which may write the
     archive and the index. stderr stays on the service's (the journal):
     discarding it is how a failing sync went unseen."""
+    ensure_embedder()
     subprocess.Popen(
         [EPISODIC_BIN, "sync", "--background"],
         stdout=subprocess.DEVNULL,
@@ -280,6 +307,7 @@ def probe(*, fresh: bool = False, now: float | None = None) -> dict:
     if cached and not fresh and now - cached["checked_at"] < HEALTH_PROBE_TTL_S:
         return cached
     try:
+        ensure_embedder()
         r = _run_cli(PROBE_ARGS, SEARCH_TIMEOUT_S)
         res = {"cli_ok": r.returncode == 0}
         if r.returncode != 0:
@@ -426,6 +454,7 @@ class EpisodicHandler(BaseHTTPRequestHandler):
                         "error": "no search slot came free",
                         "searches": searches_state()})
                     return
+                ensure_embedder()
                 result = _run_cli(["search", query], SEARCH_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             self._json_response(504, {"error": "search timed out"})
@@ -503,6 +532,7 @@ class EpisodicHandler(BaseHTTPRequestHandler):
             self._json_response(202, {"status": "started"})
             return
         try:
+            ensure_embedder()
             result = _run_cli(["sync"], SYNC_TIMEOUT_S, env=sync_env())
         except subprocess.TimeoutExpired:
             self._json_response(504, {"error": "sync timed out"})

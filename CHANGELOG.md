@@ -101,6 +101,29 @@ release with the auto-generated source archive
   first open (11 s, ~110 MB on 71,807 exchanges) and kept in step by
   triggers. `--text` keeps its exact all-terms matching. Eval:
   `benchmarks/episodic/`.
+- **Episodic search embeds with the embedder you configured, over clean
+  text.** It used its own bundled bge-small (384 dims) on the raw exchange,
+  harness reminders and tool names included, and embedded only the head of
+  long answers. It now uses the memory provider's embedder
+  (qwen3-embedding:0.6b here): `scripts/deploy.py` writes
+  `~/.config/superpowers/embedder.json` from the pgvector / sqlite_vec
+  embedder (llamafile, Ollama or OpenAI-compatible; a file without
+  `_managed_by` is yours and left alone), and the server re-ensures the
+  daemon's llamafile before each search and sync. Each exchange is embedded
+  without harness turns, as overlapping windows (question + answer start,
+  then answer windows tagged with the question, at most 8). Judged on the
+  full index against the fused search above: P@10 0.41 → 0.52, nDCG@10
+  0.41 → 0.55, exact@10 0.61 → 0.68, MRR 0.68 → 0.77 (0.26 / 0.24 / 0.36 /
+  0.52 before either change). The index records which model made its
+  vectors; a different model recreates the vector table at the new width
+  and re-embeds, and until that finishes search keeps BM25 and never
+  compares vectors across models. `verify_deploy` fails on a stale
+  `embedder.json` and warns while the index holds another model's vectors.
+  **After deploying, re-embed the index on a GPU server of the same model**
+  — on the CPU llamafile it takes days:
+  `python scripts/episodic_doctor.py --rebuild-embeddings http://127.0.0.1:11434`
+  (about 2 h for 72k exchanges; refuses when the two servers' vectors
+  differ, cosine < 0.995). Eval: `benchmarks/episodic/`.
 - **An episodic search took up to 4 minutes and blocked the server.**
   Formatting each result read its whole transcript to print a line count;
   one 6.4 GB live transcript cost ~97 s per search (the model itself loads

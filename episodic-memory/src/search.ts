@@ -1,6 +1,13 @@
 import Database from 'better-sqlite3';
 import { initDatabase } from './db.js';
-import { initEmbeddings, generateQueryEmbedding } from './embeddings.js';
+import {
+  EmbeddingsUnavailableError,
+  generateQueryEmbedding,
+  getEmbedderConfig,
+  initEmbeddings,
+} from './embeddings.js';
+import { spaceId } from './embedder-config.js';
+import { storedSpace } from './vector-space.js';
 import { SearchResult, ConversationExchange, MultiConceptResult } from './types.js';
 import { isErroredSentinel } from './summary-sentinel.js';
 import fs from 'fs';
@@ -39,6 +46,8 @@ const SIDECHAIN_DISTANCE_PENALTY = 0.05;
  */
 const RRF_K = 60;
 const FUSION_POOL_MIN = 50;
+/** Windows fetched per wanted exchange: an exchange may have several near the query. */
+const VECTOR_WINDOW_FETCH = 2;
 
 /**
  * The FTS5 query for a free-text search: every token as a quoted term, OR-ed,
@@ -193,6 +202,30 @@ function exchangeFromRow(row: any): ConversationExchange {
 }
 
 /**
+ * Embed a query for the index's vectors. Refuses (EmbeddingsUnavailableError)
+ * when the index holds another model's vectors — they are never compared —
+ * or the embedder can't run.
+ */
+async function vectorQuery(db: Database.Database, query: string): Promise<number[]> {
+  const cfg = getEmbedderConfig();
+  const stored = storedSpace(db);
+  if (stored.id !== spaceId(cfg)) {
+    throw new EmbeddingsUnavailableError(
+      `the index holds ${stored.id} vectors and the configured embedder (${cfg.source}) writes ` +
+      `${spaceId(cfg)}; the next sync re-embeds them`
+    );
+  }
+  await initEmbeddings();
+  const v = await generateQueryEmbedding(query);
+  if (v.length !== stored.dims) {
+    throw new EmbeddingsUnavailableError(
+      `${cfg.model} returned ${v.length}-dimension vectors, the index holds ${stored.dims}`
+    );
+  }
+  return v;
+}
+
+/**
  * Convert an L2 (Euclidean) distance between two unit-normalized vectors
  * into a cosine similarity in [-1, 1].
  *
@@ -241,29 +274,43 @@ export async function searchConversations(
     // Vector similarity search.
     // vec0 applies KNN before the WHERE clause and before our sidechain
     // de-rank, so we over-fetch candidates and trim after the final ordering.
-    await initEmbeddings();
-    const queryEmbedding = await generateQueryEmbedding(query);
-    const k = mode === 'both' ? Math.max(limit * 5, FUSION_POOL_MIN) : limit * 3;
+    try {
+      const queryEmbedding = await vectorQuery(db, query);
+      // Vectors are windows (`<exchange id>` or `<exchange id>#<k>`, exchange-text.ts),
+      // so fetch more and keep each exchange's nearest window.
+      const k = Math.min(
+        (mode === 'both' ? Math.max(limit * 5, FUSION_POOL_MIN) : limit * 3) * VECTOR_WINDOW_FETCH,
+        4096
+      );
 
-    const stmt = db.prepare(`
-      SELECT
-        ${EXCHANGE_SELECT_COLUMNS},
-        vec.distance
-      FROM vec_exchanges AS vec
-      JOIN exchanges AS e ON vec.id = e.id
-      WHERE vec.embedding MATCH ?
-        AND k = ?
-        ${sidechainClause}
-        ${filterClause}
-      ORDER BY (vec.distance + e.is_sidechain * ?) ASC
-    `);
+      const stmt = db.prepare(`
+        SELECT
+          ${EXCHANGE_SELECT_COLUMNS},
+          vec.distance
+        FROM vec_exchanges AS vec
+        JOIN exchanges AS e ON e.id = CASE WHEN instr(vec.id, '#') > 0
+                                          THEN substr(vec.id, 1, instr(vec.id, '#') - 1)
+                                          ELSE vec.id END
+        WHERE vec.embedding MATCH ?
+          AND k = ?
+          ${sidechainClause}
+          ${filterClause}
+        ORDER BY (vec.distance + e.is_sidechain * ?) ASC
+      `);
 
-    results = stmt.all(
-      Buffer.from(new Float32Array(queryEmbedding).buffer),
-      k,
-      ...filterParams,
-      SIDECHAIN_DISTANCE_PENALTY
-    );
+      const seen = new Set<string>();
+      results = (stmt.all(
+        Buffer.from(new Float32Array(queryEmbedding).buffer),
+        k,
+        ...filterParams,
+        SIDECHAIN_DISTANCE_PENALTY
+      ) as any[]).filter((r) => !seen.has(r.id) && seen.add(r.id));
+    } catch (error) {
+      // Default search keeps its keyword half when the vector half can't run.
+      if (mode === 'vector' || !(error instanceof EmbeddingsUnavailableError)) throw error;
+      console.error(`episodic-memory: keyword ranking only — ${error.message}`);
+      results = [];
+    }
     if (mode === 'vector' && results.length > limit) {
       results = results.slice(0, limit);
     }

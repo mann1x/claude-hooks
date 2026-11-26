@@ -259,6 +259,85 @@ def install_vendored(root: Path = VENDORED, *, dry: bool = False,
     return True
 
 
+def _embedding_version(root: Path = VENDORED) -> Optional[int]:
+    """EMBEDDING_VERSION of the built package (dist/embedding-migration.js)."""
+    try:
+        text = (root / "dist" / "embedding-migration.js").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = re.search(r"EMBEDDING_VERSION\s*=\s*(\d+)", text)
+    return int(m.group(1)) if m else None
+
+
+def _stale(db_path: Path, version: int) -> Optional[int]:
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=30)
+        try:
+            return conn.execute("SELECT COUNT(*) FROM exchanges WHERE embedding_version < ?",
+                                (version,)).fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+
+def rebuild_embeddings(via_url: str, via_kind: str, group: int = 5000) -> int:
+    """Re-embed the index on another server of the configured model.
+
+    The configured embedder may be slow for a whole index (solidpc's is a
+    CPU llamafile: ~6 s an exchange, ~120 h for 72k) while a GPU server of
+    the same model does it in about an hour. Refuses unless both servers
+    give the same vectors (PARITY_MIN_COSINE) — a mislabelled model would
+    fill the index with another space's vectors. Runs ``sync`` with the
+    override until nothing is stale; the index records the model, not the
+    server, so the configured embedder takes over afterwards."""
+    sys.path.insert(0, str(REPO))
+    try:
+        from claude_hooks import episodic_embedder as ee
+    finally:
+        sys.path.pop(0)
+    cfg = json.loads((REPO / "config" / "claude-hooks.json").read_text(encoding="utf-8"))
+    spec, why = ee.spec_for(cfg)
+    if spec is None:
+        print(f"no configured embedder to rebuild for: {why}")
+        return 1
+    via = ee.rebuild_spec(spec, via_url, via_kind)
+    ee.ensure_embedder(cfg)
+    try:
+        cos = ee.parity(spec, via)
+    except Exception as e:
+        print(f"parity check failed: {type(e).__name__}: {e}")
+        return 1
+    print(f"{spec['model']}: {spec['kind']} {spec['url']} vs {via['kind']} {via['url']}: "
+          f"lowest cosine {cos:.5f}")
+    if cos < ee.PARITY_MIN_COSINE:
+        print(f"below {ee.PARITY_MIN_COSINE}: not the same model, refusing")
+        return 1
+    version = _embedding_version()
+    db_path = ee.index_db_path()
+    if version is None or not db_path.exists():
+        print(f"no built package or no index at {db_path}")
+        return 1
+    env = dict(os.environ, EPISODIC_MEMORY_EMBEDDER=json.dumps(via),
+               EPISODIC_MEMORY_MIGRATION_BATCH=str(group))
+    last = None
+    while True:
+        r = subprocess.run(["episodic-memory", "sync"], env=env)
+        stale = _stale(db_path, version)
+        space = ee.index_space(db_path)
+        print(f"index: {space}, {stale} exchange(s) still to embed", flush=True)
+        if r.returncode != 0:
+            print(f"sync exited {r.returncode}")
+            return 1
+        if stale == 0 and space == ee.space_of(spec):
+            return 0
+        if stale is None or stale == last:
+            print("no progress (another sync or migration holds the lock?); stopping")
+            return 1
+        last = stale
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--rebuild", action="store_true",
@@ -267,7 +346,16 @@ def main(argv=None) -> int:
                     help="with --rebuild: rebuild every module, loading or not")
     ap.add_argument("--package-dir", help="episodic-memory checkout "
                     "(default: resolved from the CLI on PATH)")
+    ap.add_argument("--rebuild-embeddings", metavar="URL",
+                    help="re-embed the whole index on another server of the "
+                         "configured embedding model (e.g. a GPU Ollama)")
+    ap.add_argument("--via-kind", default="ollama",
+                    choices=("ollama", "llamafile", "openai"),
+                    help="with --rebuild-embeddings: that server's API")
     a = ap.parse_args(argv)
+
+    if a.rebuild_embeddings:
+        return rebuild_embeddings(a.rebuild_embeddings, a.via_kind)
 
     root = Path(a.package_dir) if a.package_dir else package_root()
     if root is None:

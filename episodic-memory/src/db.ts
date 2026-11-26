@@ -6,6 +6,12 @@ import * as sqliteVec from 'sqlite-vec';
 import { getDbPath } from './paths.js';
 import { capToolText, getToolInputMaxChars } from './tool-input.js';
 import { EMBEDDING_VERSION } from './embedding-migration.js';
+import {
+  ExchangeVectors,
+  deleteExchangeVectors,
+  ensureVectorSpace,
+  writeExchangeVectors,
+} from './vector-space.js';
 
 export function migrateSchema(db: Database.Database): void {
   const columns = db.prepare(`SELECT name FROM pragma_table_info('exchanges')`).all() as Array<{ name: string }>;
@@ -171,7 +177,9 @@ export function initDatabase(): Database.Database {
     )
   `);
 
-  // Create vector search index
+  // Create vector search index. A new index starts in the bundled model's
+  // space (384); a configured embedder of another width recreates it at its
+  // first vector (vector-space.ts), so never assume 384 elsewhere.
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_exchanges USING vec0(
       id TEXT PRIMARY KEY,
@@ -286,10 +294,13 @@ export function rebuildFtsIndex(db: Database.Database): void {
 export function insertExchange(
   db: Database.Database,
   exchange: ConversationExchange,
-  embedding: number[],
+  embedding: ExchangeVectors,
   toolNames?: string[]
 ): void {
   const now = Date.now();
+  // Before the row: switching to another model's space marks every exchange
+  // stale, and this one is current.
+  if (embedding && embedding.length > 0) ensureVectorSpace(db);
 
   const stmt = db.prepare(`
     INSERT OR REPLACE INTO exchanges
@@ -325,16 +336,10 @@ export function insertExchange(
     EMBEDDING_VERSION
   );
 
-  // Insert into vector table (delete first since virtual tables don't support REPLACE)
-  const delStmt = db.prepare(`DELETE FROM vec_exchanges WHERE id = ?`);
-  delStmt.run(exchange.id);
-
-  const vecStmt = db.prepare(`
-    INSERT INTO vec_exchanges (id, embedding)
-    VALUES (?, ?)
-  `);
-
-  vecStmt.run(exchange.id, Buffer.from(new Float32Array(embedding).buffer));
+  // Vectors: one per window, none when the exchange has nothing worth one
+  // (exchange-text.ts). A vector from another model's space switches the
+  // index first (vector-space.ts).
+  writeExchangeVectors(db, exchange.id, embedding);
 
   // Insert tool calls if present
   if (exchange.toolCalls && exchange.toolCalls.length > 0) {
@@ -375,8 +380,8 @@ export function getFileLastIndexed(db: Database.Database, archivePath: string): 
 }
 
 export function deleteExchange(db: Database.Database, id: string): void {
-  // Delete from vector table
-  db.prepare(`DELETE FROM vec_exchanges WHERE id = ?`).run(id);
+  // Delete from vector table: every window's vector
+  deleteExchangeVectors(db, id);
 
   // Delete from main table
   db.prepare(`DELETE FROM exchanges WHERE id = ?`).run(id);

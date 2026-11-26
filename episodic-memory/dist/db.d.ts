@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 import { ConversationExchange } from './types.js';
+import { ExchangeVectors } from './vector-space.js';
 export declare function migrateSchema(db: Database.Database): void;
 /**
  * Earlier versions created `tool_calls` with a plain
@@ -35,7 +36,7 @@ export declare const FTS_VERSION = "1";
 export declare function ensureFtsIndex(db: Database.Database): void;
 /** Rebuild the keyword index from `exchanges` and record it as current. */
 export declare function rebuildFtsIndex(db: Database.Database): void;
-export declare function insertExchange(db: Database.Database, exchange: ConversationExchange, embedding: number[], toolNames?: string[]): void;
+export declare function insertExchange(db: Database.Database, exchange: ConversationExchange, embedding: ExchangeVectors, toolNames?: string[]): void;
 export declare function getAllExchanges(db: Database.Database): Array<{
     id: string;
     archivePath: string;

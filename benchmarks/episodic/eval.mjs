@@ -3,6 +3,7 @@
 //
 //   node benchmarks/episodic/eval.mjs [--db <db.sqlite>] [--modes vector,both]
 //                                     [--limit 10] [--json out.json]
+//                                     [--pkg <dir holding dist/>]  (another build)
 //
 // A result is relevant when its conversation (archive_path) has an assistant
 // message containing the query's `marker` (and its project contains
@@ -14,7 +15,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const pkg = path.resolve(here, '../../episodic-memory');
 
 const args = process.argv.slice(2);
 const opt = (name, dflt) => {
@@ -27,6 +27,7 @@ const modes = opt('modes', 'vector,both').split(',');
 const limit = Number(opt('limit', '10'));
 const out = opt('json');
 const queriesFile = opt('queries', path.join(here, 'queries.json'));
+const pkg = path.resolve(opt('pkg', path.join(here, '../../episodic-memory')));
 
 const { searchConversations } = await import(path.join(pkg, 'dist/search.js'));
 const { initDatabase } = await import(path.join(pkg, 'dist/db.js'));
