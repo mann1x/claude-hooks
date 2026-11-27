@@ -282,6 +282,21 @@ def _stale(db_path: Path, version: int) -> Optional[int]:
         return None
 
 
+def _pending(db_path: Path) -> Optional[int]:
+    """Archived transcripts the index still owes exchanges to (``index_pending``)."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=30)
+        try:
+            return conn.execute("SELECT COUNT(*) FROM index_pending").fetchone()[0]
+        except sqlite3.OperationalError:
+            return 0  # an older package: no list yet
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+
 def rebuild_embeddings(via_url: str, via_kind: str, group: int = 5000) -> int:
     """Re-embed the index on another server of the configured model.
 
@@ -290,7 +305,8 @@ def rebuild_embeddings(via_url: str, via_kind: str, group: int = 5000) -> int:
     the same model does it in about an hour. Refuses unless both servers
     give the same vectors (PARITY_MIN_COSINE) — a mislabelled model would
     fill the index with another space's vectors. Runs ``sync`` with the
-    override until nothing is stale; the index records the model, not the
+    override until nothing is stale and no archived transcript is still
+    owed to the index (the catch-up list); the index records the model, not the
     server, so the configured embedder takes over afterwards."""
     sys.path.insert(0, str(REPO))
     try:
@@ -320,22 +336,25 @@ def rebuild_embeddings(via_url: str, via_kind: str, group: int = 5000) -> int:
         print(f"no built package or no index at {db_path}")
         return 1
     env = dict(os.environ, EPISODIC_MEMORY_EMBEDDER=json.dumps(via),
-               EPISODIC_MEMORY_MIGRATION_BATCH=str(group))
+               EPISODIC_MEMORY_MIGRATION_BATCH=str(group),
+               EPISODIC_MEMORY_INDEX_BATCH=str(group))
     last = None
     while True:
         r = subprocess.run(["episodic-memory", "sync"], env=env)
         stale = _stale(db_path, version)
+        pending = _pending(db_path)
         space = ee.index_space(db_path)
-        print(f"index: {space}, {stale} exchange(s) still to embed", flush=True)
+        print(f"index: {space}, {stale} exchange(s) still to embed, "
+              f"{pending} transcript(s) still to index", flush=True)
         if r.returncode != 0:
             print(f"sync exited {r.returncode}")
             return 1
-        if stale == 0 and space == ee.space_of(spec):
+        if stale == 0 and pending == 0 and space == ee.space_of(spec):
             return 0
-        if stale is None or stale == last:
+        if stale is None or pending is None or (stale, pending) == last:
             print("no progress (another sync or migration holds the lock?); stopping")
             return 1
-        last = stale
+        last = (stale, pending)
 
 
 def main(argv=None) -> int:

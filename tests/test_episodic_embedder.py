@@ -127,6 +127,28 @@ class TestIndex:
         conn.close()
         assert ee.index_space() == "qwen3-embedding:0.6b"
 
+    def test_index_pending(self, superpowers):
+        # Transcripts the index still owes (index-pending.ts); verify_deploy WARNs on them.
+        assert ee.index_pending() is None
+        db = superpowers / "conversation-index" / "db.sqlite"
+        db.parent.mkdir(parents=True)
+        conn = sqlite3.connect(db)
+        conn.execute("CREATE TABLE exchanges (id TEXT)")
+        conn.commit()
+        assert ee.index_pending() == 0  # an index from before the list
+        conn.execute("CREATE TABLE index_pending (archive_path TEXT PRIMARY KEY, reason TEXT, since TEXT)")
+        conn.executemany("INSERT INTO index_pending VALUES (?, 'catch-up', '2026-11-27')",
+                         [("/a.jsonl",), ("/b.jsonl",)])
+        conn.commit()
+        conn.close()
+        assert ee.index_pending() == 2
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        try:
+            import episodic_doctor
+        finally:
+            sys.path.pop(0)
+        assert episodic_doctor._pending(db) == 2
+
     def test_rebuild_spec_swaps_the_server_only(self):
         spec, _ = ee.spec_for(_cfg())
         via = ee.rebuild_spec(spec, "http://127.0.0.1:11434", "ollama")

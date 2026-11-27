@@ -9,6 +9,7 @@ export interface SearchOptions {
     session_id?: string;
     git_branch?: string;
     include_sidechains?: boolean;
+    per_conversation?: boolean;
 }
 /**
  * The FTS5 query for a free-text search: every token as a quoted term, OR-ed,
@@ -17,6 +18,14 @@ export interface SearchOptions {
  * phrase "op 296". Null when the query has no token.
  */
 export declare function buildFtsQuery(query: string): string | null;
+/**
+ * Keep each conversation's best-ranked row (rows arrive in rank order). A
+ * long session otherwise fills several of the top 10 with neighbouring
+ * exchanges of one piece of work.
+ */
+export declare function bestPerConversation<T extends {
+    archive_path: string;
+}>(rows: T[]): T[];
 /** Reciprocal rank fusion of ranked row lists (rows keyed by `id`). */
 export declare function fuseByRank<T extends {
     id: string;

@@ -37,7 +37,20 @@ Judging uses Ollama Cloud: claim `ollama-cloud` first.
 | bge-small, vector then unranked LIKE hits appended (before) | 0.26 | 0.24 | 0.36 | 0.52 | 0.32 |
 | bge-small, vector + BM25 fused (RRF) | 0.41 | 0.41 | 0.61 | 0.68 | 0.64 |
 | qwen3-embedding:0.6b, clean windows, vector only | 0.48 | 0.45 | 0.61 | 0.65 | 0.57 |
-| **qwen3-embedding:0.6b, clean windows, vector + BM25 fused** | **0.52** | **0.55** | **0.68** | **0.77** | **0.71** |
+| qwen3-embedding:0.6b, clean windows, vector + BM25 fused | 0.52 | 0.55 | 0.68 | 0.77 | 0.71 |
+| **+ unindexed conversations caught up, `claude -p` runs out, one result per conversation (fused)** | **0.53** | **0.55** | **0.82** | **0.95** | **0.89** |
+| same, vector only | 0.41 | 0.41 | 0.75 | 0.78 | 0.82 |
+
+Judged in one pool (glm-5.3, 2026-11-27, with the rows above re-scored in
+it: the old fused bge row reads 0.41 / 0.38 / 0.61 / 0.68 there). The last
+two rows are a copy of the index after the one-time catch-up (17,838
+exchanges that had never been indexed, 36 min on GPU Ollama) and the purge
+of 5,193 spawned conversations: 84,365 exchanges, 129,529 vectors. The
+qwen3 row before it scored partly on Caliber runs that quote the project's
+docs: for 25 of the 28 queries those were the only indexed conversations
+holding the marker, because the sessions where the work happened had never
+been indexed. Without the catch-up, removing them alone drops the marker
+hit@10 to 0.39.
 
 All four rows judged in one pool (glm-5.3); nDCG depends on the pool, so the
 fused bge row reads 0.47 against the smaller pool of its first run. Id

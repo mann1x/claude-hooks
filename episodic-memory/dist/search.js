@@ -40,6 +40,15 @@ export function buildFtsQuery(query) {
     const unique = [...new Set(terms)];
     return unique.length ? unique.map((t) => `"${t.replace(/"/g, '""')}"`).join(' OR ') : null;
 }
+/**
+ * Keep each conversation's best-ranked row (rows arrive in rank order). A
+ * long session otherwise fills several of the top 10 with neighbouring
+ * exchanges of one piece of work.
+ */
+export function bestPerConversation(rows) {
+    const seen = new Set();
+    return rows.filter((r) => !seen.has(r.archive_path) && (seen.add(r.archive_path), true));
+}
 /** Reciprocal rank fusion of ranked row lists (rows keyed by `id`). */
 export function fuseByRank(lists, limit) {
     const scored = new Map();
@@ -219,6 +228,10 @@ function validateISODate(dateStr, paramName) {
 export async function searchConversations(query, options = {}) {
     const { limit = 10, mode = 'both', after, before } = options;
     const includeSidechains = options.include_sidechains !== false;
+    const perConversation = options.per_conversation !== false;
+    // Rows kept before the final cut: per conversation, several of a pool's rows collapse into one.
+    const pool = Math.max(limit * 5, FUSION_POOL_MIN);
+    const finish = (rows) => (perConversation ? bestPerConversation(rows) : rows).slice(0, limit);
     const sidechainClause = includeSidechains ? '' : 'AND e.is_sidechain = 0';
     // Validate date parameters
     if (after)
@@ -236,7 +249,7 @@ export async function searchConversations(query, options = {}) {
             const queryEmbedding = await vectorQuery(db, query);
             // Vectors are windows (`<exchange id>` or `<exchange id>#<k>`, exchange-text.ts),
             // so fetch more and keep each exchange's nearest window.
-            const k = Math.min((mode === 'both' ? Math.max(limit * 5, FUSION_POOL_MIN) : limit * 3) * VECTOR_WINDOW_FETCH, 4096);
+            const k = Math.min(pool * VECTOR_WINDOW_FETCH, 4096);
             const stmt = db.prepare(`
         SELECT
           ${EXCHANGE_SELECT_COLUMNS},
@@ -261,8 +274,8 @@ export async function searchConversations(query, options = {}) {
             console.error(`episodic-memory: keyword ranking only — ${error.message}`);
             results = [];
         }
-        if (mode === 'vector' && results.length > limit) {
-            results = results.slice(0, limit);
+        if (mode === 'vector') {
+            results = finish(results);
         }
     }
     if (mode === 'both') {
@@ -280,9 +293,9 @@ export async function searchConversations(query, options = {}) {
           ${filterClause}
         ORDER BY bm25(exchanges_fts)
         LIMIT ?
-      `).all(ftsQuery, ...filterParams, Math.max(limit * 5, FUSION_POOL_MIN));
+      `).all(ftsQuery, ...filterParams, pool);
         }
-        results = fuseByRank([results, keywordRows], limit);
+        results = finish(fuseByRank([results, keywordRows], Infinity));
     }
     if (mode === 'text') {
         // Text search: AND of per-token LIKE patterns so multi-word queries match
@@ -302,7 +315,7 @@ export async function searchConversations(query, options = {}) {
       ORDER BY e.is_sidechain ASC, e.timestamp DESC
       LIMIT ?
     `);
-        results = textStmt.all(...textMatchParams, ...filterParams, limit);
+        results = finish(textStmt.all(...textMatchParams, ...filterParams, perConversation ? pool : limit));
     }
     const lastLines = lastIndexedLines(db, results.map((row) => row.archive_path));
     db.close();

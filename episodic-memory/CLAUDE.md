@@ -102,9 +102,21 @@ A change of *model* is not a version bump: it is a new vector space. `index_meta
 
 `src/exchange-text.ts` decides what is embedded: no user side for harness turns (task notifications, continued-session summaries, Stop hook feedback), no system reminders, no tool names, the question capped at 600 characters, and long answers cut into overlapping windows (`composeExchangeChunks()`, ≤ `MAX_CHUNKS`), one vector each, ids `<exchange id>` then `<exchange id>#<k>`. Search maps a window back to its exchange and keeps each exchange once. An exchange with nothing worth a vector gets none and is still found by BM25.
 
+### Exclusion markers and the catch-up list
+
+A marker counts only as an instruction: in a Claude Code record, the text of a user turn without `<system-reminder>` blocks (`scanMarkers()` / `lineCarriesMarker()` in `src/sync.ts`), never a tool result, assistant text or another record type; other harnesses' records count anywhere. A session that once read `sync.ts` quoted every marker in a tool result and was never indexed again. DO NOT INDEX keeps the whole conversation out (`shouldSkipIndexing()`); the summarizer and insights markers drop only the exchange whose prompt carries them (`isSummarizerPrompt()`), because Claude Code can start a session id with a summarizer turn (one such session had 667 exchanges, none indexed). `shouldSkipConversation()` (any marker, fail closed) still gates the summary queue: it is the summarizer's recursion guard (#87).
+
+`src/index-pending.ts`: sync used to index only the files it copied in the same run, and the archive copy keeps the source's mtime, so a file whose indexing was skipped or failed (embedder down, a marker, an error) was never looked at again — 17,838 exchanges in 4,450 conversations on one index. Now such a file goes to `index_pending`; every sync works through copied files, then the list, within `EPISODIC_MEMORY_INDEX_BATCH` exchanges (default 500), and a file leaves it when nothing past its high-water mark is left. `seedCatchUp()` lists the whole archive once per `CATCHUP_VERSION` (sync-cli). Spec: `test/index-catchup.test.ts`.
+
+### Spawned sessions are not indexed
+
+`src/spawned-session.ts` keeps `claude -p` / Agent SDK runs (Caliber, OpenWolf, skill generators, workflow agents) out of the index and the summary queue: an `entrypoint` starting `sdk-`, or (older Claude Code, which wrote `cli` for them too) a file opening with a `queue-operation` / `enqueue` record and no `file-history-snapshot` in its first `HEAD_RECORDS`; a subagent follows its parent session. Sync and all three indexer paths check it; `purgeSpawnedSessions()` removes ones already indexed once per `SPAWNED_FILTER_VERSION` (sync-cli phase, `index_meta.spawned_filter`). Archived copies are kept; `EPISODIC_MEMORY_INDEX_SPAWNED=1` indexes them again. Spec: `test/spawned-session.test.ts`, `test/sync-spawned.test.ts`.
+
 ### Keyword fusion (BM25) search
 
 Default search (`both` mode) is reciprocal rank fusion (`fuseByRank()`) of the vector-similarity list and a BM25 keyword list from the `exchanges_fts` FTS5 index. `ensureFtsIndex()` in `src/db.ts` builds and keeps that index in step via triggers (needs `recursive_triggers = ON`); `src/compact.ts` rebuilds it after `VACUUM INTO`. `--text` keeps the exact whole-query substring match. Spec: `test/keyword-fusion.test.ts`.
+
+Every mode returns one result per conversation (`bestPerConversation()`: its best-ranked exchange), cut to the limit after grouping, from pools of max(5 × limit, 50); `per_conversation: false` gives every exchange. Spec: `test/search-per-conversation.test.ts`.
 
 ### Stored tool inputs and `compact`
 
@@ -130,8 +142,10 @@ src/
   embedder-config.ts     # which embedder: EPISODIC_MEMORY_EMBEDDER / <superpowers>/embedder.json / bundled
   vector-space.ts        # the index's vector space (model + width), switch + re-embed, window vectors
   exchange-text.ts       # what an exchange is embedded as: cleaned text, overlapping windows
+  spawned-session.ts     # claude -p / Agent SDK transcripts: detect, keep out, purge from an index
+  index-pending.ts       # transcripts the index still owes: catch-up list, per-run budget, one-time seed
   embedding-migration.ts # version constant + lock + batch migration
-  search.ts              # vector + BM25 keyword fusion (RRF); multi-concept aggregation
+  search.ts              # vector + BM25 keyword fusion (RRF), one result per conversation; multi-concept aggregation
   indexer.ts             # incremental index from sources to vec_exchanges
   sync.ts / sync-cli.ts  # source→archive copy + index, with reentrancy guard
   summarizer.ts          # Claude Agent SDK calls; persistSession: false guard

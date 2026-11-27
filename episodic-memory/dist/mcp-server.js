@@ -30995,6 +30995,10 @@ function buildFtsQuery(query) {
   const unique = [...new Set(terms)];
   return unique.length ? unique.map((t) => `"${t.replace(/"/g, '""')}"`).join(" OR ") : null;
 }
+function bestPerConversation(rows) {
+  const seen = /* @__PURE__ */ new Set();
+  return rows.filter((r) => !seen.has(r.archive_path) && (seen.add(r.archive_path), true));
+}
 function fuseByRank(lists, limit) {
   const scored = /* @__PURE__ */ new Map();
   for (const list of lists) {
@@ -31140,6 +31144,9 @@ function validateISODate(dateStr, paramName) {
 async function searchConversations(query, options = {}) {
   const { limit = 10, mode = "both", after, before } = options;
   const includeSidechains = options.include_sidechains !== false;
+  const perConversation = options.per_conversation !== false;
+  const pool = Math.max(limit * 5, FUSION_POOL_MIN);
+  const finish = (rows) => (perConversation ? bestPerConversation(rows) : rows).slice(0, limit);
   const sidechainClause = includeSidechains ? "" : "AND e.is_sidechain = 0";
   if (after) validateISODate(after, "--after");
   if (before) validateISODate(before, "--before");
@@ -31150,7 +31157,7 @@ async function searchConversations(query, options = {}) {
     try {
       const queryEmbedding = await vectorQuery(db, query);
       const k2 = Math.min(
-        (mode === "both" ? Math.max(limit * 5, FUSION_POOL_MIN) : limit * 3) * VECTOR_WINDOW_FETCH,
+        pool * VECTOR_WINDOW_FETCH,
         4096
       );
       const stmt = db.prepare(`
@@ -31179,8 +31186,8 @@ async function searchConversations(query, options = {}) {
       console.error(`episodic-memory: keyword ranking only \u2014 ${error62.message}`);
       results = [];
     }
-    if (mode === "vector" && results.length > limit) {
-      results = results.slice(0, limit);
+    if (mode === "vector") {
+      results = finish(results);
     }
   }
   if (mode === "both") {
@@ -31198,9 +31205,9 @@ async function searchConversations(query, options = {}) {
           ${filterClause}
         ORDER BY bm25(exchanges_fts)
         LIMIT ?
-      `).all(ftsQuery, ...filterParams, Math.max(limit * 5, FUSION_POOL_MIN));
+      `).all(ftsQuery, ...filterParams, pool);
     }
-    results = fuseByRank([results, keywordRows], limit);
+    results = finish(fuseByRank([results, keywordRows], Infinity));
   }
   if (mode === "text") {
     const { sql: textMatchSql, params: textMatchParams } = buildTextMatchClause(query);
@@ -31215,7 +31222,7 @@ async function searchConversations(query, options = {}) {
       ORDER BY e.is_sidechain ASC, e.timestamp DESC
       LIMIT ?
     `);
-    results = textStmt.all(...textMatchParams, ...filterParams, limit);
+    results = finish(textStmt.all(...textMatchParams, ...filterParams, perConversation ? pool : limit));
   }
   const lastLines = lastIndexedLines(db, results.map((row) => row.archive_path));
   db.close();

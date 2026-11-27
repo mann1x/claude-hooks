@@ -453,6 +453,27 @@ llamafile before every search and sync (it idles out after an hour and only
 the daemon restarts it); a CLI call that finds the embedder down falls back
 to keyword ranking.
 
+**Nothing falls through.** A transcript sync could not index — the
+embedder down, an error, more than one run's budget — goes on a list
+(`index_pending`, `episodic-memory/src/index-pending.ts`) that every sync
+works through within `EPISODIC_MEMORY_INDEX_BATCH` exchanges (default
+500). Before it, a file copied during an outage counted as current and was
+never indexed: the first sync of this version lists the whole archive once
+to catch those up, and `episodic_doctor.py --rebuild-embeddings <GPU URL>`
+drains the list at once (`verify_deploy` WARNs while it is not empty). An
+exclusion marker (`DO NOT INDEX THIS CHAT`, the summarizer's prompt) counts
+only in text a user wrote, never in a tool result: a session that read
+episodic-memory's own source used to be dropped whole.
+
+**What is left out, and how results are grouped.** Transcripts of spawned
+runs — `claude -p` and the Agent SDK: Caliber, OpenWolf, skill generators,
+workflow agents — are archived but neither indexed nor summarized
+(`episodic-memory/src/spawned-session.ts`); the first sync of a new version
+removes the ones already in the index (36 s for 5,193 sessions here).
+`EPISODIC_MEMORY_INDEX_SPAWNED=1` keeps them. Results are one per
+conversation, its best-matching exchange, so a long session no longer
+fills several of the top 10.
+
 `verify_deploy` FAILs when `embedder.json` does not match the config and
 WARNs while the index still holds another model's vectors. Measurements:
 [`benchmarks/episodic/README.md`](../benchmarks/episodic/README.md).

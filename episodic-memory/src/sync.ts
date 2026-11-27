@@ -5,48 +5,124 @@ import { SUMMARIZER_CONTEXT_MARKER } from './constants.js';
 import { getExcludedProjects, findJsonlFiles, statIfExists } from './paths.js';
 import { formatErrorSentinel, shouldQueueForSummary } from './summary-sentinel.js';
 import { getMaxMessageBytes, isOversizeExchange } from './message-size.js';
-import { removeCompressedCopy, statTranscript } from './transcript-io.js';
+import zlib from 'zlib';
+import { removeCompressedCopy, resolveTranscript, statTranscript, transcriptExists, ZST_SUFFIX } from './transcript-io.js';
+import { addPending, getIndexBatch, listPending, removePending } from './index-pending.js';
+import { excludeAsSpawned } from './spawned-session.js';
 
-const EXCLUSION_MARKERS = [
-  '<INSTRUCTIONS-TO-EPISODIC-MEMORY>DO NOT INDEX THIS CHAT</INSTRUCTIONS-TO-EPISODIC-MEMORY>',
-  'Only use NO_INSIGHTS_FOUND',
-  SUMMARIZER_CONTEXT_MARKER,
-];
+const DO_NOT_INDEX_MARKER =
+  '<INSTRUCTIONS-TO-EPISODIC-MEMORY>DO NOT INDEX THIS CHAT</INSTRUCTIONS-TO-EPISODIC-MEMORY>';
+const INSIGHTS_MARKER = 'Only use NO_INSIGHTS_FOUND';
 
-const MARKER_SCAN_CHUNK_BYTES = 1 << 20; // 1 MiB
+const EXCLUSION_MARKERS = [DO_NOT_INDEX_MARKER, INSIGHTS_MARKER, SUMMARIZER_CONTEXT_MARKER];
 
 /**
- * Stream and scan for any exclusion marker, carrying an overlap between
- * chunks so a marker split across a boundary is still found. A single
- * fs.readFileSync(path, 'utf-8') throws ERR_STRING_TOO_LONG above Node's
- * ~512 MB max string length; the old catch returned false (fail OPEN),
- * silently indexing a file whose DO NOT INDEX marker we never read (#152).
- * Streaming confirms cleanliness at any size, and a real read error now
- * fails CLOSED (skip) rather than open.
+ * Markers of a prompt another tool wrote into a session (this package's
+ * summarizer, an insights extractor). Indexing drops that exchange only: a
+ * session whose first turn is a summarizer's — Claude Code can start a session
+ * id that way — still holds the user's work after it (one such session here
+ * had 667 exchanges, none indexed).
  */
-export function shouldSkipConversation(filePath: string): boolean {
-  const maxMarkerLen = Math.max(...EXCLUSION_MARKERS.map(m => m.length));
-  let fd: number | undefined;
+const PROMPT_MARKERS = [INSIGHTS_MARKER, SUMMARIZER_CONTEXT_MARKER];
+
+export function isSummarizerPrompt(userMessage: string): boolean {
+  return PROMPT_MARKERS.some(m => userMessage.includes(m));
+}
+
+const MARKER_SCAN_CHUNK_BYTES = 1 << 20; // 1 MiB
+const REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
+
+/** A transcript's bytes, line by line (plain or `.jsonl.zst`). Throws on a read error. */
+function* transcriptLines(canonical: string): Generator<string> {
+  const actual = resolveTranscript(canonical) ?? canonical;
+  if (actual.endsWith(ZST_SUFFIX)) {
+    const buf = (zlib as any).zstdDecompressSync(fs.readFileSync(actual)) as Buffer;
+    for (let start = 0; start < buf.length;) {
+      let end = buf.indexOf(10, start);
+      if (end < 0) end = buf.length;
+      yield buf.toString('utf8', start, end);
+      start = end + 1;
+    }
+    return;
+  }
+  const fd = fs.openSync(actual, 'r');
   try {
-    fd = fs.openSync(filePath, 'r');
     const buf = Buffer.allocUnsafe(MARKER_SCAN_CHUNK_BYTES);
     const decoder = new StringDecoder('utf8');
     let carry = '';
     let bytesRead: number;
     while ((bytesRead = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
-      const window = carry + decoder.write(buf.subarray(0, bytesRead));
-      if (EXCLUSION_MARKERS.some(marker => window.includes(marker))) {
-        return true;
-      }
-      carry = window.slice(Math.max(0, window.length - (maxMarkerLen - 1)));
+      const parts = (carry + decoder.write(buf.subarray(0, bytesRead))).split('\n');
+      carry = parts.pop() ?? '';
+      yield* parts;
     }
     const tail = carry + decoder.end();
-    return EXCLUSION_MARKERS.some(marker => tail.includes(marker));
-  } catch {
-    return true; // fail closed (#152)
+    if (tail) yield tail;
   } finally {
-    if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
+    try { fs.closeSync(fd); } catch {}
   }
+}
+
+/** The text a user record carries: no tool results, no system reminders. */
+function authoredText(content: unknown): string {
+  const text = typeof content === 'string'
+    ? content
+    : Array.isArray(content)
+      ? content.filter((p: any) => p && p.type === 'text' && typeof p.text === 'string').map((p: any) => p.text).join('\n')
+      : '';
+  return text.replace(REMINDER, '');
+}
+
+/**
+ * Does this line carry a marker as an instruction? In a Claude Code record
+ * only the text of a user turn counts — not tool results (a session that read
+ * this file's source quoted every marker), assistant text, reminders or other
+ * record types. Other harnesses' records count anywhere, as before.
+ */
+function lineCarriesMarker(line: string, markers: readonly string[]): boolean {
+  let rec: any;
+  try {
+    rec = JSON.parse(line);
+  } catch {
+    return true;
+  }
+  if (!rec || typeof rec !== 'object') return true;
+  const claude = typeof rec.type === 'string' && typeof rec.sessionId === 'string' && rec.payload === undefined;
+  if (!claude) return true;
+  if (rec.type !== 'user' || !rec.message || typeof rec.message !== 'object') return false;
+  const text = authoredText(rec.message.content);
+  return markers.some(m => text.includes(m));
+}
+
+/**
+ * Whether the transcript carries one of `markers` as an instruction; null on a
+ * read error. Only lines holding a marker's bare string are parsed (markers
+ * have no newline, so none spans two lines). Reading line by line keeps any
+ * size readable: one readFileSync throws ERR_STRING_TOO_LONG above ~512 MB (#152).
+ */
+export function scanMarkers(canonical: string, markers: readonly string[]): boolean | null {
+  try {
+    for (const line of transcriptLines(canonical)) {
+      if (markers.some(m => line.includes(m)) && lineCarriesMarker(line, markers)) return true;
+    }
+    return false;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Leave the conversation out of summaries: a marker in a user turn, or an
+ * unreadable file (fail closed, #152). This is also the summarizer's
+ * recursion guard — its own sessions carry SUMMARIZER_CONTEXT_MARKER.
+ */
+export function shouldSkipConversation(filePath: string): boolean {
+  return scanMarkers(filePath, EXCLUSION_MARKERS) ?? true;
+}
+
+/** DO NOT INDEX in a user turn: the whole conversation stays out of the index (null: unreadable). */
+export function shouldSkipIndexing(filePath: string): boolean | null {
+  return scanMarkers(filePath, [DO_NOT_INDEX_MARKER]);
 }
 
 /**
@@ -241,7 +317,8 @@ export async function syncConversations(
           const summaryPath = destFile.replace('.jsonl', '-summary.txt');
           // The marker scan reads the source: the archive copy was just made
           // current from it, and may be stored compressed.
-          if (shouldQueueForSummary(summaryPath) && !shouldSkipConversation(srcFile)) {
+          if (shouldQueueForSummary(summaryPath) && !shouldSkipConversation(srcFile)
+              && !(await excludeAsSpawned(srcFile))) {
             // sessionId enables Claude session-resume summarization; when the
             // filename has no UUID to extract (e.g. subagent transcripts named
             // agent-<hex>.jsonl), queue anyway — summarizeConversation falls
@@ -259,94 +336,133 @@ export async function syncConversations(
     }
   }
 
-  // Index copied files (unless skipIndex is set)
-  if (!options.skipIndex && filesToIndex.length > 0) {
-    const { parseConversation } = await import('./parser.js');
-
-    // Load the embedding backend first. It can fail on hosts where sharp's
-    // native binding (pulled in transitively by @huggingface/transformers)
-    // can't dlopen libvips (#135). That must not abort the whole sync — copying
-    // has already happened and summaries still need to run — so surface a
-    // clear, actionable error and skip semantic indexing for this run instead
-    // of throwing out of syncConversations (which would crash the SessionStart
-    // hook that invokes it).
-    let embeddings: typeof import('./embeddings.js') | null = null;
+  // Index the files copied this run, then what earlier runs still owe
+  // (index-pending.ts), within EPISODIC_MEMORY_INDEX_BATCH exchanges.
+  if (!options.skipIndex) {
+    const { initDatabase, insertExchange } = await import('./db.js');
+    const db = initDatabase();
     try {
-      embeddings = await import('./embeddings.js');
-      await embeddings.initEmbeddings();
-    } catch (error) {
-      embeddings = null;
-      result.errors.push({
-        file: '(embeddings)',
-        error: `Semantic indexing skipped — embedding backend unavailable: ${error instanceof Error ? error.message : String(error)}`,
-      });
-      console.error(
-        'episodic-memory: embedding backend failed to load; skipping semantic ' +
-        'indexing this run (copying and summaries still run). See the error above.'
-      );
-    }
+      const queue = [...new Set([...filesToIndex, ...listPending(db)])];
+      if (queue.length > 0) {
+        const { parseConversation } = await import('./parser.js');
 
-    if (embeddings) {
-      const { initDatabase, insertExchange } = await import('./db.js');
-      const { generateExchangeEmbedding } = embeddings;
-
-      const db = initDatabase();
-
-      const maxMessageBytes = getMaxMessageBytes();
-      let oversizeSkipped = 0;
-
-      for (const file of filesToIndex) {
+        // Load the embedding backend first. It can fail on hosts where sharp's
+        // native binding (pulled in transitively by @huggingface/transformers)
+        // can't dlopen libvips (#135). That must not abort the whole sync — copying
+        // has already happened and summaries still need to run — so surface a
+        // clear, actionable error and skip semantic indexing for this run instead
+        // of throwing out of syncConversations (which would crash the SessionStart
+        // hook that invokes it). What was copied stays owed.
+        let embeddings: typeof import('./embeddings.js') | null = null;
         try {
-          // Check for DO NOT INDEX marker
-          if (shouldSkipConversation(file)) {
-            continue; // Skip indexing but file is already copied
-          }
+          embeddings = await import('./embeddings.js');
+          await embeddings.initEmbeddings();
+        } catch (error) {
+          embeddings = null;
+          addPending(db, filesToIndex, 'embedder unavailable');
+          result.errors.push({
+            file: '(embeddings)',
+            error: `Semantic indexing skipped — embedding backend unavailable: ${error instanceof Error ? error.message : String(error)}`,
+          });
+          console.error(
+            'episodic-memory: embedding backend failed to load; skipping semantic ' +
+            'indexing this run (copying and summaries still run). See the error above.'
+          );
+        }
 
-          // High-water mark: index exchanges past the last line we've already
-          // covered. Transcript JSONLs are append-only, so MAX(line_end) tells
-          // us where to resume — without this, a grown transcript re-embeds
-          // every exchange on every sync (#152). Ported from indexer.ts.
-          const hw = db.prepare(
-            'SELECT COALESCE(MAX(line_end), 0) as maxLine FROM exchanges WHERE archive_path = ?'
-          ).get(file) as { maxLine: number };
-          const maxIndexedLine = hw.maxLine;
+        if (embeddings) {
+          const { generateExchangeEmbedding } = embeddings;
+          const maxMessageBytes = getMaxMessageBytes();
+          let oversizeSkipped = 0;
+          let budget = getIndexBatch();
+          let owed = 0;
 
-          const project = path.basename(path.dirname(file));
-          const exchanges = await parseConversation(file, project, file);
-          const newExchanges = maxIndexedLine > 0
-            ? exchanges.filter(e => e.lineStart > maxIndexedLine)
-            : exchanges;
-
-          for (const exchange of newExchanges) {
-            // Skip oversize single messages BEFORE embedding — a foreign
-            // summarizer's pasted transcript is noise, and embedding it is the
-            // expensive waste (#139).
-            if (isOversizeExchange(exchange, maxMessageBytes)) {
-              oversizeSkipped++;
+          for (const file of queue) {
+            if (budget <= 0) {
+              addPending(db, [file], 'batch');
+              owed++;
               continue;
             }
-            const toolNames = exchange.toolCalls?.map(tc => tc.toolName);
-            const embedding = await generateExchangeEmbedding(
-              exchange.userMessage,
-              exchange.assistantMessage,
-              toolNames
-            );
-            insertExchange(db, exchange, embedding, toolNames);
+            try {
+              if (!transcriptExists(file)) {
+                removePending(db, file);
+                continue;
+              }
+              // DO NOT INDEX in a user turn; an unreadable file stays owed.
+              const skip = shouldSkipIndexing(file);
+              if (skip === null) {
+                addPending(db, [file], 'unreadable');
+                continue;
+              }
+              // claude -p / Agent SDK runs: prompts a tool wrote (spawned-session.ts)
+              if (skip || await excludeAsSpawned(file)) {
+                removePending(db, file);
+                continue;
+              }
+
+              // High-water mark: index exchanges past the last line we've already
+              // covered. Transcript JSONLs are append-only, so MAX(line_end) tells
+              // us where to resume — without this, a grown transcript re-embeds
+              // every exchange on every sync (#152). Ported from indexer.ts.
+              const hw = db.prepare(
+                'SELECT COALESCE(MAX(line_end), 0) as maxLine FROM exchanges WHERE archive_path = ?'
+              ).get(file) as { maxLine: number };
+              const maxIndexedLine = hw.maxLine;
+
+              const project = path.basename(path.dirname(file));
+              const exchanges = await parseConversation(file, project, file);
+              const newExchanges = exchanges.filter(
+                e => e.lineStart > maxIndexedLine && !isSummarizerPrompt(e.userMessage)
+              );
+
+              let cut = false;
+              for (const exchange of newExchanges) {
+                if (budget <= 0) {
+                  cut = true;
+                  break;
+                }
+                // Skip oversize single messages BEFORE embedding — a foreign
+                // summarizer's pasted transcript is noise, and embedding it is the
+                // expensive waste (#139).
+                if (isOversizeExchange(exchange, maxMessageBytes)) {
+                  oversizeSkipped++;
+                  continue;
+                }
+                const toolNames = exchange.toolCalls?.map(tc => tc.toolName);
+                const embedding = await generateExchangeEmbedding(
+                  exchange.userMessage,
+                  exchange.assistantMessage,
+                  toolNames
+                );
+                insertExchange(db, exchange, embedding, toolNames);
+                budget--;
+              }
+
+              if (cut) {
+                addPending(db, [file], 'batch');
+                owed++;
+              } else {
+                removePending(db, file);
+              }
+              result.indexed++;
+            } catch (error) {
+              addPending(db, [file], 'error');
+              result.errors.push({
+                file,
+                error: error instanceof Error ? error.message : String(error)
+              });
+            }
           }
 
-          result.indexed++;
-        } catch (error) {
-          result.errors.push({
-            file,
-            error: error instanceof Error ? error.message : String(error)
-          });
+          if (oversizeSkipped > 0) {
+            console.log(`  Skipped ${oversizeSkipped} oversize exchange(s) (> ${maxMessageBytes} bytes; set EPISODIC_MEMORY_MAX_MESSAGE_BYTES to change) — likely embedded-transcript payloads (#139)`);
+          }
+          if (owed > 0) {
+            console.log(`  ${owed} transcript(s) still to index (EPISODIC_MEMORY_INDEX_BATCH = ${getIndexBatch()} exchanges a run); continuing next sync`);
+          }
         }
       }
-
-      if (oversizeSkipped > 0) {
-        console.log(`  Skipped ${oversizeSkipped} oversize exchange(s) (> ${maxMessageBytes} bytes; set EPISODIC_MEMORY_MAX_MESSAGE_BYTES to change) — likely embedded-transcript payloads (#139)`);
-      }
-
+    } finally {
       db.close();
     }
   }

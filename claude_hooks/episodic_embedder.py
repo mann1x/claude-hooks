@@ -207,6 +207,26 @@ def index_space(db_path: Optional[Path] = None) -> Optional[str]:
         conn.close()
 
 
+def index_pending(db_path: Optional[Path] = None) -> Optional[int]:
+    """Archived transcripts the index still owes exchanges to (``index_pending``,
+    ``index-pending.ts``); 0 for an index from before the list, None without one."""
+    import sqlite3
+
+    path = db_path or index_db_path()
+    if not path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return None
+    try:
+        return conn.execute("SELECT COUNT(*) FROM index_pending").fetchone()[0]
+    except sqlite3.Error:
+        return 0
+    finally:
+        conn.close()
+
+
 def space_of(spec: dict) -> str:
     """``spaceId()`` in embedder-config.ts, for a spec without a document prefix."""
     doc = spec.get("document_prefix") or ""

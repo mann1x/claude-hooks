@@ -522,6 +522,12 @@ def check_episodic_embedder(r: Results) -> None:
               "(scripts/episodic_doctor.py --rebuild-embeddings <server> does it at once)")
     elif held is not None:
         r.add(PASS, "episodic index", f"vectors from {held}")
+    owed = ee.index_pending()
+    if owed:
+        r.add(WARN, "episodic catch-up",
+              f"{owed} archived transcript(s) still to index — each sync takes "
+              "EPISODIC_MEMORY_INDEX_BATCH exchanges "
+              "(scripts/episodic_doctor.py --rebuild-embeddings <server> does it at once)")
 
 
 def check_version(r: Results) -> None:

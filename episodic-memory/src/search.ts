@@ -22,6 +22,7 @@ export interface SearchOptions {
   session_id?: string;  // exact match against e.session_id
   git_branch?: string;  // exact match against e.git_branch
   include_sidechains?: boolean; // include subagent/workflow rows (default true)
+  per_conversation?: boolean;   // one result per conversation, its best exchange (default true)
 }
 
 /**
@@ -60,6 +61,16 @@ export function buildFtsQuery(query: string): string | null {
     .map((t) => t.toLowerCase());
   const unique = [...new Set(terms)];
   return unique.length ? unique.map((t) => `"${t.replace(/"/g, '""')}"`).join(' OR ') : null;
+}
+
+/**
+ * Keep each conversation's best-ranked row (rows arrive in rank order). A
+ * long session otherwise fills several of the top 10 with neighbouring
+ * exchanges of one piece of work.
+ */
+export function bestPerConversation<T extends { archive_path: string }>(rows: T[]): T[] {
+  const seen = new Set<string>();
+  return rows.filter((r) => !seen.has(r.archive_path) && (seen.add(r.archive_path), true));
 }
 
 /** Reciprocal rank fusion of ranked row lists (rows keyed by `id`). */
@@ -258,6 +269,10 @@ export async function searchConversations(
 ): Promise<SearchResult[]> {
   const { limit = 10, mode = 'both', after, before } = options;
   const includeSidechains = options.include_sidechains !== false;
+  const perConversation = options.per_conversation !== false;
+  // Rows kept before the final cut: per conversation, several of a pool's rows collapse into one.
+  const pool = Math.max(limit * 5, FUSION_POOL_MIN);
+  const finish = (rows: any[]) => (perConversation ? bestPerConversation(rows) : rows).slice(0, limit);
   const sidechainClause = includeSidechains ? '' : 'AND e.is_sidechain = 0';
 
   // Validate date parameters
@@ -279,7 +294,7 @@ export async function searchConversations(
       // Vectors are windows (`<exchange id>` or `<exchange id>#<k>`, exchange-text.ts),
       // so fetch more and keep each exchange's nearest window.
       const k = Math.min(
-        (mode === 'both' ? Math.max(limit * 5, FUSION_POOL_MIN) : limit * 3) * VECTOR_WINDOW_FETCH,
+        pool * VECTOR_WINDOW_FETCH,
         4096
       );
 
@@ -311,8 +326,8 @@ export async function searchConversations(
       console.error(`episodic-memory: keyword ranking only — ${error.message}`);
       results = [];
     }
-    if (mode === 'vector' && results.length > limit) {
-      results = results.slice(0, limit);
+    if (mode === 'vector') {
+      results = finish(results);
     }
   }
 
@@ -331,9 +346,9 @@ export async function searchConversations(
           ${filterClause}
         ORDER BY bm25(exchanges_fts)
         LIMIT ?
-      `).all(ftsQuery, ...filterParams, Math.max(limit * 5, FUSION_POOL_MIN));
+      `).all(ftsQuery, ...filterParams, pool);
     }
-    results = fuseByRank([results, keywordRows], limit);
+    results = finish(fuseByRank([results, keywordRows], Infinity));
   }
 
   if (mode === 'text') {
@@ -355,7 +370,7 @@ export async function searchConversations(
       LIMIT ?
     `);
 
-    results = textStmt.all(...textMatchParams, ...filterParams, limit);
+    results = finish(textStmt.all(...textMatchParams, ...filterParams, perConversation ? pool : limit) as any[]);
   }
 
   const lastLines = lastIndexedLines(db, results.map((row: any) => row.archive_path));
