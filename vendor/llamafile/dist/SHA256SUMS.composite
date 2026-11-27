@@ -1,1 +1,4 @@
 414f616689aaba44f6982b474918e8549ad764c03b2f82f6b56a5d6e582ef59b  qwen3-embedding-0.6b-16k.llamafile
+4c274eeaf27be01df005a2f317fda67d4d10a9529f77afd35d271d7ff53011bd  qwen3-embedding-0.6b-16k-opencoti-c14-r19.llamafile
+cea082f5a1366ce9164dc2f4ec8569d16f58f9aabd0eebb4f9392edc9b6381eb  qwen3-embedding-0.6b-16k-opencoti-c14-r19-cuda-linux-x86_64.llamafile
+0ce6ea62d6d3e9ac7a8485573a4a11ee9294dda5b51f1c76bb6e63ae5d85b451  qwen3-embedding-0.6b-16k-opencoti-c14-r19-cuda-win-x86_64.llamafile

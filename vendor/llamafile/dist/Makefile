@@ -138,46 +138,49 @@ OC_HF_REPO      ?= ManniX-ITA/opencoti-llamafile
 OC_BARE         := $(OC_DIR)/components/engine/2611262234001/opencoti-llamafile-0.10.5-c14-bare.llamafile
 OC_VK_SO        := $(OC_DIR)/components/vulkan/2611270025004/ggml-vulkan-x86_64.so
 OC_VK_DLL       := $(OC_DIR)/components/vulkan/2611270025004/ggml-vulkan-win-x86_64.dll
+OC_CUDA_SO      := $(OC_DIR)/components/cuda/2611270025001/ggml-cuda-x86_64.so
+OC_CUDA_DLL     := $(OC_DIR)/components/cuda/2611270025001/ggml-cuda-win-x86_64.dll
+OC_CU12_SO      := $(OC_DIR)/components/cuda12/2611270025002/ggml-cuda-cu12-x86_64.so
+OC_CU12_DLL     := $(OC_DIR)/components/cuda12/2611270025002/ggml-cuda-cu12-win-x86_64.dll
 OC_OUT          := $(DIST_DIR)qwen3-embedding-0.6b-16k-opencoti-$(OC_TAG).llamafile
+OC_CUDA_LINUX   := $(DIST_DIR)qwen3-embedding-0.6b-16k-opencoti-$(OC_TAG)-cuda-linux-x86_64.llamafile
+OC_CUDA_WIN     := $(DIST_DIR)qwen3-embedding-0.6b-16k-opencoti-$(OC_TAG)-cuda-win-x86_64.llamafile
 OC_STAGE        := $(OC_DIR)/build
 
-.PHONY: opencoti fetch-opencoti
+.PHONY: opencoti opencoti-cuda fetch-opencoti
 
 fetch-opencoti:
 	@echo "==> fetching opencoti-llamafile $(OC_TAG) inputs from $(OC_HF_REPO)"
 	@cd "$(OC_DIR)" && hf download "$(OC_HF_REPO)" --local-dir . \
 		--include "$(patsubst $(OC_DIR)/%,%,$(OC_BARE))" \
 		"$(patsubst $(OC_DIR)/%,%,$(OC_VK_SO))" \
-		"$(patsubst $(OC_DIR)/%,%,$(OC_VK_DLL))" >/dev/null
+		"$(patsubst $(OC_DIR)/%,%,$(OC_VK_DLL))" \
+		"$(patsubst $(OC_DIR)/%,%,$(OC_CUDA_SO))" \
+		"$(patsubst $(OC_DIR)/%,%,$(OC_CUDA_DLL))" \
+		"$(patsubst $(OC_DIR)/%,%,$(OC_CU12_SO))" \
+		"$(patsubst $(OC_DIR)/%,%,$(OC_CU12_DLL))" >/dev/null
 	@cd "$(OC_DIR)" && sha256sum -c SHA256SUMS
 
 opencoti: $(OC_OUT)
 
+OC_COMPOSE       = @bash "$(DIST_DIR)oc_compose.sh" "$(OC_DIR)/SHA256SUMS" "$(1)" \
+	"$(OC_BARE)" "$(ZIPALIGN)" "$(GGUF)" "$(OC_STAGE)" "$(PORT)" "$(CTX_SIZE)" "$(POOLING)"
+
 $(OC_OUT): $(OC_BARE) $(OC_VK_SO) $(OC_VK_DLL) $(ZIPALIGN) $(GGUF)
-	@cd "$(OC_DIR)" && sha256sum --quiet -c SHA256SUMS
-	@mkdir -p "$(OC_STAGE)"
-	@printf -- "%s\n" \
-		"-m" "$(GGUF_NAME)" \
-		"--embedding" \
-		"--server" \
-		"--host" "0.0.0.0" \
-		"--port" "$(PORT)" \
-		"--pooling" "$(POOLING)" \
-		"--ctx-size" "$(CTX_SIZE)" \
-		"..." > "$(OC_STAGE)/.args"
-	@! grep -q -E -- '^(--gpu|-ngl|--n-gpu-layers|-dev|--device)$$' "$(OC_STAGE)/.args"
-	@cp -L "$(GGUF)" "$(OC_STAGE)/$(GGUF_NAME)"
-	@cp "$(OC_VK_SO)" "$(OC_STAGE)/ggml-vulkan.so"
-	@cp "$(OC_VK_DLL)" "$(OC_STAGE)/ggml-vulkan.dll"
-	@cp "$(OC_BARE)" "$(OC_STAGE)/out.llamafile"
-	@chmod +x "$(OC_STAGE)/out.llamafile"
-	@cd "$(OC_STAGE)" && "$(ZIPALIGN)" -j0 out.llamafile \
-		"$(GGUF_NAME)" .args ggml-vulkan.so ggml-vulkan.dll
-	@mv "$(OC_STAGE)/out.llamafile" "$(OC_OUT)"
-	@rm -f "$(OC_STAGE)/$(GGUF_NAME)" "$(OC_STAGE)/ggml-vulkan.so" \
-		"$(OC_STAGE)/ggml-vulkan.dll" "$(OC_STAGE)/.args"
-	@echo "==> built $(OC_OUT) ($$(stat -c%s "$(OC_OUT)") bytes)"
-	@cd "$(DIST_DIR)" && sha256sum "$(notdir $(OC_OUT))"
+	$(call OC_COMPOSE,$@) "$(OC_VK_SO):ggml-vulkan.so" "$(OC_VK_DLL):ggml-vulkan.dll"
+
+# One CUDA composite per OS: both OSes' CUDA libraries in one file would
+# pass GitHub's 2 GiB asset limit. Each carries the CUDA 13 library and
+# the CUDA 12 one the engine loads for GPUs before compute capability 7.5.
+opencoti-cuda: $(OC_CUDA_LINUX) $(OC_CUDA_WIN)
+
+$(OC_CUDA_LINUX): $(OC_BARE) $(OC_VK_SO) $(OC_CUDA_SO) $(OC_CU12_SO) $(ZIPALIGN) $(GGUF)
+	$(call OC_COMPOSE,$@) "$(OC_VK_SO):ggml-vulkan.so" \
+		"$(OC_CUDA_SO):ggml-cuda.so" "$(OC_CU12_SO):ggml-cuda-cu12.so"
+
+$(OC_CUDA_WIN): $(OC_BARE) $(OC_VK_DLL) $(OC_CUDA_DLL) $(OC_CU12_DLL) $(ZIPALIGN) $(GGUF)
+	$(call OC_COMPOSE,$@) "$(OC_VK_DLL):ggml-vulkan.dll" \
+		"$(OC_CUDA_DLL):ggml-cuda.dll" "$(OC_CU12_DLL):ggml-cuda-cu12.dll"
 
 # ----- verification ---------------------------------------------------
 

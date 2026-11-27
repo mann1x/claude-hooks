@@ -243,6 +243,19 @@ schtasks /Run /TN "claude-hooks-daemon"
 schtasks /End /TN "claude-hooks-daemon"
 ```
 
+### The embedder
+
+```bash
+claude-hooks-daemon-ctl embedder status | backends [--refresh]
+claude-hooks-daemon-ctl embedder switch cpu|vulkan|cuda [--device X | --pci dddd:bb:dd.f] [--reason ...]
+claude-hooks-daemon-ctl embedder reset
+```
+
+The same operations are served over HTTP on `127.0.0.1:38091/embedder/`.
+A switch waits until the embedder is idle and restarts it on the new
+backend; see [llamafile-integration.md](llamafile-integration.md)
+"Switching the backend at runtime".
+
 ## Disable per-invocation
 
 Set `CLAUDE_HOOKS_DAEMON_DISABLE=1` in the shim's environment to skip

@@ -3617,10 +3617,86 @@ _LLAMAFILE_SHA_FILE = HERE / "vendor" / "llamafile" / "dist" / "SHA256SUMS.compo
 _LLAMAFILE_DIST_DIR = HERE / "vendor" / "llamafile" / "dist"
 
 
-def _read_committed_composite_sha() -> str:
-    """Return the SHA256 committed for the default composite asset, or
-    ``""`` if the file is absent (typical until the v1.4.0 release
-    cut). Format mirrors ``sha256sum`` output: ``<hex>  <filename>``.
+# Embedder composites (ch-33): the same qwen3-embedding-0.6b model on the
+# opencoti-llamafile c14 r19 engine, published as assets of their own
+# release. The CPU + Vulkan one runs on every OS; a CUDA one carries the
+# NVIDIA libraries for one OS (each ~1.8 GiB). "legacy" is the v1.4
+# mozilla llamafile (CPU only), kept for hosts that already run it.
+_EMBEDDER_RELEASE_TAG = "embedder-c14-r19"
+_EMBEDDER_COMPOSITES = {
+    "vulkan": {
+        "asset": "qwen3-embedding-0.6b-16k-opencoti-c14-r19.llamafile",
+        "tag": _EMBEDDER_RELEASE_TAG, "backends": ("cpu", "vulkan"),
+        "label": "CPU + Vulkan — any OS, any GPU vendor through Vulkan (932 MB)",
+    },
+    "cuda-linux": {
+        "asset": "qwen3-embedding-0.6b-16k-opencoti-c14-r19-cuda-linux-x86_64.llamafile",
+        "tag": _EMBEDDER_RELEASE_TAG, "backends": ("cpu", "vulkan", "cuda"),
+        "platform": "linux-x86_64",
+        "label": "CPU + Vulkan + CUDA — Linux x86_64, NVIDIA (1.9 GB)",
+    },
+    "cuda-win": {
+        "asset": "qwen3-embedding-0.6b-16k-opencoti-c14-r19-cuda-win-x86_64.llamafile",
+        "tag": _EMBEDDER_RELEASE_TAG, "backends": ("cpu", "vulkan", "cuda"),
+        "platform": "win-x86_64",
+        "label": "CPU + Vulkan + CUDA — Windows x86_64, NVIDIA (1.9 GB)",
+    },
+    "legacy": {
+        "asset": _DEFAULT_LLAMAFILE_ASSET, "tag": _DEFAULT_LLAMAFILE_RELEASE_TAG,
+        "backends": ("cpu", "auto"),
+        "label": "legacy mozilla llamafile 0.10.1 — CPU (1.5 GB)",
+    },
+}
+
+
+def _host_platform() -> str:
+    import platform as _pl
+    machine = _pl.machine().lower()
+    arch = "x86_64" if machine in ("x86_64", "amd64") else machine
+    os_name = "win" if sys.platform.startswith("win") else (
+        "linux" if sys.platform.startswith("linux") else sys.platform)
+    return f"{os_name}-{arch}"
+
+
+def _composite_choices() -> list[str]:
+    """Composites that run on this host, in menu order."""
+    here = _host_platform()
+    return [k for k, v in _EMBEDDER_COMPOSITES.items()
+            if v.get("platform") in (None, here)]
+
+
+def _composite_of_path(path: str) -> str:
+    name = os.path.basename(path or "")
+    for key, v in _EMBEDDER_COMPOSITES.items():
+        if v["asset"] == name:
+            return key
+    return ""
+
+
+def _ask_composite(existing: dict, *, non_interactive: bool) -> str:
+    """Which composite to run. A re-run keeps the configured one; a
+    fresh install defaults to CPU + Vulkan."""
+    current = _composite_of_path(existing.get("llamafile_path") or "")
+    choices = _composite_choices()
+    default = current if current in choices else "vulkan"
+    if non_interactive:
+        print(f"    --non-interactive: embedder composite = {default}.")
+        return default
+    print("    Which embedder build?")
+    for i, key in enumerate(choices, 1):
+        print(f"      {i}. {key:10s} {_EMBEDDER_COMPOSITES[key]['label']}")
+    while True:
+        ans = input(f"    Composite [{default}]: ").strip().lower() or default
+        if ans.isdigit() and 1 <= int(ans) <= len(choices):
+            return choices[int(ans) - 1]
+        if ans in choices:
+            return ans
+        print("    Answer a number or a name from the list.")
+
+
+def _read_committed_composite_sha(asset: str = _DEFAULT_LLAMAFILE_ASSET) -> str:
+    """Return the SHA256 committed for ``asset``, or ``""`` if it is not
+    listed. Format mirrors ``sha256sum`` output: ``<hex>  <filename>``.
     """
     try:
         text = _LLAMAFILE_SHA_FILE.read_text(encoding="utf-8")
@@ -3631,9 +3707,9 @@ def _read_committed_composite_sha() -> str:
         if not line or line.startswith("#"):
             continue
         parts = line.split()
-        if len(parts) >= 2 and parts[1].endswith(_DEFAULT_LLAMAFILE_ASSET):
+        if len(parts) >= 2 and parts[1].lstrip("*") == asset:
             return parts[0].lower()
-        if len(parts) == 1:
+        if len(parts) == 1 and asset == _DEFAULT_LLAMAFILE_ASSET:
             return parts[0].lower()
     return ""
 
@@ -3760,59 +3836,67 @@ def _download_composite_llamafile(
 
 
 def _ask_embedding_backend(existing: dict, llamafile_path: str, *,
-                           non_interactive: bool) -> dict:
-    """Which backend the embedder runs on: ``cpu``, ``vulkan`` (with a
-    device and optionally a private Vulkan driver) or the legacy
-    ``auto``. claude-hooks passes the choice on every spawn; the engine
+                           non_interactive: bool,
+                           backends: tuple = ("cpu", "vulkan")) -> dict:
+    """Which backend the embedder runs on, among those the composite
+    carries (``cpu`` always; ``vulkan``, ``cuda``; ``auto`` only for the
+    legacy build), with a device and, for Vulkan, optionally a private
+    driver. claude-hooks passes the choice on every spawn; the engine
     never picks one itself (ch-33, claude_hooks/llamafile_backend.py).
+    `claude-hooks-daemon-ctl embedder switch` changes it at runtime.
 
     Defaults come from the existing config (a re-run keeps what is
-    there); a fresh install defaults to ``cpu``.
+    there, if the composite still carries it); otherwise ``cpu``.
     """
     mode = existing.get("mode") or "cpu"
+    if mode not in backends:
+        mode = "cpu"
     device = existing.get("device") or ""
+    pci = existing.get("pci") or ""
     icd = existing.get("vulkan_icd") or ""
     if non_interactive:
         print(f"    --non-interactive: embedder backend = {mode}"
-              + (f" (device {device or 'the only one'})" if mode == "vulkan" else "") + ".")
-        return {"mode": mode, "device": device, "vulkan_icd": icd}
-    print("    Embedder backend: cpu, or vulkan to embed on a GPU through Vulkan")
-    print("    (any vendor, iGPUs included). The vectors are checked against a")
-    print("    CPU reference at every start; a mismatch falls back to CPU.")
+              + (f" (device {device or pci or 'the only one'})"
+                 if mode in ("vulkan", "cuda") else "") + ".")
+        return {"mode": mode, "device": device, "pci": pci, "vulkan_icd": icd}
+    print("    Embedder backend: " + ", ".join(backends) + ". GPU vectors are checked")
+    print("    against a CPU reference at every start; a mismatch falls back to CPU.")
     while True:
-        ans = input(f"    Backend [cpu/vulkan/auto] [{mode}]: ").strip().lower() or mode
-        if ans in ("cpu", "c"):
-            return {"mode": "cpu", "device": device, "vulkan_icd": icd}
-        if ans == "auto":
-            print("    auto lets the engine pick the GPU itself; prefer cpu or vulkan.")
-            return {"mode": "auto", "device": device, "vulkan_icd": icd}
-        if ans in ("vulkan", "v"):
+        ans = input(f"    Backend [{'/'.join(backends)}] [{mode}]: ").strip().lower() or mode
+        if ans in backends:
+            mode = ans
             break
-        print("    Answer cpu, vulkan or auto.")
-    ans = input("    Private Vulkan driver manifest (VK_ICD_FILENAMES; empty = the "
-                f"system's) [{icd}]: ").strip()
-    icd = os.path.expanduser(ans) if ans else icd
-    if icd and not os.path.isfile(icd):
-        print(f"    Note: {icd} does not exist yet (scripts/build_private_radv.sh "
-              "builds one for an AMD GPU on an old Mesa).")
+        print(f"    Answer one of: {', '.join(backends)}.")
+    if mode not in ("vulkan", "cuda"):
+        return {"mode": mode, "device": device, "pci": pci, "vulkan_icd": icd}
+    if mode == "vulkan":
+        ans = input("    Private Vulkan driver manifest (VK_ICD_FILENAMES; empty = the "
+                    f"system's) [{icd}]: ").strip()
+        icd = os.path.expanduser(ans) if ans else icd
+        if icd and not os.path.isfile(icd):
+            print(f"    Note: {icd} does not exist yet (scripts/build_private_radv.sh "
+                  "builds one for an AMD GPU on an old Mesa).")
+    devices = []
     if os.path.isfile(llamafile_path):
         from claude_hooks import llamafile_backend as lb  # noqa: PLC0415
-        env = lb.child_env(mode="vulkan", vulkan_icd=icd)
+        env = lb.child_env(mode=mode, vulkan_icd=icd)
         try:
-            devices = lb.parse_devices(lb.list_devices(llamafile_path, env))
+            devices = lb.parse_devices(lb.list_devices(llamafile_path, env, backend=mode))
         except lb.BackendError as e:
-            devices = []
             print(f"    Could not list devices: {e}")
-        for dev_id, name in devices:
-            print(f"      {dev_id}: {name}")
+        for d in devices:
+            print(f"      {d.id}: {d.name}" + (f"  pci {d.pci}" if d.pci else ""))
         if not devices:
-            print("    The engine lists no usable Vulkan device with this driver; the")
-            print("    daemon will fall back to CPU until one is.")
-        elif not device and len(devices) == 1:
-            device = devices[0][1]
-    ans = input("    Device (part of its name, or VulkanN; empty = the only one) "
-                f"[{device}]: ").strip()
-    return {"mode": "vulkan", "device": ans or device, "vulkan_icd": icd}
+            print("    The engine lists no usable device for this backend; the daemon")
+            print("    will fall back to CPU until one is.")
+        elif not device and not pci and len(devices) == 1:
+            device = devices[0].name
+    ans = input("    Device (id, part of its name, or pci:<dddd:bb:dd.f>; empty = the "
+                f"only one) [{('pci:' + pci) if pci else device}]: ").strip()
+    if ans.lower().startswith("pci:"):
+        return {"mode": mode, "device": "", "pci": ans[4:].strip(), "vulkan_icd": icd}
+    return {"mode": mode, "device": ans or device, "pci": "" if ans else pci,
+            "vulkan_icd": icd}
 
 
 def _setup_llamafile_engine(
@@ -3840,7 +3924,9 @@ def _setup_llamafile_engine(
          "mode": "auto" | "cpu", "idle_timeout_seconds": 300}
     """
     existing = cfg.get("embedding") or {}
-    target_default = _LLAMAFILE_DIST_DIR / _DEFAULT_LLAMAFILE_ASSET
+    composite = _ask_composite(existing, non_interactive=non_interactive)
+    spec = _EMBEDDER_COMPOSITES[composite]
+    target_default = _LLAMAFILE_DIST_DIR / spec["asset"]
 
     print("\n  llamafile engine settings:")
     if non_interactive:
@@ -3858,17 +3944,17 @@ def _setup_llamafile_engine(
         model_gguf = ""
         ctx_size = propose_ctx
         if not target_default.is_file():
-            sha = _read_committed_composite_sha()
+            sha = _read_committed_composite_sha(spec["asset"])
             if not sha:
                 print(f"    No committed SHA at {_LLAMAFILE_SHA_FILE} — "
                       "skipping pre-fetch. The daemon will surface a clean "
                       "error on first embed; build the composite manually "
                       "with `make -C vendor/llamafile/dist`.")
             else:
-                print(f"    Fetching composite from "
-                      f"{_DEFAULT_LLAMAFILE_RELEASE_TAG}...")
+                print(f"    Fetching {spec['asset']} from {spec['tag']}...")
                 ok = _download_composite_llamafile(
-                    target_default, sha256=sha, dry_run=dry_run,
+                    target_default, tag=spec["tag"], asset=spec["asset"],
+                    sha256=sha, dry_run=dry_run,
                 )
                 if not ok:
                     print("    Composite fetch failed. Edit the config "
@@ -3910,7 +3996,8 @@ def _setup_llamafile_engine(
         model_gguf = gguf
 
     backend = _ask_embedding_backend(
-        existing, llamafile_path, non_interactive=non_interactive)
+        existing, llamafile_path, non_interactive=non_interactive,
+        backends=spec["backends"])
     mode = backend["mode"]
 
     # LAN-exposure prompt (#242, 2026-05-21). Default loopback so the
@@ -3976,9 +4063,12 @@ def _setup_llamafile_engine(
         # Backend details (ch-33): kept across re-runs like every key
         # here, or a re-install would silently drop a Vulkan setup.
         "device": backend["device"],
+        "pci": backend["pci"],
         "vulkan_icd": backend["vulkan_icd"],
         "allow_old_driver": bool(existing.get("allow_old_driver", False)),
         "verify_backend": bool(existing.get("verify_backend", True)),
+        # Loopback HTTP control endpoint (list backends / switch); 0 = off.
+        "control_port": int(existing.get("control_port", 38091)),
         "idle_timeout_seconds": float(
             existing.get("idle_timeout_seconds") or 3600.0
         ),

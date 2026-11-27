@@ -39,6 +39,38 @@ release with the auto-generated source archive
   10.6 s on the (loaded) CPU, with the CPU's vectors (min cosine
   0.99905). `install.py` asks for the backend, keeps an existing one on
   a re-run, and a fresh install now defaults to `cpu`.
+- **The embedder's backend can be switched at runtime, gracefully**
+  (ch-33). The daemon serves an HTTP control endpoint on
+  `127.0.0.1:38091` (`embedding.control_port`): `GET /embedder/status`,
+  `GET /embedder/backends` (cpu / vulkan / cuda, each GPU with its id,
+  name, memory and PCI address), `POST /embedder/backend` and `POST
+  /embedder/reset` (switching from loopback only). The same verbs are
+  `claude-hooks-daemon-ctl embedder status|backends|switch|reset`. A
+  switch resolves the target first (a missing device changes nothing,
+  409), waits until the embedder is idle, restarts it on the new backend,
+  probe-checks it like any start and keeps the choice across daemon
+  restarts until `reset`; the use is moving the embedder to CPU while a
+  GPU benchmark needs the iGPU, then back. "Idle" means no client
+  connection open to the embed port, no slot processing and `/slots`
+  answering: the first live switch cut a 14k-character request, because
+  `/slots` reads idle for ~3 s after a request connects. `--list-devices`
+  prints no PCI address, so the listing takes CUDA's from nvidia-smi (the
+  child runs with `CUDA_DEVICE_ORDER=PCI_BUS_ID`, so CUDAn is index n) and
+  Vulkan's from sysfs by vendor; the running device's is confirmed from
+  the server's `/props`. `embedding.pci` picks a GPU by address.
+- **CUDA composites, and the installer asks which composite** (ch-33).
+  Release `embedder-c14-r19` carries three opencoti c14 r19 composites
+  with qwen3-embedding-0.6b: CPU + Vulkan (932 MB, both OSes), and CPU +
+  Vulkan + CUDA 13/12 per OS (`-cuda-linux-x86_64`, 1.96 GB;
+  `-cuda-win-x86_64`, 1.91 GB — one file per OS keeps each under
+  GitHub's 2 GiB asset limit). `make -C vendor/llamafile/dist
+  fetch-opencoti opencoti opencoti-cuda` rebuilds them byte-identically
+  from pinned inputs. On solidpc's RTX 3090 the CUDA composite matches
+  the mozilla CPU llamafile at min cosine 0.99930 (mean 0.99965).
+  `install.py` asks for the composite (CPU + Vulkan by default, the CUDA
+  one for the host's OS, or the legacy mozilla build) and keeps the
+  configured one on a re-run. Tests can no longer start the composite
+  download (`tests/conftest.py`).
 - **A council wakes the session that started it.** `consult --wait` and
   `follow-up --wait` used to return only when the run ended, so a run
   parked at the adversary checkpoint waited on a session that was never

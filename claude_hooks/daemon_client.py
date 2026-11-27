@@ -492,3 +492,36 @@ def lsp_reap(
     """Run the reaper pass now: orphaned daemons, idle daemons, dead state."""
     return _lsp_call("_lsp_reap", {}, host=host, port=port,
                      secret_path=secret_path, timeout=timeout)
+
+
+# ----- embedder backend control (ch-33) ------------------------------ #
+
+def embedding_backends(*, refresh: bool = False, host: str = DEFAULT_HOST,
+                       port: Optional[int] = None,
+                       secret_path: Path = DEFAULT_SECRET_PATH,
+                       timeout: float = 300.0) -> Optional[dict]:
+    """Backends and devices the embedder can run on. ``None`` = daemon down."""
+    return _lsp_call("_embedding_backends", {"refresh": refresh}, host=host,
+                     port=port, secret_path=secret_path, timeout=timeout)
+
+
+def embedding_switch(mode: str, *, device: str = "", pci: str = "",
+                     reason: str = "", persist: bool = True,
+                     idle_timeout: float = 120.0, force: bool = False,
+                     host: str = DEFAULT_HOST, port: Optional[int] = None,
+                     secret_path: Path = DEFAULT_SECRET_PATH) -> Optional[dict]:
+    """Switch the embedder's backend once it is idle (EmbeddingManager.switch)."""
+    return _lsp_call("_embedding_switch", {
+        "mode": mode, "device": device, "pci": pci, "reason": reason,
+        "persist": persist, "idle_timeout": idle_timeout, "force": force},
+        host=host, port=port, secret_path=secret_path,
+        timeout=idle_timeout + 240.0)
+
+
+def embedding_reset(*, idle_timeout: float = 120.0, force: bool = False,
+                    host: str = DEFAULT_HOST, port: Optional[int] = None,
+                    secret_path: Path = DEFAULT_SECRET_PATH) -> Optional[dict]:
+    """Back to the configured backend."""
+    return _lsp_call("_embedding_reset", {"idle_timeout": idle_timeout, "force": force},
+                     host=host, port=port, secret_path=secret_path,
+                     timeout=idle_timeout + 240.0)
