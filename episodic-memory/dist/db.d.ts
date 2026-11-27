@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 import { ConversationExchange } from './types.js';
+import { ExchangeVectors } from './vector-space.js';
 export declare function migrateSchema(db: Database.Database): void;
 /**
  * Earlier versions created `tool_calls` with a plain
@@ -14,7 +15,28 @@ export declare function migrateSchema(db: Database.Database): void;
  */
 export declare function migrateToolCallsCascade(db: Database.Database): void;
 export declare function initDatabase(): Database.Database;
-export declare function insertExchange(db: Database.Database, exchange: ConversationExchange, embedding: number[], toolNames?: string[]): void;
+/**
+ * Bump to rebuild every database's keyword index on its next open (a change
+ * to the FTS table's columns or tokenizer).
+ */
+export declare const FTS_VERSION = "1";
+/**
+ * The ranked keyword index (FTS5, BM25) over exchanges, kept in step with
+ * the table by triggers. It indexes `exchanges` by reference (no second copy
+ * of the text), keyed on rowid, so:
+ *  - `recursive_triggers` is on: `INSERT OR REPLACE` deletes the old row, and
+ *    SQLite fires that delete's trigger only with it on — without it the
+ *    index keeps the replaced text;
+ *  - `VACUUM` (compact's `VACUUM INTO`) may renumber rowids, so compact calls
+ *    rebuildFtsIndex() after the swap.
+ * Built once per database (or FTS_VERSION), recorded in `index_meta`. When
+ * another process holds the write lock the build is left to a later open:
+ * vector search works meanwhile and keyword ranking finds nothing new.
+ */
+export declare function ensureFtsIndex(db: Database.Database): void;
+/** Rebuild the keyword index from `exchanges` and record it as current. */
+export declare function rebuildFtsIndex(db: Database.Database): void;
+export declare function insertExchange(db: Database.Database, exchange: ConversationExchange, embedding: ExchangeVectors, toolNames?: string[]): void;
 export declare function getAllExchanges(db: Database.Database): Array<{
     id: string;
     archivePath: string;

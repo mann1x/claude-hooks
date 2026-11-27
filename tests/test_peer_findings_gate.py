@@ -1,6 +1,8 @@
 """Plan D11: peer findings must be about the search, and are given once."""
 from __future__ import annotations
 
+import pytest
+
 from types import SimpleNamespace
 
 from consultants.engine import store as st
@@ -64,6 +66,7 @@ def test_only_a_cosine_distance_becomes_a_similarity():
 
 
 def test_adapter_adds_similarity_only_for_a_cosine_provider():
+    pytest.importorskip("langgraph.store.base")  # ProviderBackedStore needs the consultants env
     import sys, pathlib
     sys.path.insert(0, str(pathlib.Path(__file__).parent))
     from test_consultants_v2_store import _FakeMemory, _FakeProvider

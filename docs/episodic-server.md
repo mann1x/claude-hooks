@@ -123,19 +123,28 @@ All endpoints return JSON.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Runs `episodic-memory stats` (cached 5 min; `?fresh=1` forces it). 200 `ok`, or **503 `degraded`** with the CLI's stderr and a `hint`. Also reports `index_age_hours` |
+| `GET` | `/health` | Answers at once. Reports the last probe (one vector search, `episodic-memory search --vector --limit 1`, so the embedding model is loaded; refreshed on its own thread every 5 min, `?fresh=1` waits for a new one), `searches` (`running` / `waiting` / `max`), `indexing` (read from the sync lock: `running`, `pid`, `since`), `last_sync` (the last completed background sync in the sync log: `started_at`, counts, `indexing_skipped`), `activity` (`idle` / `searching` / `indexing`), `index_bytes`, `exchanges`, `index_age_hours`. 200 `ok`; **503** `degraded` (probe failed, or the last sync skipped semantic indexing) or `probing` (no probe has finished since start) |
 | `GET` | `/stats` | Runs `episodic-memory stats` and returns stdout |
-| `GET` | `/search?q=<query>&limit=<N>` | Search across all indexed conversations. `limit` defaults to 10 |
+| `GET` | `/search?q=<query>&limit=<N>` | Search across all indexed conversations: vector and BM25 keyword ranks fused (RRF). `limit` defaults to 10 |
 | `POST` | `/ingest` | Save a transcript JSONL and trigger re-index |
-| `POST` | `/sync` | Force a synchronous `episodic-memory sync` (timeout 120 s) |
+| `POST` | `/sync` | Force a synchronous `episodic-memory sync` (timeout 120 s); `?background=1` starts `sync --background` and answers **202** at once |
 
 When the CLI exits non-zero, `/stats`, `/search` and `/sync` answer
 **502** with `returncode`, the tail of `stderr`, and a `hint` for known
 causes. Until 2026-09-26 they answered 200 with an empty `stdout` and
 dropped stderr, and `/health` only checked that the archive directory
 existed, so a CLI that threw on every call looked healthy for 12 days.
-The first `/search` in a process loads the embedding model (~35 s on
-solidpc); give any probe of it at least 60 s.
+Until 2026-11-26 the probe was `stats`, which never loads the embedding
+model: from 2026-10-31 the model cache was gone and every search and every
+sync's indexing failed while `/health` said `ok` (see "Model cache").
+The server is threaded (`ThreadingHTTPServer`): `/health` answers while
+searches or a sync run. Searches share `EPISODIC_MAX_SEARCHES` slots
+(default 2, ~450 MB of Node each); a request that gets no slot within the
+search timeout is a 503. A search takes ~1–3 s: the model loads in ~0.6 s
+per CLI call. Until 2026-11-26 a search took up to ~4 min, because result
+formatting read each result's whole transcript to print its line count
+(a 6.4 GB live transcript took ~97 s); the count now comes from the index
+(`lastIndexedLines()`, `idx_archive_path`).
 
 ### `POST /ingest`
 
@@ -199,8 +208,14 @@ CLI args:
 ```
 
 `mode: off` (the default) → SessionEnd does nothing for episodic.
-`mode: server` → SessionEnd triggers `episodic-memory sync
---background` locally, no HTTP push.
+`mode: server` → SessionEnd asks the server on this host
+(`server_host` / `server_port`, `claude_hooks/episodic_url.py`) for
+`POST /sync?background=1`, and runs `episodic-memory sync --background`
+itself only when the server does not answer 202. The hook daemon runs
+under `ProtectSystem=strict` and may write only `~/.claude`: a sync it
+spawned died on `EROFS` opening its log before writing a line, so no
+session end on the server host started a sync from at least 2026-11-20
+to 11-26.
 `mode: client` → SessionEnd reads the transcript and POSTs it to
 `server_url/ingest`.
 
@@ -364,3 +379,101 @@ sudo systemctl daemon-reload
 Client side: set `episodic.mode: "off"` in
 `config/claude-hooks.json`. SessionEnd becomes a no-op for episodic;
 no other hook is affected.
+
+## Model cache
+
+The embedding model (`Xenova/bge-small-en-v1.5`, ~145 MB) is downloaded on first use
+into `<superpowers>/models` (`~/.config/superpowers/models`), set by
+`getModelCacheDir()` in `episodic-memory/src/paths.ts`;
+`EPISODIC_MEMORY_MODEL_CACHE` overrides it. transformers.js defaults to
+`.cache` inside its own package directory, which every `npm install` in the
+vendored tree deletes and which `episodic-server.service`
+(`ProtectSystem=strict`) cannot write: after the 2026-10-31 reinstall every
+search failed with `ENOENT: mkdir
+'.../node_modules/@huggingface/transformers/.cache'`, and every sync
+reported "Sync complete!" with "Indexed: 0" (it skips semantic indexing
+when the embedder is unavailable). The first search after a fresh cache
+takes ~2 min (the download). The vitest suite shares one cache under
+`node_modules/.cache/episodic-test-models` (`test/setup-isolated-config.ts`).
+
+## Search and the embedder
+
+Default search fuses two rankings (reciprocal rank fusion): vector
+similarity, and BM25 over an FTS5 index of the exchanges. `--text` is an
+exact all-terms match; `--vector` is the vector half alone.
+
+**The embedder is the one you configured for memory.** `scripts/deploy.py`
+writes `~/.config/superpowers/embedder.json` from the enabled memory
+provider's embedder (`providers.pgvector`, else `providers.sqlite_vec`;
+`claude_hooks/episodic_embedder.py`), so episodic search and memory recall
+share one model and one server. On solidpc that is qwen3-embedding:0.6b on
+the daemon-managed llamafile (`:38092`, CPU). Without a configured embedder
+the package keeps its bundled bge-small. A file without `"_managed_by":
+"claude-hooks"` is your own and deploy leaves it alone.
+
+```json
+{"kind": "llamafile", "url": "http://127.0.0.1:38092/embedding",
+ "model": "qwen3-embedding:0.6b", "timeout_ms": 180000,
+ "_managed_by": "claude-hooks", "_source": "providers.pgvector"}
+```
+
+`kind` is `llamafile` (`/embedding`), `ollama` (`/api/embed`) or `openai`
+(`/v1/embeddings`, optional `api_key`); `max_chars` (2000), `batch` (16
+texts a request), `query_prefix` / `document_prefix` (per model by default:
+qwen3 gets its retrieval instruction) and a `fallback` of the same model are
+optional. `EPISODIC_MEMORY_EMBEDDER` (JSON, or `local`) overrides the file
+for one process.
+
+**The index records the model, never the server.** `index_meta.embedder`
+names it and `vec_exchanges` is declared at its width. When the configured
+model changes, the next sync recreates the vector table and re-embeds every
+exchange, 500 per sync; until it is done, vectors are used where they exist
+and keyword ranking covers the rest — vectors from two models are never
+compared. On a CPU embedder a whole index takes days (solidpc: ~6 s an
+exchange), so rebuild it on a faster server of the same model:
+
+```bash
+python scripts/episodic_doctor.py --rebuild-embeddings http://127.0.0.1:11434   # GPU Ollama
+```
+
+It refuses unless both servers give the same vectors (lowest cosine ≥
+0.995 on probe texts; solidpc's GPU Ollama and CPU llamafile load the same
+Q8_0 file and agree at 0.998), then loops `sync` until nothing is stale.
+Queries keep going to the configured server: on the bench, an index built
+on the GPU and queried on the llamafile returned the same top result for
+28 of 28 queries. Claim `solidpc/gpu0` first.
+
+**What is embedded.** Harness turns (task notifications, continued-session
+summaries, Stop hook feedback) lose their user side, system reminders and
+tool names are dropped, the question is capped at 600 characters, and a
+long answer is cut into overlapping 2000-character windows (at most 8),
+each with its own vector (`episodic-memory/src/exchange-text.ts`). About
+1.6 vectors an exchange. The episodic server wakes a daemon-managed
+llamafile before every search and sync (it idles out after an hour and only
+the daemon restarts it); a CLI call that finds the embedder down falls back
+to keyword ranking.
+
+**Nothing falls through.** A transcript sync could not index — the
+embedder down, an error, more than one run's budget — goes on a list
+(`index_pending`, `episodic-memory/src/index-pending.ts`) that every sync
+works through within `EPISODIC_MEMORY_INDEX_BATCH` exchanges (default
+500). Before it, a file copied during an outage counted as current and was
+never indexed: the first sync of this version lists the whole archive once
+to catch those up, and `episodic_doctor.py --rebuild-embeddings <GPU URL>`
+drains the list at once (`verify_deploy` WARNs while it is not empty). An
+exclusion marker (`DO NOT INDEX THIS CHAT`, the summarizer's prompt) counts
+only in text a user wrote, never in a tool result: a session that read
+episodic-memory's own source used to be dropped whole.
+
+**What is left out, and how results are grouped.** Transcripts of spawned
+runs — `claude -p` and the Agent SDK: Caliber, OpenWolf, skill generators,
+workflow agents — are archived but neither indexed nor summarized
+(`episodic-memory/src/spawned-session.ts`); the first sync of a new version
+removes the ones already in the index (36 s for 5,193 sessions here).
+`EPISODIC_MEMORY_INDEX_SPAWNED=1` keeps them. Results are one per
+conversation, its best-matching exchange, so a long session no longer
+fills several of the top 10.
+
+`verify_deploy` FAILs when `embedder.json` does not match the config and
+WARNs while the index still holds another model's vectors. Measurements:
+[`benchmarks/episodic/README.md`](../benchmarks/episodic/README.md).

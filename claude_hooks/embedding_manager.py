@@ -40,6 +40,7 @@ sync if you change one.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import socket
@@ -51,6 +52,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Optional
+
+from claude_hooks import llamafile_backend
 
 log = logging.getLogger("claude_hooks.embedding_manager")
 
@@ -131,10 +134,44 @@ class EmbeddingConfig:
     # Pooling mode; qwen3-embedding wants ``last``.
     pooling: str = "last"
 
-    # "auto" | "cpu" — auto tries the GPU first and falls back to
-    # CPU on spawn/health failure (sticky for the session). "cpu"
-    # passes --gpu disable on every spawn and never probes.
+    # Backend, decided here and never by the engine (ch-33; see
+    # claude_hooks/llamafile_backend.py):
+    #   "cpu"    -> --gpu disable on every spawn, never probes.
+    #   "vulkan" -> --gpu vulkan -dev <device> -ngl 99, the device
+    #               resolved by name before each spawn; the vectors are
+    #               checked against a CPU reference after start, and any
+    #               failure falls back to CPU for the daemon session.
+    #   "auto"   -> the pre-ch-33 flags (-ngl 99, the engine picks the
+    #               GPU); kept for configs that already say it.
     mode: str = "auto"
+
+    # mode="vulkan"/"cuda": which device — an id (Vulkan0, CUDA1) or part
+    # of the name `<llamafile> --gpu <backend> --list-devices` prints
+    # (e.g. "RENOIR"). Empty = the only device listed; several -> refused.
+    device: str = ""
+    # Or by PCI address (dddd:bb:dd.f), which tells identical cards apart
+    # and wins over ``device``.
+    pci: str = ""
+    # mode="vulkan": a Vulkan ICD manifest for the child only
+    # (VK_ICD_FILENAMES), e.g. a private RADV build when the system
+    # Mesa is too old. Empty = the system's drivers.
+    vulkan_icd: str = ""
+    # mode="vulkan": let the engine use a driver it knows to be broken
+    # (OPENCOTI_VK_ALLOW_OLD_DRIVER=1). On solidpc's Mesa 20.3.5 that
+    # gave wrong vectors with no error; the probe check catches it.
+    allow_old_driver: bool = False
+    # GPU backends: compare probe vectors with the shipped CPU reference
+    # after each start (only for the shipped model).
+    verify_backend: bool = True
+    # Embedder control endpoint (HTTP, served by the daemon): list
+    # backends/devices, switch the backend gracefully. Loopback by
+    # default; on another address only GETs are answered for
+    # non-loopback clients. 0 disables it.
+    control_host: str = "127.0.0.1"
+    control_port: int = 38091
+    # Where a switched backend is kept across daemon restarts until
+    # `reset`. Empty = ~/.claude/claude-hooks-embedder-backend.json.
+    override_path: str = ""
 
     # When mode=auto, override the VRAM budget check; ignored when
     # mode=cpu.
@@ -185,6 +222,14 @@ class EmbeddingManager:
         self.proc: Optional[subprocess.Popen] = None
         self.last_activity_at: float = time.time()
         self.gpu_offload_failed: bool = False
+        # Why the session fell back to CPU (empty while it has not).
+        self.fallback_reason: str = ""
+        # The resolved device of the last spawn (GPU backends).
+        self.active_device: Optional[llamafile_backend.Device] = None
+        # The backend in force: a switched one (override file) or config.
+        self.override: Optional[dict] = self._load_override()
+        self._switch_lock = threading.Lock()
+        self._backends_cache: Optional[tuple[float, dict]] = None
         self._stop_reaper = threading.Event()
         self._reaper_thread: Optional[threading.Thread] = None
         # Sanity-check pooling at construct time — silently dropping
@@ -194,9 +239,14 @@ class EmbeddingManager:
                 f"invalid pooling mode {cfg.pooling!r}; "
                 f"expected one of {sorted(_VALID_POOLING)}"
             )
-        if cfg.mode not in ("auto", "cpu"):
+        if self.override and self.override.get("mode") not in llamafile_backend.BACKENDS:
+            log.warning("ignoring embedder override with mode %r",
+                        self.override.get("mode"))
+            self.override = None
+        if cfg.mode not in llamafile_backend.BACKENDS:
             raise ValueError(
-                f"invalid mode {cfg.mode!r}; expected 'auto' or 'cpu'"
+                f"invalid mode {cfg.mode!r}; expected one of "
+                f"{', '.join(llamafile_backend.BACKENDS)}"
             )
 
     # ----- introspection ---------------------------------------- #
@@ -244,30 +294,147 @@ class EmbeddingManager:
                 "idle_seconds": time.time() - self.last_activity_at,
                 "idle_timeout_seconds": self.cfg.idle_timeout_seconds,
                 "gpu_offload_failed": self.gpu_offload_failed,
+                "device": (self.active_device.as_dict()
+                           if self.active_device and self._effective_mode()
+                           in llamafile_backend.GPU_BACKENDS else None),
+                "fallback_reason": self.fallback_reason,
+                "backend": self.backend(),
             }
 
     # ----- spawn / health --------------------------------------- #
 
-    def _effective_mode(self) -> str:
-        """Return the mode we'd use on the next spawn.
+    # ----- backend -------------------------------------------------- #
 
-        ``cpu`` if the user asked for it OR a previous spawn fell
-        back. Otherwise ``auto`` (which means "try GPU"). The
-        installer-level ``cpu`` choice is sticky permanently; the
-        runtime fallback is sticky for the daemon session.
+    def backend(self) -> dict:
+        """The backend in force: a switched one, else the config's."""
+        if self.override:
+            o = self.override
+            return {"mode": o.get("mode"), "device": o.get("device") or "",
+                    "pci": o.get("pci") or "", "source": "switched",
+                    "reason": o.get("reason") or "", "set_at": o.get("set_at")}
+        return {"mode": self.cfg.mode, "device": self.cfg.device, "pci": self.cfg.pci,
+                "source": "config", "reason": "", "set_at": None}
+
+    def _override_file(self) -> str:
+        return self.cfg.override_path or os.path.join(
+            os.path.expanduser("~"), ".claude", "claude-hooks-embedder-backend.json")
+
+    def _load_override(self) -> Optional[dict]:
+        try:
+            with open(self._override_file(), encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else None
+        except (OSError, ValueError):
+            return None
+
+    def _store_override(self, data: Optional[dict]) -> None:
+        path = self._override_file()
+        if data is None:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=1)
+        os.replace(tmp, path)
+
+    def _effective_mode(self) -> str:
+        """The backend the next spawn uses.
+
+        ``cpu`` when the backend in force is cpu OR a GPU start fell
+        back this session; otherwise the backend in force.
         """
-        if self.cfg.mode == "cpu" or self.gpu_offload_failed:
+        mode = self.backend()["mode"]
+        if mode == "cpu" or self.gpu_offload_failed:
             return "cpu"
-        return "auto"
+        return mode
+
+    def _child_env(self, mode: Optional[str] = None) -> dict:
+        return llamafile_backend.child_env(
+            mode=mode or self._effective_mode(), vulkan_icd=self.cfg.vulkan_icd,
+            allow_old_driver=self.cfg.allow_old_driver,
+        )
+
+    def _fall_back(self, reason: str) -> None:
+        """CPU for the rest of the daemon session. Caller holds the lock."""
+        log.warning("embedding backend %s unusable (%s); using CPU until the "
+                    "next switch or restart", self.backend()["mode"], reason)
+        self.gpu_offload_failed = True
+        self.fallback_reason = reason
+
+    def _devices(self, mode: str) -> list:
+        out = llamafile_backend.list_devices(
+            self.cfg.llamafile_path, self._child_env(mode), backend=mode)
+        return llamafile_backend.with_pci(llamafile_backend.parse_devices(out), mode)
+
+    def _confirm_pci(self) -> None:
+        """Take the running device's PCI address from the server's /props
+        (``opencoti.devices[].pci``), which the engine knows for certain.
+        Soft: an older engine without the field changes nothing."""
+        d = self.active_device
+        if d is None or self._effective_mode() not in llamafile_backend.GPU_BACKENDS:
+            return
+        try:
+            with urllib.request.urlopen(self._url("/props"), timeout=3.0) as r:
+                props = json.loads(r.read())
+        except Exception:
+            return
+        for dev in (props.get("opencoti") or {}).get("devices") or []:
+            if isinstance(dev, dict) and dev.get("name") == d.id and dev.get("pci"):
+                from dataclasses import replace
+                self.active_device = replace(
+                    d, pci=llamafile_backend.normalise_pci(str(dev["pci"])))
+                return
+
+    def _resolve_device(self) -> None:
+        """Resolve the GPU device for the next spawn, or fall back to
+        CPU. Caller holds the lock."""
+        b = self.backend()
+        try:
+            self.active_device = llamafile_backend.resolve_device(
+                b["device"], self._devices(b["mode"]), pci=b["pci"])
+        except llamafile_backend.BackendError as e:
+            self.active_device = None
+            self._fall_back(str(e))
+
+    def _backend_verified(self) -> bool:
+        """GPU backend: the probe vectors match the CPU reference.
+
+        Skipped (True) for a custom GGUF, with ``verify_backend`` off,
+        or when no reference ships. Caller holds the lock."""
+        if (self._effective_mode() not in llamafile_backend.GPU_BACKENDS
+                or not self.cfg.verify_backend or self.cfg.model_gguf):
+            return True
+        ref = llamafile_backend.load_reference()
+        if ref is None:
+            log.warning("no embedder probe reference; GPU vectors unchecked")
+            return True
+        ok, detail = llamafile_backend.check_vectors(self._url("/embedding"), ref)
+        log.info("embedding backend check on %s: %s",
+                 self.active_device.id if self.active_device else "?", detail)
+        if not ok:
+            self._fall_back(detail)
+        return ok
+
+    def _url(self, path: str) -> str:
+        host = "127.0.0.1" if self.cfg.host in ("0.0.0.0", "::", "") else self.cfg.host
+        return f"http://{host}:{self.cfg.port}{path}"
 
     def _gpu_flags(self) -> list[str]:
-        """Decide whether to pass ``-ngl 99`` or ``--gpu disable``.
+        """Backend arguments for the next spawn.
 
-        Calls :mod:`claude_hooks.gpu_probe` lazily so unit tests can
-        stub it out without importing nvidia-smi machinery.
+        ``cpu`` and ``vulkan`` are explicit (llamafile_backend.flags);
+        ``auto`` keeps the pre-ch-33 decision. Calls
+        :mod:`claude_hooks.gpu_probe` lazily so unit tests can stub it
+        out without importing nvidia-smi machinery.
         """
-        if self._effective_mode() == "cpu":
-            return ["--gpu", "disable"]
+        mode = self._effective_mode()
+        if mode == "cpu" or mode in llamafile_backend.GPU_BACKENDS:
+            return llamafile_backend.flags(
+                mode, self.active_device.id if self.active_device else "")
         # auto mode: pre-flight VRAM check. ``can_fit_in_vram``
         # returns None when the probe can't determine VRAM (vulkan
         # vendor or no GPU at all) — treat that as "try GPU anyway"
@@ -381,6 +548,7 @@ class EmbeddingManager:
             "stdin": subprocess.DEVNULL,
             "stdout": subprocess.DEVNULL,
             "stderr": subprocess.DEVNULL,
+            "env": self._child_env(),
         }
         if sys.platform.startswith("win"):
             # CREATE_NO_WINDOW suppresses the console allocation that
@@ -473,6 +641,8 @@ class EmbeddingManager:
                 )
 
             cwd = self.cfg.cwd or os.path.dirname(self.cfg.llamafile_path)
+            if self._effective_mode() in llamafile_backend.GPU_BACKENDS:
+                self._resolve_device()
             try:
                 self.proc = self._spawn_once(cwd)
             except OSError as e:
@@ -482,31 +652,39 @@ class EmbeddingManager:
                     "executable and the platform is supported."
                 ) from e
 
-            if self._wait_for_health():
+            healthy = self._wait_for_health()
+            if healthy and self._backend_verified():
                 self.last_activity_at = time.time()
+                self._confirm_pci()
                 log.info(
-                    "llamafile ready on port %d (pid=%s, mode=%s)",
+                    "llamafile ready on port %d (pid=%s, mode=%s%s)",
                     self.cfg.port, self.proc.pid, self._effective_mode(),
+                    f", device={self.active_device.id}"
+                    if self._effective_mode() in llamafile_backend.GPU_BACKENDS
+                    and self.active_device else "",
                 )
                 return {
                     "ready": True,
                     "port": self.cfg.port,
                     "mode": self._effective_mode(),
                     "spawned": True,
+                    **({"gpu_fallback": True, "fallback_reason": self.fallback_reason}
+                       if self.gpu_offload_failed and self.backend()["mode"] != "cpu"
+                       else {}),
                 }
 
-            # Spawn succeeded but health never returned 200. If we
-            # were trying the GPU path, fall back to CPU once. Any
-            # other failure surfaces as a hard error so the
-            # CompositeEmbedder can fail over to its primary.
+            # Health never returned 200, or the GPU's vectors failed the
+            # probe check (which already recorded the fall-back). If we
+            # were trying a GPU path, fall back to CPU once. Any other
+            # failure surfaces as a hard error so the CompositeEmbedder
+            # can fail over to its primary.
             self._terminate_locked()
-            if self._effective_mode() == "auto" and not self.gpu_offload_failed:
-                log.warning(
-                    "llamafile didn't come up on GPU within %.1fs; "
-                    "falling back to CPU-only for the rest of the session",
-                    self.cfg.spawn_timeout_seconds,
-                )
-                self.gpu_offload_failed = True
+            if self.backend()["mode"] in ("auto", *llamafile_backend.GPU_BACKENDS) and (
+                    not self.gpu_offload_failed or healthy):
+                if not healthy:
+                    self._fall_back(
+                        f"no health on {self.backend()['mode']} within "
+                        f"{self.cfg.spawn_timeout_seconds:.1f}s")
                 try:
                     self.proc = self._spawn_once(cwd)
                 except OSError as e:
@@ -523,6 +701,7 @@ class EmbeddingManager:
                         "mode": "cpu",
                         "spawned": True,
                         "gpu_fallback": True,
+                        "fallback_reason": self.fallback_reason,
                     }
                 self._terminate_locked()
             raise RuntimeError(
@@ -536,6 +715,162 @@ class EmbeddingManager:
         ``ensure_running`` but a periodic warmup could use it
         directly)."""
         self.last_activity_at = time.time()
+
+    # ----- control: list backends, switch gracefully -------------- #
+
+    #: How long a device list stays fresh. Listing loads the GPU library
+    #: (seconds); devices change only with hardware or drivers.
+    BACKENDS_TTL_S = 300.0
+    #: Two idle /slots reads this far apart make the embedder idle.
+    IDLE_GAP_S = 0.25
+
+    def backends(self, *, refresh: bool = False) -> dict:
+        """What this composite can run on here, with each device's id,
+        name, memory and PCI address, plus the backend in force."""
+        now = time.time()
+        if (not refresh and self._backends_cache
+                and now - self._backends_cache[0] < self.BACKENDS_TTL_S):
+            listed = self._backends_cache[1]
+        else:
+            listed = {"cpu": {"available": True, "devices": []}}
+            for mode in llamafile_backend.GPU_BACKENDS:
+                try:
+                    devs = self._devices(mode)
+                    listed[mode] = {"available": bool(devs),
+                                    "devices": [d.as_dict() for d in devs]}
+                    if not devs:
+                        listed[mode]["reason"] = (
+                            "the engine lists no usable device (no driver, a refused "
+                            "driver, or this composite has no library for it)")
+                except llamafile_backend.BackendError as e:
+                    listed[mode] = {"available": False, "devices": [], "reason": str(e)}
+            self._backends_cache = (now, listed)
+        st = self.status()
+        return {"backends": listed, "listed_at": self._backends_cache[0],
+                "current": {k: st.get(k) for k in (
+                    "alive", "mode", "device", "backend", "fallback_reason")}}
+
+    def _busy(self) -> bool:
+        """True while the embedder has work a restart would cut.
+
+        Three signals, any one is enough:
+
+        * a client connection open to the embed port
+          (:func:`llamafile_backend.open_connections`) — a request is
+          visible there from the moment it connects, while ``/slots``
+          reads idle until a slot takes it (~3 s for a 14k-character text
+          on a loaded CPU; the first live switch cut such a request);
+        * a slot ``is_processing``;
+        * ``/slots`` not answering in time while the server is up: the
+          mozilla engine answers it from the inference loop, so it stalls
+          for the length of an embed (``embedder_gate``).
+
+        A server that refuses the connection is not busy: there is nothing
+        to interrupt.
+        """
+        conns = llamafile_backend.open_connections(self.cfg.port)
+        if conns:
+            return True
+        try:
+            with urllib.request.urlopen(self._url("/slots"), timeout=2.0) as r:
+                slots = json.loads(r.read())
+        except (socket.timeout, TimeoutError):
+            return True
+        except urllib.error.URLError as e:
+            return isinstance(e.reason, (socket.timeout, TimeoutError))
+        except Exception:
+            return False
+        return any(s.get("is_processing") for s in slots if isinstance(s, dict))
+
+    def _wait_idle(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self._busy():
+                time.sleep(self.IDLE_GAP_S)
+                if not self._busy():
+                    return True
+            time.sleep(0.5)
+        return False
+
+    def switch(self, mode: str, *, device: str = "", pci: str = "",
+               reason: str = "", persist: bool = True,
+               idle_timeout: float = 120.0, force: bool = False) -> dict:
+        """Move the embedder to another backend, gracefully.
+
+        The device is resolved first, so a switch to something that is
+        not there changes nothing. A running server is restarted only
+        once every slot is idle (two reads ``IDLE_GAP_S`` apart); with
+        ``force`` it is restarted after ``idle_timeout`` regardless.
+        The new backend is checked like any start: a GPU whose vectors
+        fail the probe falls back to CPU and the answer says so.
+        ``persist`` keeps the choice across daemon restarts until
+        :meth:`reset`. A stopped server is not started: the next embed
+        starts it on the new backend.
+        """
+        if mode not in ("cpu", *llamafile_backend.GPU_BACKENDS):
+            return {"ok": False, "changed": False,
+                    "error": f"cannot switch to {mode!r}; expected cpu, "
+                    + ", ".join(llamafile_backend.GPU_BACKENDS)}
+        target = None
+        if mode in llamafile_backend.GPU_BACKENDS:
+            try:
+                target = llamafile_backend.resolve_device(
+                    device, self._devices(mode), pci=pci)
+            except llamafile_backend.BackendError as e:
+                return {"ok": False, "error": str(e), "changed": False}
+        override = {"mode": mode, "device": target.id if target else "",
+                    "pci": target.pci if target else "", "reason": reason,
+                    "set_at": time.time()}
+        return self._restart_into(override, persist=persist,
+                                  idle_timeout=idle_timeout, force=force)
+
+    def reset(self, *, idle_timeout: float = 120.0, force: bool = False) -> dict:
+        """Back to the configured backend; forgets a switched one."""
+        return self._restart_into(None, persist=True,
+                                  idle_timeout=idle_timeout, force=force)
+
+    def _restart_into(self, override: Optional[dict], *, persist: bool,
+                      idle_timeout: float, force: bool) -> dict:
+        """Wait for idle, stop, put ``override`` in force (None = the
+        config), restart if it was running. ``persist`` writes the
+        override file (or removes it for None)."""
+        if not self._switch_lock.acquire(blocking=False):
+            return {"ok": False, "changed": False,
+                    "error": "another switch is in progress"}
+        try:
+            was_alive = self.alive()
+            waited = time.monotonic()
+            idle = True
+            if was_alive:
+                idle = self._wait_idle(idle_timeout)
+                if not idle and not force:
+                    return {"ok": False, "changed": False, "error":
+                            f"the embedder stayed busy for {idle_timeout:g} s; "
+                            "retry, or pass force"}
+            with self.lock:
+                self._terminate_locked()
+                self.override = override
+                self.gpu_offload_failed = False
+                self.fallback_reason = ""
+                self.active_device = None
+                if persist:
+                    self._store_override(override)
+            b = self.backend()
+            log.info("embedder backend now %s %s%s (%s)", b["mode"], b["device"],
+                     f" pci={b['pci']}" if b["pci"] else "",
+                     (override or {}).get("reason") or b["source"])
+            result = {"ok": True, "changed": True, "restarted": was_alive,
+                      "waited_s": round(time.monotonic() - waited, 2),
+                      "forced": was_alive and not idle}
+            if was_alive:
+                try:
+                    result["start"] = self.ensure_running()
+                except RuntimeError as e:
+                    result.update(ok=False, error=f"restart failed: {e}")
+            result["status"] = self.status()
+            return result
+        finally:
+            self._switch_lock.release()
 
     # ----- reap ------------------------------------------------- #
 
@@ -641,6 +976,14 @@ def config_from_dict(cfg: dict) -> EmbeddingConfig:
         n_parallel=int(e.get("n_parallel") or 3),
         pooling=str(e.get("pooling") or "last"),
         mode=str(e.get("mode") or "auto"),
+        device=str(e.get("device") or ""),
+        pci=str(e.get("pci") or ""),
+        control_host=str(e.get("control_host") or "127.0.0.1"),
+        control_port=int(e.get("control_port", 38091) or 0),
+        override_path=os.path.expanduser(str(e.get("override_path") or "")),
+        vulkan_icd=os.path.expanduser(str(e.get("vulkan_icd") or "")),
+        allow_old_driver=bool(e.get("allow_old_driver", False)),
+        verify_backend=bool(e.get("verify_backend", True)),
         vram_budget_mb=int(e.get("vram_budget_mb") or _DEFAULT_VRAM_BUDGET_MB),
         nice=int(e.get("nice", -5)),
         spawn_timeout_seconds=float(e.get("spawn_timeout_seconds") or 30.0),
@@ -664,7 +1007,10 @@ def main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover
     parser.add_argument("action", choices=("spawn", "status", "shutdown"))
     parser.add_argument("--llamafile", required=True)
     parser.add_argument("--port", type=int, default=38092)
-    parser.add_argument("--mode", choices=("auto", "cpu"), default="auto")
+    parser.add_argument("--mode", choices=llamafile_backend.BACKENDS, default="auto")
+    parser.add_argument("--device", default="")
+    parser.add_argument("--pci", default="")
+    parser.add_argument("--vulkan-icd", default="")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -673,6 +1019,7 @@ def main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover
     )
     cfg = EmbeddingConfig(
         llamafile_path=args.llamafile, port=args.port, mode=args.mode,
+        device=args.device, pci=args.pci, vulkan_icd=args.vulkan_icd,
     )
     mgr = EmbeddingManager(cfg)
     if args.action == "spawn":

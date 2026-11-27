@@ -518,3 +518,19 @@ class IntegrationLockingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OffByDefaultTests(unittest.TestCase):
+    """Off by default since 2026-11-27: 2 claudemem queries in 8 months on
+    solidpc against continuous GPU embedding and Opus enrichment."""
+
+    def test_default_config_is_off(self):
+        from claude_hooks.config import DEFAULT_CONFIG
+        self.assertIs(DEFAULT_CONFIG["hooks"]["claudemem_reindex"]["enabled"], False)
+
+    def test_a_config_without_the_block_never_reindexes(self):
+        from claude_hooks.hooks import session_start, stop
+        for mod in (session_start, stop):
+            src = Path(mod.__file__).read_text(encoding="utf-8")
+            self.assertNotIn('reindex_cfg.get("enabled", True)', src, mod.__name__)
+            self.assertIn('reindex_cfg.get("enabled", False)', src, mod.__name__)

@@ -510,12 +510,15 @@ def _shell_kw(deps: GraphDeps) -> dict:
 
 
 def _wrap_up_check(deps: GraphDeps) -> Optional[Callable[[], bool]]:
-    """Plan D9: what a running lane's loop asks before each turn, or
-    ``None`` when the graph has no run control (tests, benchmarks)."""
+    """Plan D9: what a running lane's loop asks before each turn and,
+    while a tool call runs, every second (``execute_tool_calls(stop_check=)``),
+    or ``None`` when the graph has no run control (tests, benchmarks).
+    A cancel counts as well: the lane leaves a running tool the same way,
+    and its next model call raises the cancel."""
     rc = getattr(deps, "run_control", None)
     if rc is None:
         return None
-    return lambda: bool(rc.wrapping_up)
+    return lambda: bool(rc.wrapping_up or rc.cancelled)
 
 
 def _wrap_up_kw(deps: GraphDeps) -> dict:

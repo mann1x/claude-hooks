@@ -218,6 +218,24 @@ export function getIndexDir(): string {
 }
 
 /**
+ * Where the embedding model is cached once downloaded.
+ *
+ * transformers.js defaults to `.cache` inside its own package directory, so
+ * every `npm install` deletes the model, and a service that may not write its
+ * install tree (systemd `ProtectSystem=strict`) can never fetch it back:
+ * search and indexing then fail on every call. The cache lives with the
+ * index instead.
+ *
+ * Precedence: EPISODIC_MEMORY_MODEL_CACHE env var, else
+ * `<superpowers dir>/models`.
+ */
+export function getModelCacheDir(): string {
+  return ensureDir(
+    process.env.EPISODIC_MEMORY_MODEL_CACHE || path.join(getSuperpowersDir(), 'models')
+  );
+}
+
+/**
  * Get database path
  */
 export function getDbPath(): string {

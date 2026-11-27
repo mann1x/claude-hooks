@@ -1,13 +1,19 @@
+export declare function isSummarizerPrompt(userMessage: string): boolean;
 /**
- * Stream and scan for any exclusion marker, carrying an overlap between
- * chunks so a marker split across a boundary is still found. A single
- * fs.readFileSync(path, 'utf-8') throws ERR_STRING_TOO_LONG above Node's
- * ~512 MB max string length; the old catch returned false (fail OPEN),
- * silently indexing a file whose DO NOT INDEX marker we never read (#152).
- * Streaming confirms cleanliness at any size, and a real read error now
- * fails CLOSED (skip) rather than open.
+ * Whether the transcript carries one of `markers` as an instruction; null on a
+ * read error. Only lines holding a marker's bare string are parsed (markers
+ * have no newline, so none spans two lines). Reading line by line keeps any
+ * size readable: one readFileSync throws ERR_STRING_TOO_LONG above ~512 MB (#152).
+ */
+export declare function scanMarkers(canonical: string, markers: readonly string[]): boolean | null;
+/**
+ * Leave the conversation out of summaries: a marker in a user turn, or an
+ * unreadable file (fail closed, #152). This is also the summarizer's
+ * recursion guard — its own sessions carry SUMMARIZER_CONTEXT_MARKER.
  */
 export declare function shouldSkipConversation(filePath: string): boolean;
+/** DO NOT INDEX in a user turn: the whole conversation stays out of the index (null: unreadable). */
+export declare function shouldSkipIndexing(filePath: string): boolean | null;
 export interface SyncResult {
     copied: number;
     skipped: number;

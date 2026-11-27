@@ -1135,6 +1135,29 @@ filter or re-write later.
 
 ### Claudemem auto-reindex
 
+> **Not recommended — off by default since 2026-11-27.** Measured on
+> solidpc before turning it off:
+>
+> - **Usage**: 2 claudemem queries (`claudemem --agent map`, one project)
+>   across 1,696 Claude Code transcripts over 8 months. One project with a
+>   4.7 GB index never ran a claudemem command at all.
+> - **Embedding cost**: this hook re-indexed 7 projects whenever a turn
+>   edited a file, so claudemem made ~26,000 embedding calls to Ollama on
+>   the RTX 3090 in one day (snowflake-arctic-embed2), including during
+>   other sessions' GPU measurements. The indexes held 333k chunks
+>   (~110M tokens); re-embedding them with the claude-hooks embedder on
+>   the Radeon iGPU (~710 tok/s) would take ~43 h.
+> - **Token cost**: with `enableEnrichment` (claudemem's default here, LLM
+>   `cc/opus`), every re-index re-summarises changed files through `claude
+>   -p`. The 7 indexes held 192k Opus-written summaries.
+>
+> Prefer the tools this repo already runs for code navigation: the LSP
+> MCP (`docs/lsp-mcp.md`) and the built-in code graph. If you do use
+> claudemem, point it at the claude-hooks embedder (`embeddingProvider:
+> "local"`, `localEndpoint: "http://127.0.0.1:38092/v1"`), index with
+> `--no-llm`, and enable this hook only in projects where a session
+> actually searches it.
+
 [`claudemem`](https://github.com/MadAppGang/claudemem) is a semantic
 code-search tool with its own AST-aware index. Upstream ships a git
 post-commit hook (`claudemem hooks install`), but that doesn't cover
@@ -1154,7 +1177,7 @@ Config (`hooks.claudemem_reindex`):
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `enabled` | `true` | Master toggle |
+| `enabled` | `false` | Master toggle (off by default, see the note above) |
 | `check_on_stop` | `true` | Reindex on turns that touched files |
 | `check_on_session_start` | `true` | Staleness check when a new session opens |
 | `staleness_minutes` | `10` | Cooldown — reindex at most every N min |

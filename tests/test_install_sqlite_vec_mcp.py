@@ -135,6 +135,7 @@ class TestEnable:
             "",                 # model default
             "",                 # num_ctx default
             "y",                # llamafile fallback? yes
+            "",                 # composite: default (cpu + vulkan)
             "",                 # llamafile defaults
             "cpu",              # CPU mode
             "",                 # #242: accept LAN-exposure default (loopback)
@@ -164,6 +165,7 @@ class TestEnable:
             "n",    # use Ollama? no
             "n",    # #237: use remote llamafile? no
             "n",    # use OpenAI? no
+            "",                 # composite: default (cpu + vulkan)
             "",     # llamafile defaults
             "cpu",  # CPU mode
             "",     # #242: accept LAN-exposure default (loopback)
@@ -244,6 +246,7 @@ class TestEnable:
             "n",   # use Ollama? no
             "n",   # #237: use remote llamafile? no
             "n",   # use OpenAI? no
+            "",                 # composite: default (cpu + vulkan)
             "",    # llamafile defaults
             "cpu", # CPU mode
             "",    # #242: accept LAN-exposure default (loopback)
@@ -268,6 +271,7 @@ class TestEnable:
             "n",   # Ollama? no
             "n",   # #237: remote llamafile? no
             "n",   # OpenAI? no
+            "",                 # composite: default (cpu + vulkan)
             "",    # llamafile defaults
             "cpu", # CPU
             "",    # #242: LAN-exposure default

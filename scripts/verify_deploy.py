@@ -401,7 +401,9 @@ def check_episodic(r: Results) -> None:
     The server's ``/health`` used to report ``ok`` whenever the archive
     directory existed. On solidpc better-sqlite3 was built for Node 22,
     Node went to 26, and every CLI call threw for 12 days behind that
-    ``ok``. ``/health?fresh=1`` now runs the CLI, and this reads it. On a
+    ``ok``. ``/health?fresh=1`` now runs a vector search (``stats`` never
+    loads the embedding model, so it passed for 26 days while the model
+    cache was gone and every search failed), and this reads it. On a
     server host a dead CLI fails the deploy; on a client it only warns,
     because the fix is on another machine.
     """
@@ -416,15 +418,11 @@ def check_episodic(r: Results) -> None:
     except Exception as e:
         r.add(WARN, "episodic", f"config unavailable: {type(e).__name__}")
         return
-    mode = ep.get("mode") or "off"
-    if mode == "server":
-        host = ep.get("server_host") or "127.0.0.1"
-        if host in ("0.0.0.0", "::"):
-            host = "127.0.0.1"
-        url = f"http://{host}:{int(ep.get('server_port') or 11435)}"
-    elif mode == "client" and ep.get("server_url"):
-        url = ep["server_url"].rstrip("/")
-    else:
+    from claude_hooks.episodic_url import server_base_url
+
+    mode = (ep.get("mode") or "off").lower()
+    url = server_base_url(ep)
+    if url is None:
         r.add(PASS, "episodic", f"mode {mode!r}: nothing to check")
         return
     bad = FAIL if mode == "server" else WARN
@@ -445,8 +443,11 @@ def check_episodic(r: Results) -> None:
                   "(scripts/deploy.py links it)")
         else:
             r.add(PASS, "episodic CLI", f"vendored ({vendored})")
+        check_episodic_embedder(r)
     try:
-        with urllib.request.urlopen(f"{url}/health?fresh=1", timeout=90) as resp:
+        # Above the server's own bound on a probe search (SEARCH_TIMEOUT_S,
+        # 180 s): the first search of a process loads the embedding model.
+        with urllib.request.urlopen(f"{url}/health?fresh=1", timeout=200) as resp:
             body = json.loads(resp.read())
     except urllib.error.HTTPError as e:
         try:
@@ -464,11 +465,69 @@ def check_episodic(r: Results) -> None:
         return
     if not body.get("cli_ok"):
         detail = body.get("hint") or body.get("error") or "CLI failed"
+        tail = (body.get("stderr") or "").strip().splitlines()
+        if tail:
+            detail += f": {tail[-1][:300]}"
         r.add(bad, f"episodic {url}", detail)
+        return
+    if (body.get("last_sync") or {}).get("indexing_skipped"):
+        # A sync that cannot embed still prints "Sync complete!"; 26 days
+        # of them indexed nothing (2026-10-31 .. 11-26).
+        r.add(bad, f"episodic {url}",
+              "the last sync skipped semantic indexing: "
+              + body["last_sync"].get("error", "see the sync log"))
         return
     age = body.get("index_age_hours")
     r.add(PASS, f"episodic {url}",
-          "CLI ok" + (f", index updated {age} h ago" if age is not None else ""))
+          "search ok" + (f", index updated {age} h ago" if age is not None else ""))
+
+
+def check_episodic_embedder(r: Results) -> None:
+    """Does episodic-memory embed with the user's configured embedder?
+
+    It reads ``<superpowers>/embedder.json``, which deploy writes from the
+    memory provider's embedder (claude_hooks/episodic_embedder.py); without
+    it the package falls back to its bundled bge-small. A file that differs
+    from the config fails. An index still holding another model's vectors
+    only warns: the syncs (or episodic_doctor --rebuild-embeddings) are
+    re-embedding it, and search uses keyword ranking until they have."""
+    from claude_hooks import episodic_embedder as ee
+    from claude_hooks.config import load_config as load_hooks_config
+
+    cfg = load_hooks_config()
+    want, why = ee.spec_for(cfg)
+    have = ee.read_current()
+    path = ee.config_path()
+    if isinstance(have, dict) and have.get("_managed_by") != ee.MARKER:
+        r.add(PASS, "episodic embedder", f"{path} is the user's own ({have.get('model')})")
+        space = ee.space_of(have) if have.get("model") else ee.LEGACY_SPACE
+    elif want is None:
+        if have is not None:
+            r.add(FAIL, "episodic embedder", f"{path} is left over ({why}); deploy removes it")
+            return
+        r.add(PASS, "episodic embedder", f"bundled model ({why})")
+        space = ee.LEGACY_SPACE
+    elif have != want:
+        r.add(FAIL, "episodic embedder",
+              f"{path} does not match providers' {want['model']} via {want['kind']}; "
+              "scripts/deploy.py writes it")
+        return
+    else:
+        r.add(PASS, "episodic embedder", f"{want['model']} via {want['kind']} {want['url']}")
+        space = ee.space_of(want)
+    held = ee.index_space()
+    if held is not None and held != space:
+        r.add(WARN, "episodic index",
+              f"holds {held} vectors, the embedder writes {space}: being re-embedded "
+              "(scripts/episodic_doctor.py --rebuild-embeddings <server> does it at once)")
+    elif held is not None:
+        r.add(PASS, "episodic index", f"vectors from {held}")
+    owed = ee.index_pending()
+    if owed:
+        r.add(WARN, "episodic catch-up",
+              f"{owed} archived transcript(s) still to index — each sync takes "
+              "EPISODIC_MEMORY_INDEX_BATCH exchanges "
+              "(scripts/episodic_doctor.py --rebuild-embeddings <server> does it at once)")
 
 
 def check_version(r: Results) -> None:

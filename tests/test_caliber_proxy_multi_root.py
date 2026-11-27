@@ -349,7 +349,7 @@ class TestPathAwareToolsMultiRoot:
         out = tools.glob_files(
             {"pattern": "*.py"}, str(cwd), (str(nested.resolve()),),
         )
-        assert out.splitlines() == [os.path.join("vendor", "dep.py")]
+        assert out.splitlines() == ["vendor/dep.py"]    # "/" on every OS
 
 
 # ---------- execute() dispatch with _extra_roots ----------

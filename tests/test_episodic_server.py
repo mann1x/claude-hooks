@@ -13,9 +13,9 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
-from http.server import HTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -43,7 +43,15 @@ def _cp(rc: int, out: str = "", err: str = "") -> subprocess.CompletedProcess:
 def _clear_probe_cache():
     es._probe_cache.clear()
     yield
+    _wait_for_probe()
     es._probe_cache.clear()
+
+
+def _wait_for_probe(timeout: float = 5.0) -> None:
+    """A background probe must finish inside the test that mocked the CLI,
+    or it would run the real one."""
+    assert es._probe_running.acquire(timeout=timeout), "probe thread still running"
+    es._probe_running.release()
 
 
 @pytest.fixture
@@ -55,6 +63,10 @@ def archive(tmp_path, monkeypatch):
     db.write_bytes(b"")
     monkeypatch.setattr(es, "DEFAULT_ARCHIVE", a)
     monkeypatch.setattr(es, "INDEX_DB", db)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    monkeypatch.setattr(es, "SYNC_LOG", logs / "episodic-memory.log")
+    monkeypatch.setattr(es, "SYNC_LOCK", logs / "episodic-memory-sync.lock")
     return a
 
 
@@ -63,7 +75,7 @@ def archive(tmp_path, monkeypatch):
 # ------------------------------------------------------------------ #
 def test_health_is_degraded_when_the_cli_fails(archive):
     with mock.patch.object(es, "_run_cli", return_value=_cp(1, err=ABI_ERR)):
-        code, body = es.health()
+        code, body = es.health(fresh=True)
     assert code == 503
     assert body["status"] == "degraded"
     assert body["archive_exists"] is True   # the old check, still true
@@ -74,7 +86,7 @@ def test_health_is_degraded_when_the_cli_fails(archive):
 
 def test_health_is_ok_when_the_cli_runs(archive):
     with mock.patch.object(es, "_run_cli", return_value=_cp(0, out="27674 conversations")):
-        code, body = es.health()
+        code, body = es.health(fresh=True)
     assert (code, body["status"], body["cli_ok"]) == (200, "ok", True)
     assert body["index_age_hours"] is not None
 
@@ -92,7 +104,7 @@ def test_probe_is_cached_until_it_expires_or_fresh_is_asked(archive):
 
 def test_a_missing_binary_is_degraded_not_a_crash(archive):
     with mock.patch.object(es, "_run_cli", side_effect=FileNotFoundError("episodic-memory")):
-        code, body = es.health()
+        code, body = es.health(fresh=True)
     assert code == 503 and "cannot run" in body["error"]
 
 
@@ -108,7 +120,7 @@ def test_stderr_is_tailed():
 # ------------------------------------------------------------------ #
 @pytest.fixture
 def http(archive):
-    srv = HTTPServer(("127.0.0.1", 0), es.EpisodicHandler)
+    srv = es.EpisodicServer(("127.0.0.1", 0), es.EpisodicHandler)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     yield f"http://127.0.0.1:{srv.server_address[1]}"
@@ -144,7 +156,7 @@ def test_search_still_parses_a_good_answer(http):
 
 def test_health_endpoint_status_codes(http):
     with mock.patch.object(es, "_run_cli", return_value=_cp(1, err=ABI_ERR)):
-        assert _get(http + "/health")[0] == 503
+        assert _get(http + "/health?fresh=1")[0] == 503
     with mock.patch.object(es, "_run_cli", return_value=_cp(0)):
         # cached failure until fresh=1
         assert _get(http + "/health")[0] == 503
@@ -357,3 +369,178 @@ def test_session_end_sync_env():
     assert sync_env({})["EPISODIC_MEMORY_COMPRESS_AFTER_DAYS"] == "7"
     assert "EPISODIC_MEMORY_COMPRESS_AFTER_DAYS" not in sync_env({"compress_after_days": 0})
     assert "EPISODIC_MEMORY_COMPRESS_AFTER_DAYS" not in sync_env({"compress_after_days": "x"})
+
+
+# ------------------------------------------------------------------ #
+# The probe must load the embedding model (2026-10-31 .. 11-26: the
+# model cache was gone, every search and every sync's indexing failed,
+# and a ``stats`` probe kept answering ok).
+# ------------------------------------------------------------------ #
+def test_the_probe_is_a_vector_search_not_stats(archive):
+    with mock.patch.object(es, "_run_cli", return_value=_cp(0)) as run:
+        es.probe(fresh=True)
+    args = run.call_args.args[0]
+    assert args[0] == "search" and "--vector" in args
+    assert "stats" not in args
+    assert run.call_args.args[1] == es.SEARCH_TIMEOUT_S
+
+
+def test_a_search_that_cannot_load_the_model_is_degraded(archive):
+    err = ("Error searching: Error: ENOENT: no such file or directory, mkdir "
+           "'/x/node_modules/@huggingface/transformers/.cache'")
+    with mock.patch.object(es, "_run_cli", return_value=_cp(1, err=err)):
+        code, body = es.health(fresh=True)
+    assert (code, body["status"], body["cli_ok"]) == (503, "degraded", False)
+    assert "transformers/.cache" in body["stderr"]
+
+
+# ------------------------------------------------------------------ #
+# POST /sync?background=1: the hook daemon's sandbox cannot write the
+# sync log, the archive or the index, so SessionEnd asks the server.
+# ------------------------------------------------------------------ #
+def _post(url: str) -> tuple[int, dict]:
+    req = urllib.request.Request(url, data=b"", method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def test_a_background_sync_is_started_and_answered_202(http):
+    with mock.patch.object(es.subprocess, "Popen") as popen, \
+            mock.patch.object(es, "_run_cli") as run:
+        code, body = _post(http + "/sync?background=1")
+    assert (code, body["status"]) == (202, "started")
+    assert popen.call_args.args[0][1:] == ["sync", "--background"]
+    assert "stderr" not in popen.call_args.kwargs   # stays on the journal
+    run.assert_not_called()
+
+
+def test_a_plain_sync_still_runs_in_the_request(http):
+    with mock.patch.object(es.subprocess, "Popen") as popen, \
+            mock.patch.object(es, "_run_cli", return_value=_cp(0, out="done")):
+        code, body = _post(http + "/sync")
+    assert (code, body["status"]) == (200, "synced")
+    popen.assert_not_called()
+
+
+def test_a_background_sync_that_cannot_start_is_a_500(http):
+    with mock.patch.object(es.subprocess, "Popen", side_effect=FileNotFoundError("nope")):
+        code, body = _post(http + "/sync?background=1")
+    assert code == 500 and "cannot run" in body["error"]
+
+
+# ------------------------------------------------------------------ #
+# /health answers at once (owner, 2026-11-26, via automaticum #2402): it
+# waited behind a ~4 min search, because the server served one request at
+# a time and a fresh-less probe ran in the request.
+# ------------------------------------------------------------------ #
+def test_health_answers_while_a_search_runs(http):
+    release = threading.Event()
+    started = threading.Event()
+
+    def slow(args, timeout, env=None):
+        if args[0] == "search" and "--vector" not in args:
+            started.set()
+            release.wait(10)
+        return _cp(0)
+
+    with mock.patch.object(es, "_run_cli", side_effect=slow):
+        t = threading.Thread(target=_get, args=(http + "/search?q=slow",), daemon=True)
+        t.start()
+        assert started.wait(5)
+        t0 = time.monotonic()
+        code, body = _get(http + "/health")
+        took = time.monotonic() - t0
+        release.set()
+        t.join(10)
+        _wait_for_probe()
+    assert took < 2.0
+    assert body["searches"]["running"] == 1
+    assert body["activity"] == "searching"
+
+
+def test_plain_health_never_probes_in_the_request(archive):
+    gate = threading.Event()
+
+    def slow_probe(args, timeout, env=None):
+        gate.wait(10)
+        return _cp(0)
+
+    with mock.patch.object(es, "_run_cli", side_effect=slow_probe):
+        t0 = time.monotonic()
+        code, body = es.health()
+        assert time.monotonic() - t0 < 1.0
+        assert (code, body["status"], body["cli_ok"]) == (503, "probing", None)
+        assert body["probe_running"] is True
+        # A second call does not start a second probe.
+        assert es.refresh_probe_in_background(time.time()) is False
+        gate.set()
+        _wait_for_probe()
+        code, body = es.health()
+    assert (code, body["status"]) == (200, "ok")
+
+
+def test_indexing_is_read_from_the_sync_lock(archive):
+    now = time.time()
+    assert es.indexing_state(now) == {"running": False}
+    es.SYNC_LOCK.write_text("4242")
+    mutex = es.SYNC_LOCK.parent / (es.SYNC_LOCK.name + ".lock")
+    mutex.mkdir()
+    st = es.indexing_state(now)
+    assert st["running"] is True and st["pid"] == 4242 and "since" in st
+    old = now - es.SYNC_LOCK_STALE_S - 5
+    os.utime(mutex, (old, old))
+    assert es.indexing_state(now) == {"running": False, "stale_lock": True}
+
+
+SYNC_LOG_SAMPLE = """\
+2026-11-25T10:00:00.000Z [info] Starting background sync from pid 1
+Syncing conversations...
+
+✅ Sync complete!
+  Copied: 4
+  Skipped: 10
+  Indexed: 4
+  Summarized: 2
+2026-11-26T09:25:51.617Z [info] Starting background sync from pid 2
+Syncing conversations...
+
+✅ Sync complete!
+  Copied: 3
+  Skipped: 1833
+  Indexed: 0
+  Summarized: 10
+
+⚠️  Errors: 1
+  (embeddings): Semantic indexing skipped — embedding backend unavailable: ENOENT
+2026-11-26T10:00:00.000Z [info] Starting background sync from pid 3
+Syncing conversations...
+"""
+
+
+def test_last_sync_is_the_last_completed_one():
+    got = es.last_sync(SYNC_LOG_SAMPLE)
+    assert got["started_at"] == "2026-11-26T09:25:51.617Z"
+    assert (got["copied"], got["indexed"], got["summarized"]) == (3, 0, 10)
+    assert got["indexing_skipped"] is True
+    assert es.last_sync("nothing here") is None
+
+
+def test_a_sync_that_skipped_indexing_is_degraded(archive):
+    es.SYNC_LOG.write_text(SYNC_LOG_SAMPLE, encoding="utf-8")
+    with mock.patch.object(es, "_run_cli", return_value=_cp(0)):
+        code, body = es.health(fresh=True)
+    assert (code, body["status"], body["cli_ok"]) == (503, "degraded", True)
+    assert "skipped semantic indexing" in body["error"]
+
+
+def test_searches_wait_for_a_slot_and_give_up(monkeypatch):
+    monkeypatch.setattr(es, "_search_slots", threading.BoundedSemaphore(1))
+    with es.search_slot(1) as first:
+        assert first is True
+        with es.search_slot(0.05) as second:
+            assert second is False
+    assert es.searches_state()["running"] == 0
+    assert es.searches_state()["waiting"] == 0

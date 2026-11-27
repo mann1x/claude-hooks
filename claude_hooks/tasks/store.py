@@ -37,6 +37,21 @@ _EMBED_MAX_CHARS = 800
 _EMBED_DESC_CHARS = 500
 
 
+#: Task fields the index carries inside the ``links`` JSON as ``_<name>``
+#: rather than as columns (ch-28 phase 4): a column would need DDL on a
+#: table that other hosts' older code writes with a fixed column list.
+_ROW_ONLY_KEYS = ("claimed_by", "defer")
+
+
+def _links_for_row(task: Task) -> dict:
+    links = dict(task.links)
+    for key in _ROW_ONLY_KEYS:
+        v = getattr(task, key, "")
+        if v:
+            links[f"_{key}"] = v
+    return links
+
+
 def embed_text(task: Task) -> str:
     parts = [task.title]
     if task.area:
@@ -122,6 +137,11 @@ class TaskIndex:
                     row[k] = json.loads(row[k])
                 except ValueError:
                     row[k] = [] if k != "links" else {}
+        links = row.get("links")
+        if isinstance(links, dict):
+            for key in _ROW_ONLY_KEYS:
+                v = links.pop(f"_{key}", "")
+                row.setdefault(key, v)
         if "archived" in row:
             row["archived"] = bool(row["archived"])
         return row
@@ -147,6 +167,39 @@ class TaskIndex:
             return [dict(zip(cols, r)) for r in cur.fetchall()]
         return self._run(fn)
 
+    def project_row(self, project: str) -> Optional[dict]:
+        """The registered ``(prefix, root, host)`` of ``project``, or None."""
+        cols = schema.PROJECT_COLUMNS
+        sql = self._q(f"SELECT {', '.join(cols)} FROM task_projects "
+                      "WHERE project = ?")
+
+        def fn(cur):
+            cur.execute(sql, (project,))
+            r = cur.fetchone()
+            return dict(zip(cols, r)) if r else None
+        return self._run(fn)
+
+    def max_number(self, project: str, prefix: str) -> int:
+        """The highest task number the index holds for ``project``."""
+        sql = self._q("SELECT MAX(num) FROM tasks WHERE project = ? "
+                      "AND prefix = ?")
+
+        def fn(cur):
+            cur.execute(sql, (project, prefix))
+            r = cur.fetchone()
+            return int(r[0]) if r and r[0] is not None else 0
+        return self._run(fn)
+
+    def edges(self) -> list[dict]:
+        """Every row's graph fields, every project: the cross-project
+        graph (``claude_hooks.tasks.graph``) is built from this."""
+        cols = ("project", "id", "status", "title", "depends", "links")
+
+        def fn(cur):
+            cur.execute(f"SELECT {', '.join(cols)} FROM tasks")
+            return [self._decode(dict(zip(cols, r))) for r in cur.fetchall()]
+        return self._run(fn)
+
     def prefixes_taken(self, *, except_project: str = "") -> set[str]:
         return {p["prefix"] for p in self.projects()
                 if p["project"] != except_project}
@@ -161,7 +214,8 @@ class TaskIndex:
             "priority": task.priority, "area": task.area,
             "tags": json.dumps(task.tags), "depends": json.dumps(task.depends),
             "plan": task.plan, "due": task.due,
-            "links": json.dumps(task.links), "created": task.created,
+            "links": json.dumps(_links_for_row(task)),
+            "created": task.created,
             "updated": task.updated, "sessions": json.dumps(task.sessions),
             "description": task.description, "acceptance": task.acceptance,
             "log": "\n".join(task.log_lines), "body": task.to_markdown(),

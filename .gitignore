@@ -103,6 +103,12 @@ vendor/llamafile/v*/*.zip
 vendor/llamafile/models/*.gguf
 vendor/llamafile/models/*.gguf.symlink
 vendor/llamafile/dist/*.llamafile
+# opencoti-llamafile inputs (ch-33): fetched by `make fetch-opencoti`,
+# checked against the committed SHA256SUMS next to them.
+vendor/llamafile/opencoti-*/components/
+vendor/llamafile/opencoti-*/releases/
+vendor/llamafile/opencoti-*/build/
+vendor/llamafile/opencoti-*/.cache/
 
 # Skill-eval per-run outputs (M11 protocol). The bench produces
 # large per-trial sandboxes with the model-generated code on disk

@@ -328,7 +328,8 @@ class _RequestHandler(socketserver.StreamRequestHandler):
         # the client can fall through to its primary embedder or surface
         # a config-error.
         if event in ("_embedding_ensure", "_embedding_status",
-                     "_embedding_shutdown"):
+                     "_embedding_shutdown", "_embedding_backends",
+                     "_embedding_switch", "_embedding_reset"):
             mgr = getattr(self.server, "embedding_manager", None)
             if mgr is None:
                 return {"available": False,
@@ -341,6 +342,19 @@ class _RequestHandler(socketserver.StreamRequestHandler):
                 if event == "_embedding_shutdown":
                     mgr.shutdown()
                     return {"shutdown": True}
+                p = payload or {}
+                if event == "_embedding_backends":
+                    return mgr.backends(refresh=bool(p.get("refresh")))
+                if event == "_embedding_switch":
+                    return mgr.switch(
+                        str(p.get("mode") or ""), device=str(p.get("device") or ""),
+                        pci=str(p.get("pci") or ""), reason=str(p.get("reason") or ""),
+                        persist=bool(p.get("persist", True)),
+                        idle_timeout=float(p.get("idle_timeout", 120.0)),
+                        force=bool(p.get("force", False)))
+                if event == "_embedding_reset":
+                    return mgr.reset(idle_timeout=float(p.get("idle_timeout", 120.0)),
+                                     force=bool(p.get("force", False)))
             except RuntimeError as e:
                 # Spawn / port-busy / health-fail surface here. Return
                 # the structured error rather than crashing the daemon
@@ -648,6 +662,9 @@ def serve(
     log.info("claude-hooks-daemon listening on %s:%d", host, port)
     if embedding_mgr is not None:
         embedding_mgr.start_reaper()
+        from claude_hooks import embedder_http
+        embedder_http.start(embedding_mgr, embedding_mgr.cfg.control_host,
+                            embedding_mgr.cfg.control_port)
         log.info(
             "embedding manager attached (idle_timeout=%.0fs, port=%d, mode=%s)",
             embedding_mgr.cfg.idle_timeout_seconds,

@@ -488,6 +488,25 @@ class AckTests(StoreHarness):
         self.store.read([self.mid], reader_session="mine", alias="me",
                         host="solidpc")
 
+    def test_message_state_for_a_task_mail_gate(self):
+        """ch-28: a task waiting on this mail opens when it is answered —
+        acked with a note, or replied to by its recipient naming #id."""
+        st = self.store.message_state(self.mid)
+        self.assertEqual((st["to_alias"], st["from_alias"]), ("me", "them"))
+        self.assertIsNone(st["read_at"])
+        self.assertIsNone(st["reply_id"])
+        self.assertIsNone(self.store.message_state(self.mid + 999))
+        self.register("them", "solidpc", sid="theirs")
+        self.store.send("them", "unrelated", "no id here", from_alias="me")
+        self.assertIsNone(self.store.message_state(self.mid)["reply_id"])
+        self.store.send("them", f"re #{self.mid}: done", "b", from_alias="me")
+        self.assertIsNotNone(self.store.message_state(self.mid)["reply_id"])
+        self.read_it()
+        self.store.ack(self.mid, "confirmed", session_id="mine",
+                       alias="me", host="solidpc")
+        self.assertEqual(self.store.message_state(self.mid)["ack_body"],
+                         "confirmed")
+
     def test_read_without_an_ack_announces_nothing(self):
         self.read_it()
         self.assertEqual(self.store.pending_receipts(from_alias="them"), [])
@@ -1203,6 +1222,41 @@ class ToolsTests(StoreHarness):
         self.assertIn("Pass id", self.them.call("mailbox-ack",
                                                 {"note": "x"}))
         self.assertIn("Pass id", self.me.call("mailbox-cancel", {}))
+
+    def test_send_says_how_to_ring_the_recipients_doorbell(self):
+        out = self.me.call("mailbox-send", {"to": "osync", "subject": "s",
+                                            "body": "b"})
+        self.assertIn("Ring the doorbell", out)
+        self.assertIn('SendMessage({to: "osync", message: "I\'ve sent you '
+                      'mail #1', out)
+        self.assertIn("# osync@solidpc", out)
+
+    def test_a_queued_send_has_no_doorbell(self):
+        out = self.me.call("mailbox-send", {"to": "nobody-here",
+                                            "subject": "s", "body": "b"})
+        self.assertNotIn("SendMessage", out)
+
+    def test_no_doorbell_for_mail_to_yourself(self):
+        out = self.me.call("mailbox-send", {"to": "claude-hooks",
+                                            "subject": "s", "body": "b"})
+        self.assertNotIn("SendMessage", out)
+
+    def test_ack_rings_the_senders_doorbell_once(self):
+        for n in range(2):
+            self.me.call("mailbox-send", {"to": "osync", "subject": f"s{n}",
+                                          "body": "b"})
+        self.them.call("mailbox-read", {"ids": [1, 2]})
+        out = self.them.call("mailbox-ack", {"ids": [1, 2], "note": "ok"})
+        self.assertEqual(out.count("SendMessage("), 1)
+        self.assertIn('SendMessage({to: "claude-hooks", message: "I\'ve '
+                      'answered your mail #1, #2 with a note', out)
+
+    def test_a_refused_ack_rings_nothing(self):
+        self.me.call("mailbox-send", {"to": "osync", "subject": "s",
+                                      "body": "b"})
+        out = self.them.call("mailbox-ack", {"id": 1, "note": "unread"})
+        self.assertIn("has not been read", out)
+        self.assertNotIn("SendMessage", out)
 
     def test_edit_then_refused_after_read(self):
         self.me.call("mailbox-send", {"to": "osync", "subject": "v1",

@@ -250,6 +250,18 @@ class TestEveryArtifactClassIsDeployed(unittest.TestCase):
         self.assertIn("check_episodic(r)", src)
         self.assertIn("linked_root", src)
 
+    def test_episodic_embeds_with_the_configured_embedder(self):
+        """<superpowers>/embedder.json points episodic-memory at the
+        embedder the user configured for memory; nothing else writes it,
+        and without it the package silently uses its bundled bge-small."""
+        deploy = _src(DEPLOY)
+        body = deploy[deploy.index("def step_episodic"):deploy.index("def _shell_backend")]
+        self.assertIn("_sync_episodic_embedder(s, dry)", body)
+        self.assertIn("ee.sync_file(", body)
+        verify = _src(VERIFY)
+        self.assertIn("def check_episodic_embedder", verify)
+        self.assertIn("check_episodic_embedder(r)", verify)
+
 
 class TestCouncilSandboxLauncher(unittest.TestCase):
     """``council-sandbox`` (plan E2) is a native binary no pip install

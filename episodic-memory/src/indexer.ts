@@ -16,6 +16,8 @@ process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = '20000';
 // Increase max listeners for concurrent API calls
 import { EventEmitter } from 'events';
 import { removeCompressedCopy, statTranscript, transcriptExists } from './transcript-io.js';
+import { excludeAsSpawned } from './spawned-session.js';
+import { isSummarizerPrompt } from './sync.js';
 
 /** Copy a source transcript into the archive, replacing any compressed copy. */
 function copyToArchive(sourcePath: string, archivePath: string): void {
@@ -117,6 +119,11 @@ export async function indexConversations(
       const sourcePath = path.join(projectPath, file);
       const archivePath = path.join(projectArchive, file);
 
+      if (await excludeAsSpawned(sourcePath)) {
+        console.log(`  Skipped ${file} (spawned session: claude -p / Agent SDK)`);
+        continue;
+      }
+
       // Source transcripts can vanish mid-run (Claude Code cleanup). Skip loudly.
       let exchanges;
       try {
@@ -128,7 +135,8 @@ export async function indexConversations(
         }
 
         // Parse conversation
-        exchanges = await parseConversation(sourcePath, project, archivePath);
+        exchanges = (await parseConversation(sourcePath, project, archivePath))
+          .filter(e => !isSummarizerPrompt(e.userMessage));
       } catch (error) {
         console.log(`  Skipped ${file} (read failed: ${error instanceof Error ? error.message : error})`);
         continue;
@@ -250,6 +258,12 @@ export async function indexSession(sessionId: string, concurrency: number = 1, n
 
       const archivePath = path.join(projectArchive, file);
 
+      if (await excludeAsSpawned(sourcePath)) {
+        console.log(`Skipped ${file} (spawned session: claude -p / Agent SDK)`);
+        db.close();
+        break;
+      }
+
       // Archive + parse — source may vanish mid-run (Claude Code cleanup).
       let exchanges;
       try {
@@ -257,7 +271,8 @@ export async function indexSession(sessionId: string, concurrency: number = 1, n
           fs.mkdirSync(path.dirname(archivePath), { recursive: true });
           copyToArchive(sourcePath, archivePath);
         }
-        exchanges = await parseConversation(sourcePath, project, archivePath);
+        exchanges = (await parseConversation(sourcePath, project, archivePath))
+          .filter(e => !isSummarizerPrompt(e.userMessage));
       } catch (error) {
         console.log(`Skipped ${file} (read failed: ${error instanceof Error ? error.message : error})`);
         db.close();
@@ -381,11 +396,13 @@ export async function indexUnprocessed(concurrency: number = 1, noSummaries: boo
           copyToArchive(sourcePath, archivePath);
         }
 
+        if (await excludeAsSpawned(sourcePath)) continue;
+
         // Parse and filter to exchanges past the high-water mark
         const exchanges = await parseConversation(sourcePath, project, archivePath);
-        const newExchanges = maxIndexedLine > 0
-          ? exchanges.filter(e => e.lineStart > maxIndexedLine)
-          : exchanges;
+        const newExchanges = exchanges.filter(
+          e => e.lineStart > maxIndexedLine && !isSummarizerPrompt(e.userMessage)
+        );
         if (newExchanges.length === 0) continue;
 
         unprocessed.push({ project, file, sourcePath, archivePath, summaryPath, exchanges: newExchanges });

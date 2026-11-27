@@ -16,6 +16,9 @@ import fnmatch
 import json
 import logging
 import os
+import time
+
+from claude_hooks import tool_stop
 import re
 from typing import Any, Optional
 
@@ -33,6 +36,14 @@ _GREP_MAX_FILE_BYTES = 2 * 1024 * 1024
 #: the whole answer stopped at 48,000 characters with a note saying so.
 _GREP_MAX_CONTEXT = 50
 _GREP_MAX_CHARS = 48_000
+#: Wall-clock bound on a walk (grep, glob). The tools run in the caller's
+#: thread, where nothing can interrupt them: a council researcher grepped a
+#: 1.26M-file tree (backup_models, csl-2026-11-27-0507-da28) for over an
+#: hour, and wrap-up and cancel wait for the tool to return. A stopped walk
+#: says so and names the narrower path to pass.
+_WALK_BUDGET_S = 30.0
+#: A file holding a NUL in its first bytes is binary: grep skips it.
+_BINARY_SNIFF_BYTES = 8192
 
 
 # -- Path resolution --------------------------------------------------- #
@@ -128,11 +139,15 @@ def _render_path(abs_path: str, primary_cwd: str) -> str:
     *extra* root render as their absolute path — keeps the output
     unambiguous instead of producing an ugly ``../../../...`` rel
     path that crosses sibling trees.
+
+    A relative path is spelled with ``/`` on every OS: the CitationLinter
+    and the code graph key on it, and a Windows ``src\\net\\x.py`` was
+    never matched to what the model was shown (pandorum, 2026-11-13).
     """
     primary_real = os.path.realpath(primary_cwd)
     if abs_path == primary_real or abs_path.startswith(primary_real + os.sep):
         try:
-            return os.path.relpath(abs_path, primary_real)
+            return os.path.relpath(abs_path, primary_real).replace(os.sep, "/")
         except ValueError:
             return abs_path
     return abs_path
@@ -285,9 +300,19 @@ def glob_files(args: dict, cwd: str,
         roots.append(real)
 
     matches: list[str] = []
+    deadline = time.monotonic() + _WALK_BUDGET_S
     try:
         for walk_root in roots:
             for root, dirs, files in os.walk(walk_root):
+                if tool_stop.requested():
+                    matches.append("... (search stopped: the run is wrapping up)")
+                    return "\n".join(matches)
+                if time.monotonic() > deadline:
+                    matches.append(
+                        f"... (search stopped after {_WALK_BUDGET_S:.0f} s in "
+                        f"{_render_path(root, cwd_real)} — the tree is large; "
+                        "use a pattern with a directory, e.g. `src/**/*.py`)")
+                    return "\n".join(matches)
                 # Skip .git and other heavy dirs by convention.
                 dirs[:] = [d for d in dirs if d not in
                            {".git", "node_modules", "__pycache__", ".venv",
@@ -295,7 +320,8 @@ def glob_files(args: dict, cwd: str,
                             "build", ".cache", "target"}]
                 for name in files:
                     full = os.path.join(root, name)
-                    rel = os.path.relpath(full, walk_root)
+                    # ``/`` so a ``src/*.py`` pattern matches on Windows.
+                    rel = os.path.relpath(full, walk_root).replace(os.sep, "/")
                     if (fnmatch.fnmatch(rel, pattern)
                             or fnmatch.fnmatch(name, pattern)):
                         matches.append(_render_path(full, cwd_real))
@@ -344,6 +370,7 @@ def grep(args: dict, cwd: str,
     hits = 0
     chars = 0
     stopped = False
+    out_of_time = ""  # where the walk was when its budget ran out
 
     def _emit(text: str) -> bool:
         nonlocal chars, stopped
@@ -363,10 +390,13 @@ def grep(args: dict, cwd: str,
         if sz > _GREP_MAX_FILE_BYTES:
             return
         try:
-            with open(abs_file, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.read().splitlines()
+            with open(abs_file, "rb") as f:
+                raw = f.read()
         except OSError:
             return
+        if b"\0" in raw[:_BINARY_SNIFF_BYTES]:
+            return
+        lines = raw.decode("utf-8", errors="replace").splitlines()
         # Render relative to primary cwd when the file lives there;
         # otherwise absolute so the model gets an unambiguous handle for
         # non-cwd roots. Context lines use ``path-N-`` (grep's own
@@ -401,22 +431,35 @@ def grep(args: dict, cwd: str,
     if os.path.isfile(abs_root):
         _match_file(abs_root)
     elif os.path.isdir(abs_root):
+        deadline = time.monotonic() + _WALK_BUDGET_S
         for root, dirs, files in os.walk(abs_root):
             dirs[:] = [d for d in dirs if d not in
                        {".git", "node_modules", "__pycache__", ".venv",
                         "venv", ".claude", ".caliber", ".wolf", "dist",
                         "build", ".cache", "target"}]
             for name in files:
+                if tool_stop.requested():
+                    return "(search stopped: the run is wrapping up)"
+                if time.monotonic() > deadline:
+                    out_of_time = _render_path(root, cwd)
+                    break
                 _match_file(os.path.join(root, name))
                 if hits >= _GREP_MAX_MATCHES or stopped:
                     break
-            if hits >= _GREP_MAX_MATCHES or stopped:
+            if hits >= _GREP_MAX_MATCHES or stopped or out_of_time:
                 break
     else:
         return f"error: not a file or directory: {path}"
 
+    budget_note = (f"... (search stopped after {_WALK_BUDGET_S:.0f} s in {out_of_time} "
+                   "before reading every file — the tree is large; pass a narrower "
+                   "`path`)") if out_of_time else ""
     if not matches:
+        if budget_note:
+            return f"(no matches for /{pattern}/ in the part of {path} searched)\n{budget_note}"
         return f"(no matches for /{pattern}/ in {path})"
+    if budget_note:
+        matches.append(budget_note)
     if stopped:
         matches.append(f"... (output stopped at {_GREP_MAX_CHARS} characters "
                        "— narrow the pattern, or pass a smaller path)")
@@ -528,7 +571,8 @@ def _build_survey(cwd: str) -> str:
                     per_dir[ext] = per_dir.get(ext, 0) + 1
                     ext_counts[ext] = ext_counts.get(ext, 0) + 1
                 # Path relative to project root, e.g. "claude_hooks/dispatcher.py"
-                rel = os.path.relpath(os.path.join(dirpath, fn), cwd)
+                rel = os.path.relpath(os.path.join(dirpath, fn),
+                                      cwd).replace(os.sep, "/")
                 per_dir_files.append((rel, ext))
         top_dirs[name] = per_dir
         # Pick up to 5 representative filenames: dominant extension first,

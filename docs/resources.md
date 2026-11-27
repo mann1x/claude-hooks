@@ -40,6 +40,33 @@ this host while I measure". A quiet host also stops background work —
 the claudemem reindex skips its turn — and every other session that runs
 a command there is told so (below).
 
+### Does timing matter? (`--perf` / `--no-perf`)
+
+Every claim can say whether timing matters to it, and should:
+
+| statement | meaning | others |
+|---|---|---|
+| `--perf` / `perf: true` | a measurement (a benchmark, a latency run) | keep load off the host: no big copies, builds, reindexes |
+| `--no-perf` / `perf: false` | a rebuild, a long job, a test run | may copy files, use the network, do light work beside it |
+| not stated | nobody knows | `status` shows `perf not stated`; others have to guess |
+
+A `quiet` claim is a measurement by definition, and `--no-perf` on one is
+refused. `status`, the MCP tools, the session block and the PreToolUse
+note show the statement on every claim (`[perf-sensitive]`,
+`[not perf-sensitive]`, `[perf not stated]`). Background work checks
+`api.perf_holder()` instead of only quiet claims, so a GPU benchmark
+claimed `--perf` also holds back the Stop hook's claudemem reindex, and a
+script can ask the same question: `claude-hooks-res perf-check [HOST]`
+exits 1 while another session measures there.
+
+Why: on 2026-11-27 opencoti held off copying a model over the network
+because a shared GPU claim for an episodic index rebuild did not say it
+was not a measurement. `--no-perf` on that claim would have said so.
+
+The statement is the `perf` column of `resource_claims` (1 / 0 / NULL),
+added by a migration on the first locked write; older code names its
+columns and leaves it NULL.
+
 Several resources in one command are **one claim**, granted all at once
 or not at all (`claude-hooks-res wait solidpc/gpu0 solidpc:quiet`): no
 half-held claims, and no two sessions each holding what the other needs.
@@ -109,6 +136,15 @@ A claim follows a process on its own host:
 - under `run`, it follows the wrapper: released when the command exits,
   even if the session ended first.
 
+A claim belongs to that process, not to one session id. `/clear` and resume
+start a new session id inside the same process, and an MCP server keeps the
+`CLAUDE_CODE_SESSION_ID` it was spawned with through all of them. So "this
+session" is read live from `~/.claude/sessions/<pid>.json` (trusted only
+when its `procStart` / `startedAt` match the process), a claim following the
+caller's Claude Code process can be extended and released under any earlier
+id, and it is re-stamped with the live id when that happens or at the next
+SessionStart.
+
 Other hosts cannot see that process, so they trust a **lease**
 (`--lease`, default 30 min) that the holder's host renews from its hooks
 (once a minute at most), its waiters, `run` wrappers, and the hook
@@ -123,9 +159,12 @@ Every grant, release, expiry and holder exit is logged
 
 ## What the hooks do
 
-- **SessionStart**: one line on how to claim, plus what is held and queued.
+- **SessionStart**: hand the process's claims to the new session id, then
+  one line on how to claim, plus what is held and queued.
 - **UserPromptSubmit / Stop**: renew this host's claims (throttled).
-- **SessionEnd**: release the session's claims, except `run` jobs.
+- **SessionEnd**: release the session's claims, except `run` jobs. Not on
+  `/clear` or resume (reason `clear` / `resume`): the process goes on, and
+  its claims with it.
 - **PreToolUse (Bash)**: a command that reaches a host or GPU another
   session holds exclusively — named by `ssh`/`scp`/`rsync` or
   `CUDA_VISIBLE_DEVICES` — or any command on a host another session keeps

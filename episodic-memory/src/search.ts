@@ -1,11 +1,17 @@
 import Database from 'better-sqlite3';
 import { initDatabase } from './db.js';
-import { initEmbeddings, generateQueryEmbedding } from './embeddings.js';
+import {
+  EmbeddingsUnavailableError,
+  generateQueryEmbedding,
+  getEmbedderConfig,
+  initEmbeddings,
+} from './embeddings.js';
+import { spaceId } from './embedder-config.js';
+import { storedSpace } from './vector-space.js';
 import { SearchResult, ConversationExchange, MultiConceptResult } from './types.js';
 import { isErroredSentinel } from './summary-sentinel.js';
 import fs from 'fs';
-import readline from 'readline';
-import { openTranscriptStream, statTranscript } from './transcript-io.js';
+import { statTranscript } from './transcript-io.js';
 
 export interface SearchOptions {
   limit?: number;
@@ -16,6 +22,7 @@ export interface SearchOptions {
   session_id?: string;  // exact match against e.session_id
   git_branch?: string;  // exact match against e.git_branch
   include_sidechains?: boolean; // include subagent/workflow rows (default true)
+  per_conversation?: boolean;   // one result per conversation, its best exchange (default true)
 }
 
 /**
@@ -29,6 +36,61 @@ export interface SearchOptions {
  * normalized embeddings.
  */
 const SIDECHAIN_DISTANCE_PENALTY = 0.05;
+
+/**
+ * Default search (`both`) ranks by reciprocal rank fusion of the vector list
+ * and the BM25 keyword list: score = sum of 1 / (RRF_K + rank). Each list is
+ * drawn from a pool larger than the limit so fusion has room to reorder.
+ * Measured on benchmarks/episodic (judged pool, 28 queries): vector alone
+ * nDCG@10 0.37, fused 0.55 — keyword ranking finds ids, file names and
+ * error strings an embedding blurs.
+ */
+const RRF_K = 60;
+const FUSION_POOL_MIN = 50;
+/** Windows fetched per wanted exchange: an exchange may have several near the query. */
+const VECTOR_WINDOW_FETCH = 2;
+
+/**
+ * The FTS5 query for a free-text search: every token as a quoted term, OR-ed,
+ * so BM25 ranks rows holding more (and rarer) terms first. Quoting makes
+ * operators and punctuation literal; the tokenizer splits `op-296` into the
+ * phrase "op 296". Null when the query has no token.
+ */
+export function buildFtsQuery(query: string): string | null {
+  const terms = (query.match(/[\p{L}\p{N}_]+(?:[-.:/][\p{L}\p{N}_]+)*/gu) || [])
+    .map((t) => t.toLowerCase());
+  const unique = [...new Set(terms)];
+  return unique.length ? unique.map((t) => `"${t.replace(/"/g, '""')}"`).join(' OR ') : null;
+}
+
+/**
+ * Keep each conversation's best-ranked row (rows arrive in rank order). A
+ * long session otherwise fills several of the top 10 with neighbouring
+ * exchanges of one piece of work.
+ */
+export function bestPerConversation<T extends { archive_path: string }>(rows: T[]): T[] {
+  const seen = new Set<string>();
+  return rows.filter((r) => !seen.has(r.archive_path) && (seen.add(r.archive_path), true));
+}
+
+/** Reciprocal rank fusion of ranked row lists (rows keyed by `id`). */
+export function fuseByRank<T extends { id: string }>(lists: T[][], limit: number): T[] {
+  const scored = new Map<string, { row: T; score: number }>();
+  for (const list of lists) {
+    list.forEach((row, i) => {
+      const hit = scored.get(row.id);
+      const add = 1 / (RRF_K + i + 1);
+      if (hit) {
+        hit.score += add;
+        // Keep the vector row (it carries the distance) when both lists have it.
+        if ((hit.row as any).distance == null && (row as any).distance != null) hit.row = row;
+      } else {
+        scored.set(row.id, { row, score: add });
+      }
+    });
+  }
+  return [...scored.values()].sort((a, b) => b.score - a.score).slice(0, limit).map((x) => x.row);
+}
 
 /**
  * Build the AND-clause and bound-parameter list that constrains a search
@@ -151,6 +213,30 @@ function exchangeFromRow(row: any): ConversationExchange {
 }
 
 /**
+ * Embed a query for the index's vectors. Refuses (EmbeddingsUnavailableError)
+ * when the index holds another model's vectors — they are never compared —
+ * or the embedder can't run.
+ */
+async function vectorQuery(db: Database.Database, query: string): Promise<number[]> {
+  const cfg = getEmbedderConfig();
+  const stored = storedSpace(db);
+  if (stored.id !== spaceId(cfg)) {
+    throw new EmbeddingsUnavailableError(
+      `the index holds ${stored.id} vectors and the configured embedder (${cfg.source}) writes ` +
+      `${spaceId(cfg)}; the next sync re-embeds them`
+    );
+  }
+  await initEmbeddings();
+  const v = await generateQueryEmbedding(query);
+  if (v.length !== stored.dims) {
+    throw new EmbeddingsUnavailableError(
+      `${cfg.model} returned ${v.length}-dimension vectors, the index holds ${stored.dims}`
+    );
+  }
+  return v;
+}
+
+/**
  * Convert an L2 (Euclidean) distance between two unit-normalized vectors
  * into a cosine similarity in [-1, 1].
  *
@@ -183,6 +269,10 @@ export async function searchConversations(
 ): Promise<SearchResult[]> {
   const { limit = 10, mode = 'both', after, before } = options;
   const includeSidechains = options.include_sidechains !== false;
+  const perConversation = options.per_conversation !== false;
+  // Rows kept before the final cut: per conversation, several of a pool's rows collapse into one.
+  const pool = Math.max(limit * 5, FUSION_POOL_MIN);
+  const finish = (rows: any[]) => (perConversation ? bestPerConversation(rows) : rows).slice(0, limit);
   const sidechainClause = includeSidechains ? '' : 'AND e.is_sidechain = 0';
 
   // Validate date parameters
@@ -199,35 +289,69 @@ export async function searchConversations(
     // Vector similarity search.
     // vec0 applies KNN before the WHERE clause and before our sidechain
     // de-rank, so we over-fetch candidates and trim after the final ordering.
-    await initEmbeddings();
-    const queryEmbedding = await generateQueryEmbedding(query);
-    const k = limit * 3;
+    try {
+      const queryEmbedding = await vectorQuery(db, query);
+      // Vectors are windows (`<exchange id>` or `<exchange id>#<k>`, exchange-text.ts),
+      // so fetch more and keep each exchange's nearest window.
+      const k = Math.min(
+        pool * VECTOR_WINDOW_FETCH,
+        4096
+      );
 
-    const stmt = db.prepare(`
-      SELECT
-        ${EXCHANGE_SELECT_COLUMNS},
-        vec.distance
-      FROM vec_exchanges AS vec
-      JOIN exchanges AS e ON vec.id = e.id
-      WHERE vec.embedding MATCH ?
-        AND k = ?
-        ${sidechainClause}
-        ${filterClause}
-      ORDER BY (vec.distance + e.is_sidechain * ?) ASC
-    `);
+      const stmt = db.prepare(`
+        SELECT
+          ${EXCHANGE_SELECT_COLUMNS},
+          vec.distance
+        FROM vec_exchanges AS vec
+        JOIN exchanges AS e ON e.id = CASE WHEN instr(vec.id, '#') > 0
+                                          THEN substr(vec.id, 1, instr(vec.id, '#') - 1)
+                                          ELSE vec.id END
+        WHERE vec.embedding MATCH ?
+          AND k = ?
+          ${sidechainClause}
+          ${filterClause}
+        ORDER BY (vec.distance + e.is_sidechain * ?) ASC
+      `);
 
-    results = stmt.all(
-      Buffer.from(new Float32Array(queryEmbedding).buffer),
-      k,
-      ...filterParams,
-      SIDECHAIN_DISTANCE_PENALTY
-    );
-    if (results.length > limit) {
-      results = results.slice(0, limit);
+      const seen = new Set<string>();
+      results = (stmt.all(
+        Buffer.from(new Float32Array(queryEmbedding).buffer),
+        k,
+        ...filterParams,
+        SIDECHAIN_DISTANCE_PENALTY
+      ) as any[]).filter((r) => !seen.has(r.id) && seen.add(r.id));
+    } catch (error) {
+      // Default search keeps its keyword half when the vector half can't run.
+      if (mode === 'vector' || !(error instanceof EmbeddingsUnavailableError)) throw error;
+      console.error(`episodic-memory: keyword ranking only — ${error.message}`);
+      results = [];
+    }
+    if (mode === 'vector') {
+      results = finish(results);
     }
   }
 
-  if (mode === 'text' || mode === 'both') {
+  if (mode === 'both') {
+    const ftsQuery = buildFtsQuery(query);
+    let keywordRows: any[] = [];
+    if (ftsQuery) {
+      keywordRows = db.prepare(`
+        SELECT
+          ${EXCHANGE_SELECT_COLUMNS},
+          NULL AS distance
+        FROM exchanges_fts AS f
+        JOIN exchanges AS e ON e.rowid = f.rowid
+        WHERE exchanges_fts MATCH ?
+          ${sidechainClause}
+          ${filterClause}
+        ORDER BY bm25(exchanges_fts)
+        LIMIT ?
+      `).all(ftsQuery, ...filterParams, pool);
+    }
+    results = finish(fuseByRank([results, keywordRows], Infinity));
+  }
+
+  if (mode === 'text') {
     // Text search: AND of per-token LIKE patterns so multi-word queries match
     // when every term appears somewhere in the exchange (any order, either field).
     // See #127 — whole-query contiguous substring matching returned empty for
@@ -246,21 +370,10 @@ export async function searchConversations(
       LIMIT ?
     `);
 
-    const textResults = textStmt.all(...textMatchParams, ...filterParams, limit);
-
-    if (mode === 'both') {
-      // Merge and deduplicate by ID
-      const seenIds = new Set(results.map(r => r.id));
-      for (const textResult of textResults) {
-        if (!seenIds.has((textResult as any).id)) {
-          results.push(textResult);
-        }
-      }
-    } else {
-      results = textResults;
-    }
+    results = finish(textStmt.all(...textMatchParams, ...filterParams, perConversation ? pool : limit) as any[]);
   }
 
+  const lastLines = lastIndexedLines(db, results.map((row: any) => row.archive_path));
   db.close();
 
   return results.map((row: any) => {
@@ -283,30 +396,44 @@ export async function searchConversations(
 
     return {
       exchange,
-      similarity: mode === 'text' ? undefined : l2DistanceToCosineSimilarity(row.distance),
+      similarity: mode === 'text' || row.distance == null
+        ? undefined
+        : l2DistanceToCosineSimilarity(row.distance),
       snippet,
-      summary
+      summary,
+      lastLine: lastLines.get(row.archive_path)
     } as SearchResult & { summary?: string };
   });
 }
 
-// Helper function to count lines in a file efficiently
-async function countLines(filePath: string): Promise<number> {
-  try {
-    const fileStream = openTranscriptStream(filePath);
-    const rl = readline.createInterface({
-      input: fileStream,
-      crlfDelay: Infinity
-    });
-
-    let count = 0;
-    for await (const line of rl) {
-      if (line.trim()) count++;
-    }
-    return count;
-  } catch (error) {
-    return 0; // Return 0 if file can't be read
+/**
+ * Each transcript's last indexed line, in one query over the index
+ * (`idx_archive_path`). Result formatting used to read every result's whole
+ * transcript to count its lines; one 6.4 GB live transcript made a search
+ * take ~97 s.
+ */
+export function lastIndexedLines(
+  db: Database.Database,
+  archivePaths: string[]
+): Map<string, number> {
+  const unique = [...new Set(archivePaths)];
+  const out = new Map<string, number>();
+  if (unique.length === 0) return out;
+  const rows = db
+    .prepare(
+      `SELECT archive_path, MAX(line_end) AS last_line FROM exchanges
+       WHERE archive_path IN (${unique.map(() => '?').join(', ')})
+       GROUP BY archive_path`
+    )
+    .all(...unique) as Array<{ archive_path: string; last_line: number | null }>;
+  for (const row of rows) {
+    if (row.last_line !== null) out.set(row.archive_path, row.last_line);
   }
+  return out;
+}
+
+function fileInfo(sizeKB: number, lastLine: number | undefined): string {
+  return lastLine !== undefined ? `${sizeKB}KB, ${lastLine} lines` : `${sizeKB}KB`;
 }
 
 // Helper function to get file size in KB
@@ -360,13 +487,12 @@ export async function formatResults(results: Array<SearchResult & { summary?: st
       output += `   Tools: ${toolSummary}\n`;
     }
 
-    // Get file metadata
+    // Get file metadata (the line count comes from the index, never the file)
     const fileSizeKB = getFileSizeInKB(result.exchange.archivePath);
-    const totalLines = await countLines(result.exchange.archivePath);
     const lineRange = `${result.exchange.lineStart}-${result.exchange.lineEnd}`;
 
     // File information with metadata (clean format for smart tool selection)
-    output += `   Lines ${lineRange} in ${result.exchange.archivePath} (${fileSizeKB}KB, ${totalLines} lines)\n\n`;
+    output += `   Lines ${lineRange} in ${result.exchange.archivePath} (${fileInfo(fileSizeKB, result.lastLine)})\n\n`;
   }
 
   return output;
@@ -422,7 +548,8 @@ export async function searchMultipleConcepts(
         exchange: firstResult.exchange,
         snippet: firstResult.snippet,
         conceptSimilarities,
-        averageSimilarity
+        averageSimilarity,
+        lastLine: firstResult.lastLine
       });
     }
   }
@@ -474,13 +601,12 @@ export async function formatMultiConceptResults(
       output += `   Tools: ${toolSummary}\n`;
     }
 
-    // Get file metadata
+    // Get file metadata (the line count comes from the index, never the file)
     const fileSizeKB = getFileSizeInKB(result.exchange.archivePath);
-    const totalLines = await countLines(result.exchange.archivePath);
     const lineRange = `${result.exchange.lineStart}-${result.exchange.lineEnd}`;
 
     // File information with metadata (clean format for smart tool selection)
-    output += `   Lines ${lineRange} in ${result.exchange.archivePath} (${fileSizeKB}KB, ${totalLines} lines)\n\n`;
+    output += `   Lines ${lineRange} in ${result.exchange.archivePath} (${fileInfo(fileSizeKB, result.lastLine)})\n\n`;
   }
 
   return output;

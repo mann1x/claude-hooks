@@ -16,6 +16,294 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added
+- **The embedder can run on a GPU through Vulkan, and claude-hooks
+  picks the backend** (ch-33). `embedding.mode` takes `vulkan` next to
+  `cpu` and the legacy `auto`; `embedding.device` names the GPU by part
+  of its name (`RENOIR`) and is resolved against the engine's device
+  list before each spawn. Every spawn names its backend: an opencoti
+  llamafile started without `--gpu` picks a GPU itself. A Vulkan start
+  is checked: three probe texts are compared with a CPU reference
+  (`claude_hooks/embedder_probe_reference.json`), and below cosine
+  0.99 the daemon falls back to CPU and says why — on solidpc's Mesa
+  20.3.5 RADV the vectors came back wrong (cosine 0.38) with no error.
+  `embedding.vulkan_icd` hands the child a driver of its own;
+  `scripts/build_private_radv.sh` builds RADV 25.2.8 (ACO only) for a
+  host whose Mesa is too old, without touching the system's. The child
+  gets a private `HOME`/`TMPDIR` under `~/.claude`, because under the
+  daemon's sandbox the engine otherwise loads a stale Vulkan library
+  from `~/.llamafile`. `make -C vendor/llamafile/dist fetch-opencoti
+  opencoti` builds the opencoti c14 r19 composite (engine + Linux and
+  Windows Vulkan libraries + the same GGUF, 932 MB) from pinned inputs.
+  On solidpc's Radeon iGPU a ~460-token embed takes 0.65 s against
+  10.6 s on the (loaded) CPU, with the CPU's vectors (min cosine
+  0.99905). `install.py` asks for the backend, keeps an existing one on
+  a re-run, and a fresh install now defaults to `cpu`.
+- **The embedder's backend can be switched at runtime, gracefully**
+  (ch-33). The daemon serves an HTTP control endpoint on
+  `127.0.0.1:38091` (`embedding.control_port`): `GET /embedder/status`,
+  `GET /embedder/backends` (cpu / vulkan / cuda, each GPU with its id,
+  name, memory and PCI address), `POST /embedder/backend` and `POST
+  /embedder/reset` (switching from loopback only). The same verbs are
+  `claude-hooks-daemon-ctl embedder status|backends|switch|reset`. A
+  switch resolves the target first (a missing device changes nothing,
+  409), waits until the embedder is idle, restarts it on the new backend,
+  probe-checks it like any start and keeps the choice across daemon
+  restarts until `reset`; the use is moving the embedder to CPU while a
+  GPU benchmark needs the iGPU, then back. "Idle" means no client
+  connection open to the embed port, no slot processing and `/slots`
+  answering: the first live switch cut a 14k-character request, because
+  `/slots` reads idle for ~3 s after a request connects. `--list-devices`
+  prints no PCI address, so the listing takes CUDA's from nvidia-smi (the
+  child runs with `CUDA_DEVICE_ORDER=PCI_BUS_ID`, so CUDAn is index n) and
+  Vulkan's from sysfs by vendor; the running device's is confirmed from
+  the server's `/props`. `embedding.pci` picks a GPU by address.
+- **CUDA composites, and the installer asks which composite** (ch-33).
+  Release `embedder-c14-r19` carries three opencoti c14 r19 composites
+  with qwen3-embedding-0.6b: CPU + Vulkan (932 MB, both OSes), and CPU +
+  Vulkan + CUDA 13/12 per OS (`-cuda-linux-x86_64`, 1.96 GB;
+  `-cuda-win-x86_64`, 1.91 GB — one file per OS keeps each under
+  GitHub's 2 GiB asset limit). `make -C vendor/llamafile/dist
+  fetch-opencoti opencoti opencoti-cuda` rebuilds them byte-identically
+  from pinned inputs. On solidpc's RTX 3090 the CUDA composite matches
+  the mozilla CPU llamafile at min cosine 0.99930 (mean 0.99965).
+  `install.py` asks for the composite (CPU + Vulkan by default, the CUDA
+  one for the host's OS, or the legacy mozilla build) and keeps the
+  configured one on a re-run. Tests can no longer start the composite
+  download (`tests/conftest.py`).
+- **A council wakes the session that started it.** `consult --wait` and
+  `follow-up --wait` used to return only when the run ended, so a run
+  parked at the adversary checkpoint waited on a session that was never
+  told: csl-2026-11-27-0656-503b sat idle 20 minutes. Now the wait also
+  returns, with exit 10 and a JSON reason (adversary checkpoint, tool
+  approval, a parked pause, a pause that does not take effect), naming the
+  deadline, what happens on it and the command that answers; `claude-consultants
+  wait <sid>` re-arms it; `--wait-until terminal` keeps the old behaviour for
+  callers that cannot answer (the Workflow driver and the bench pass it).
+  And the engine pushes: `consult` / `follow-up` hand it the session's
+  Claude Code inbox socket, and it posts into it when the run needs an
+  answer, when a tool has run 10+ minutes, and when the run ends — so a
+  session whose waiter died, or that never started one, still wakes. It
+  falls back to a priority-1 mail where the socket is unreachable;
+  `--no-push` turns it off. The skill now has one waiter instead of three
+  patterns to choose from.
+- **Resource claims say whether timing matters.** `--perf` / `--no-perf`
+  (MCP `perf`) on every claim; quiet is always a measurement. `status`,
+  the session block and the PreToolUse note show it, background work
+  (the claudemem reindex) waits for any measurement on the host, not only
+  a quiet one, and `claude-hooks-res perf-check` asks the same from a
+  script. opencoti held off a model copy behind a GPU claim for an index
+  rebuild that never said it was not a benchmark.
+- **`claude-hooks-tasks update`.** The CLI can change a task's fields
+  (title, priority, area, plan, due, defer, description, acceptance,
+  depends, tags, checked items) through `task-update`, so a dependency
+  typed in a terminal gets the same checks as one from a session: an
+  unknown project or task and a cycle across projects are refused.
+  Before, the only way was editing the file, which skips them.
+- **Task graph views, claims and defer.** `task-graph` (CLI
+  `claude-hooks-tasks graph|blocked`) prints the dependency graph in
+  layers — layer 0 can start now, one layer can run in parallel — for a
+  task (up / down), this project or every project, as text or Mermaid,
+  and lists every blocked task with what holds it. `task-start` claims a
+  task for the session (`claimed_by`) and refuses one another live
+  session holds unless `force`. `defer` hides a task and its children
+  from `task-ready` until a date (ch-28 phase 4).
+- **Gates: tasks that wait on something outside the task list.**
+  `task-gate` (CLI `claude-hooks-tasks gate|gates`) makes a task wait on
+  `mail:<id>` (answered: an ack note or a reply naming the id),
+  `human:<what>` (resolved by hand), `timer:<time>`,
+  `commit:<sha>@<branch>`, `gh-pr:<repo>#<n>` (merged) or
+  `gh-run:<repo>#<id>` (succeeded). An open gate blocks like an open
+  dependency; mail, timer and commit gates are checked at session start,
+  GitHub ones on request; a gate that cannot open by itself is reported,
+  never resolved (ch-28 phase 3).
+- **Closing a task tells the projects it unblocks.** `task-done` /
+  `task-cancel` list every task, in any project, whose last open
+  dependency it was, and mail the session working in each other project
+  (found by its working directory in the mailbox registry), with the
+  doorbell line so an idle terminal hears now. A cancelled dependency is
+  flagged as not done. `hooks.tasks.unblock_mail: false` turns the mail
+  off (ch-28 phase 2).
+- **Task dependencies across projects.** `depends` takes any project's id
+  on the host (`op-347` from a `bm-` task), resolved through the shared
+  index: an unknown project or task is refused while the index answers,
+  and an id that cannot be resolved stays blocking — never done. Cycles
+  are refused across projects, with the path. A task another project
+  waits for ranks higher in its own `task-ready`. Typed links join the
+  graph: `parent` (epic), `discovered-from`, `related`, `caused-by`,
+  `supersedes` (closes the replaced task when local) and `duplicate-of`
+  (closes this one). A task still writes only its own project's files;
+  `task-show` computes the other side (dependents, children, related…)
+  under `## Graph` (ch-28 phase 1).
+- **One checkout indexes a project's tasks.** Index rows are keyed on the
+  project name, which every checkout of a repository shares. A linked git
+  worktree now never writes them and never creates, finishes or cancels a
+  task (refused, naming the main checkout, which hands out the ids); on a
+  branch it may still edit the tasks it has, whose file changes travel on
+  its branch, and a detached one (or one named by
+  `hooks.tasks.read_only_worktrees`) is read-only and shows the main
+  checkout's list. Another clone or host never takes the rows from the
+  registered checkout (`claude-hooks-tasks adopt` moves them), and new ids
+  sit above the index's highest number. Before, a session in an older
+  release worktree rewrote the rows with that branch's copies and deleted
+  every row whose file the branch lacked, and a worktree could reuse a
+  number main had given out. `claude-hooks-tasks where` shows which
+  checkout indexes a project (ch-28, `docs/PLAN-task-graph.md`).
+- **Mail rings the doorbell.** The reply to `mailbox-send` and to a
+  `mailbox-ack` with a note ends with a ready-made `SendMessage` call per
+  recipient ("I've sent you mail #N — check your inbox"), so an idle
+  terminal listed by ListAgents hears of the mail now instead of at its next
+  turn. None for a queued send or mail to yourself. See `docs/mailbox.md`
+  "Ringing the doorbell".
+
+### Changed
+- **claudemem auto-reindex is off by default, and claudemem is no longer
+  recommended.** Measured on solidpc: 2 claudemem queries across 1,696
+  transcripts in 8 months, while the reindex hook kept 7 projects' indexes
+  fresh — ~26,000 embedding calls to Ollama on the RTX 3090 in one day,
+  some inside other sessions' GPU measurements, and every changed file
+  re-summarised through `claude -p` Opus (`enableEnrichment`; 192k
+  summaries held). Moving those indexes to the claude-hooks embedder would
+  have meant ~110M tokens, ~43 h on the iGPU. `hooks.claudemem_reindex.enabled`
+  now defaults to `false` (`DEFAULT_CONFIG`, both hook fallbacks, the
+  example config); README "Claudemem auto-reindex" has the numbers and how
+  to run claudemem cheaply if a project does use it (the `local` provider
+  on the claude-hooks embedder, `--no-llm`).
+
+### Fixed
+- **Episodic search failed on every call, and nothing was indexed, for
+  26 days — behind a healthy `/health`.** transformers.js cached the
+  embedding model inside its own package directory, so the Oct 31
+  `npm install` of the vendored `episodic-memory/` deleted it, and the
+  sandboxed `episodic-server` could not download it back
+  (`ENOENT: mkdir '.../transformers/.cache'`). Each sync skipped indexing
+  and still printed "Sync complete!". The cache now lives in
+  `~/.config/superpowers/models` (`EPISODIC_MEMORY_MODEL_CACHE`
+  overrides). `/health` now probes with a vector search rather than
+  `stats`, which never loads the model, and `verify_deploy` shows the
+  CLI's last stderr line.
+- **Episodic search ranks keyword matches.** The default search used the
+  vector list and appended plain substring hits after it, unranked, so they
+  never reached the top 10: a relevant conversation was in the top 10 for 32%
+  of the eval's queries, and 1 of 6 searches for an id (`ch-28`, a commit)
+  found it. It now fuses the vector ranks with BM25 ranks from an FTS5 index
+  (reciprocal rank fusion): top-10 hits 0.32 → 0.64, judged nDCG@10
+  0.26 → 0.47, ids 6 of 6, on the same embeddings. The index is built once on
+  first open (11 s, ~110 MB on 71,807 exchanges) and kept in step by
+  triggers. `--text` keeps its exact all-terms matching. Eval:
+  `benchmarks/episodic/`.
+- **Episodic search embeds with the embedder you configured, over clean
+  text.** It used its own bundled bge-small (384 dims) on the raw exchange,
+  harness reminders and tool names included, and embedded only the head of
+  long answers. It now uses the memory provider's embedder
+  (qwen3-embedding:0.6b here): `scripts/deploy.py` writes
+  `~/.config/superpowers/embedder.json` from the pgvector / sqlite_vec
+  embedder (llamafile, Ollama or OpenAI-compatible; a file without
+  `_managed_by` is yours and left alone), and the server re-ensures the
+  daemon's llamafile before each search and sync. Each exchange is embedded
+  without harness turns, as overlapping windows (question + answer start,
+  then answer windows tagged with the question, at most 8). Judged on the
+  full index against the fused search above: P@10 0.41 → 0.52, nDCG@10
+  0.41 → 0.55, exact@10 0.61 → 0.68, MRR 0.68 → 0.77 (0.26 / 0.24 / 0.36 /
+  0.52 before either change). The index records which model made its
+  vectors; a different model recreates the vector table at the new width
+  and re-embeds, and until that finishes search keeps BM25 and never
+  compares vectors across models. `verify_deploy` fails on a stale
+  `embedder.json` and warns while the index holds another model's vectors.
+  **After deploying, re-embed the index on a GPU server of the same model**
+  — on the CPU llamafile it takes days:
+  `python scripts/episodic_doctor.py --rebuild-embeddings http://127.0.0.1:11434`
+  (about 2 h for 72k exchanges; refuses when the two servers' vectors
+  differ, cosine < 0.995). Eval: `benchmarks/episodic/`.
+- **A fifth of past conversations, the biggest ones among them, were never
+  in episodic search.** 17,838 exchanges in 4,450 archived conversations had
+  never been indexed — the largest session of most projects, and the one
+  where most of claude-hooks' work since September happened. Two causes.
+  Sync dropped a whole transcript when an exclusion marker appeared
+  anywhere in it, so a session that once read episodic-memory's own source
+  (the markers sit in `sync.ts`) or began with one summarizer turn was never
+  indexed again; a marker now counts only in text a user wrote, and the
+  summarizer's marker drops just its own exchange. And sync indexed only
+  the files it copied in the same run, while the archive copy keeps the
+  source's mtime: a file copied during the 26-day outage, or skipped, counted
+  as current forever. Such files now go on a list (`index_pending`) that every
+  sync works through, `EPISODIC_MEMORY_INDEX_BATCH` exchanges at a time
+  (500); the first sync lists the whole archive once, and
+  `episodic_doctor.py --rebuild-embeddings <GPU URL>` drains it at once (36
+  min here; `verify_deploy` WARNs while anything is owed).
+- **Episodic search leaves out `claude -p` runs and shows each conversation
+  once.** Transcripts of spawned runs (Caliber, OpenWolf, skill generators,
+  workflow agents: 5,193 conversations) were indexed and quoted the
+  project's own docs back as hits; they are now neither indexed nor
+  summarized, and the first sync removes those already in the index
+  (`EPISODIC_MEMORY_INDEX_SPAWNED=1` keeps them). A long session no longer
+  fills several of the top 10: results are one per conversation, its best
+  exchange. With the catch-up, judged on the same queries: P@10 0.41 → 0.53,
+  nDCG@10 0.38 → 0.55, exact@10 0.61 → 0.82, MRR 0.68 → 0.95 against the
+  fused bge search, and 0.26 / 0.24 / 0.36 / 0.52 before any of this.
+- **A council researcher's `grep` could run for hours with no sign of
+  life.** The tool walked the whole project tree in the lane's own thread
+  with no time limit; in a 1.26M-file tree two lanes grepped for over an
+  hour, the stall monitor (which watches model calls) saw nothing, and
+  wrap-up waited for the tool (csl-2026-11-27-0507-da28). `grep` and `glob`
+  now stop after 30 s and say where and how to narrow the search, `grep`
+  skips binary files, and any tool call still running after 60 s, 10 min
+  and 1 h is logged and recorded as a `slow_tool` guard event. And a lane
+  no longer has to wait for a tool at all: on wrap-up or cancel it leaves
+  the running call within a second (answered as stopped, the rest of the
+  batch unrun), where an engine restart used to be the only way out; grep
+  and glob notice and quit. Caliber and `/get-advice` run tools as before.
+  `claude-consultants events --no-follow` prints a running council's events
+  so far and exits.
+- **An episodic search took up to 4 minutes and blocked the server.**
+  Formatting each result read its whole transcript to print a line count;
+  one 6.4 GB live transcript cost ~97 s per search (the model itself loads
+  in 0.6 s). The count now comes from the index: searches take 1–3 s. The
+  server was single-threaded, so `/health` waited behind any search; it is
+  now threaded, `/health` answers at once with what is running (searches
+  in flight, a sync and since when, the last sync's counts, the index
+  size), searches share capped slots, and a sync that skipped indexing
+  makes it `degraded` and fails `verify_deploy`.
+- **SessionEnd on the episodic server host started no sync.** The hook
+  daemon may write only `~/.claude`, so the `episodic-memory sync` it
+  spawned died on `EROFS` opening its log before logging anything. The
+  hook now asks the server for `POST /sync?background=1` (new) and spawns
+  locally only when the server does not answer.
+- **A linked worktree on Windows passed for a main checkout.** An MSYS2
+  `git` writes the worktree's `.git` file as `gitdir: /c/Users/...`, which
+  Python reads as `C:\c\Users\...`, so a session there would have indexed
+  the project as its owner. `native_git_path()` reads git's paths in the
+  Windows spelling. Found by the ch-28 Pandorum smoke.
+- **The secret gate passed every commit on Windows.** An MSYS `git` spells the
+  worktree `/c/Users/...`; the native `gitleaks.exe` could not open it, logged
+  an error, scanned 0 bytes and exited 0. The gate now hands gitleaks the
+  Windows spelling and refuses the commit when the scan target is not a
+  directory, so a path gitleaks cannot open fails closed.
+- **A process that has exited is no longer alive on Windows.** It stays a kernel
+  object while anyone holds a handle to it, so `process_start_time()` kept
+  answering and a `--follow-pid` claim outlived its job (likewise a mailbox
+  alias or daemon lock whose process had exited). It now reads the exit time
+  `GetProcessTimes` already returns.
+- **Tool paths use `/` on Windows.** The researcher / Caliber-proxy tools showed
+  the model `src\net\x.py` while the CitationLinter and code graph key on
+  `src/net/x.py`, and `glob` matched `src/*.py` against backslashed paths and
+  found nothing. Relative paths in tool output and glob matching are now
+  spelled with `/` on every OS (Linux output is unchanged).
+- Windows test debt from the v2.0 line: the Linux-only council shell / launcher
+  tests skip on Windows, psycopg tests skip without it, and the compaction
+  bench keys its project paths with `/`.
+- **A session change no longer makes a session a stranger to its own claims.**
+  The MCP server keeps the `CLAUDE_CODE_SESSION_ID` it was spawned with, so
+  after a `/clear` or resume `resource-extend` / `resource-release` refused the
+  session's GPU claims as another session's, while the CLI accepted them. The
+  session id is now read live from `~/.claude/sessions/<pid>.json`, a claim
+  following the caller's Claude Code process counts as its own under any
+  earlier id and takes the live id, SessionStart hands the process's claims to
+  the new session, and SessionEnd keeps them on `clear` / `resume`. Task notes
+  written through MCP carry the live session too.
+- `claude-hooks-res extend <claim-id>` / `release <claim-id>` read the id as
+  the claim instead of answering "nothing to extend".
+
 ## [2.0.2] — 2026-10-31
 
 ### Security

@@ -152,6 +152,10 @@ class Claim:
     lease_s: int = 0
     #: Hold time asked for; ``expires_at`` is set from it at the grant.
     ttl_s: int = 0
+    #: Does timing matter to the holder? True: a measurement, keep load
+    #: off it; False: use beside it freely (copy a file, light work);
+    #: None: not stated. A quiet claim is always True (:func:`perf_of`).
+    perf: Optional[bool] = None
     extra: dict = field(default_factory=dict)
 
     @property
@@ -163,6 +167,29 @@ class Claim:
 
     def label(self) -> str:
         return ", ".join(str(i) for i in self.items)
+
+
+def perf_of(claim: "Claim") -> Optional[bool]:
+    """Whether timing matters to ``claim``'s holder: always for a quiet
+    claim (that is what quiet means), else what the holder stated, None
+    when nothing was."""
+    if any(i.mode == QUIET for i in claim.items):
+        return True
+    return claim.perf
+
+
+def perf_tag(claim: "Claim") -> str:
+    """The bracketed word ``status`` shows for :func:`perf_of`."""
+    return {True: "perf-sensitive", False: "not perf-sensitive",
+            None: "perf not stated"}[perf_of(claim)]
+
+
+def check_perf(items: Sequence[Item], perf: Optional[bool]) -> None:
+    """Refuse a quiet claim declared not performance-sensitive."""
+    if perf is False and any(i.mode == QUIET for i in items):
+        raise SpecError("a quiet claim is performance-sensitive by "
+                        "definition; drop --no-perf or claim shared / "
+                        "exclusive")
 
 
 def items_conflict(a: Item, b: Item) -> bool:

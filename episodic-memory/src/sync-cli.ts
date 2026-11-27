@@ -7,8 +7,18 @@ import {
 } from './paths.js';
 import { shouldSkipReentrantSync } from './summarizer.js';
 import { initDatabase } from './db.js';
-import { generateExchangeEmbedding, initEmbeddings } from './embeddings.js';
+import {
+  generateEmbedding,
+  generateExchangeEmbedding,
+  generateExchangeEmbeddings,
+  getEmbedderConfig,
+  initEmbeddings,
+} from './embeddings.js';
+import { spaceId } from './embedder-config.js';
+import { ensureVectorSpace, storedSpace } from './vector-space.js';
 import { runMigrationBatch, countStale } from './embedding-migration.js';
+import { purgeSpawnedSessions } from './spawned-session.js';
+import { seedCatchUp } from './index-pending.js';
 import { exportOpencodeSessions } from './opencode-sync.js';
 import { spawn } from 'child_process';
 import fs from 'fs';
@@ -216,6 +226,9 @@ console.log(`Destination: ${destDir}\n`);
 async function syncAll() {
   const totals = { copied: 0, skipped: 0, indexed: 0, summarized: 0, errors: [] as Array<{file: string; error: string}>, sourcesWithSummaryWork: 0, totalNeedingSummaries: 0 };
 
+  // Once: list the whole archive, so files that never reached the index get there (index-pending.ts).
+  runCatchUpSeed();
+
   for (const sourceDir of sourceDirs) {
     const result = await syncConversations(sourceDir, destDir, { ...syncOptions, summaryLimit });
     totals.copied += result.copied;
@@ -247,6 +260,9 @@ async function syncAll() {
     }
   }
 
+  // Spawned sessions indexed before they were excluded leave once (spawned-session.ts).
+  await runSpawnedPurgePhase();
+
   // After regular sync, do a batch of embedding migration if any rows are
   // still on the old encoder. Lock-protected; if another process is already
   // migrating, this is a no-op.
@@ -264,18 +280,48 @@ async function syncAll() {
   }
 }
 
+function runCatchUpSeed(): void {
+  const db = initDatabase();
+  try {
+    seedCatchUp(db, destDir);
+  } catch (err) {
+    console.error('episodic-memory: catch-up seed error:', err instanceof Error ? err.message : err);
+  } finally {
+    db.close();
+  }
+}
+
+async function runSpawnedPurgePhase(): Promise<void> {
+  const db = initDatabase();
+  try {
+    await purgeSpawnedSessions(db);
+  } catch (err) {
+    console.error('episodic-memory: spawned-session purge error:', err instanceof Error ? err.message : err);
+  } finally {
+    db.close();
+  }
+}
+
 const MIGRATION_BATCH_SIZE = parseInt(process.env.EPISODIC_MEMORY_MIGRATION_BATCH || '500', 10);
 
 async function runEmbeddingMigrationPhase(): Promise<void> {
   const db = initDatabase();
   try {
+    // A configured embedder of another model: switch the index to its space
+    // (every exchange becomes stale) before counting. One probe learns the width.
+    if (storedSpace(db).id !== spaceId(getEmbedderConfig())) {
+      await initEmbeddings();
+      await generateEmbedding('episodic-memory vector space probe');
+      ensureVectorSpace(db);
+    }
     const stale = countStale(db);
     if (stale === 0) return;
 
-    console.error(`\nepisodic-memory: ${stale} exchange(s) on the old embedding model — migrating up to ${MIGRATION_BATCH_SIZE} this run`);
+    console.error(`\nepisodic-memory: ${stale} exchange(s) to (re-)embed — up to ${MIGRATION_BATCH_SIZE} this run`);
     await initEmbeddings();
     const indexDir = getIndexDir();
-    const done = await runMigrationBatch(db, indexDir, MIGRATION_BATCH_SIZE, generateExchangeEmbedding);
+    const done = await runMigrationBatch(db, indexDir, MIGRATION_BATCH_SIZE, generateExchangeEmbedding,
+      { embedMany: generateExchangeEmbeddings });
     if (done > 0) {
       const after = countStale(db);
       console.error(`episodic-memory: re-embedded ${done} (${after} still stale; will resume on next sync)`);

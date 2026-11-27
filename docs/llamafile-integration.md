@@ -301,19 +301,146 @@ Budget RAM accordingly: 3 slots × 16 k ctx ≈ 3× the KV cache.
 > requires a **daemon restart**, not just an embedder reap: the
 > daemon reads `cfg["embedding"]` at startup.
 
-### GPU vs CPU
+### Backend: CPU, Vulkan, CUDA, auto (ch-33)
 
-- **`mode: "auto"`** (default) — spawn with `-ngl 99`; the APE
-  fat binary auto-probes CUDA → ROCm → Vulkan and picks the
-  best backend. On failure the manager re-spawns with
-  `--gpu disable` and sticks to CPU for the rest of the
-  session.
-- **`mode: "cpu"`** — always spawn with `--gpu disable`. Useful
-  on shared boxes where VRAM is reserved for other workloads.
+claude-hooks picks the backend, never the engine. An opencoti
+llamafile started without `--gpu` chooses a GPU itself (Metal → CUDA
+→ AMD → Vulkan), so every spawn names one
+(`claude_hooks/llamafile_backend.py`):
 
-Detection helper `claude_hooks.gpu_probe.probe()` is used at
-install time to suggest a default and at runtime to short-circuit
-the `-ngl 99` attempt when no GPU is visible.
+- **`mode: "cpu"`** — `--gpu disable`. A fresh install's default.
+- **`mode: "vulkan"`** — `--gpu vulkan -dev <VulkanN> -ngl 99`. The
+  device comes from `embedding.device` (part of the name
+  `<llamafile> --gpu vulkan --list-devices` prints, e.g. `RENOIR`, or
+  a `VulkanN` id; empty = the only device) and is resolved before each
+  spawn, since the index moves with drivers. After the server is up,
+  the manager embeds three probe texts and compares them with the CPU
+  reference in `claude_hooks/embedder_probe_reference.json`; below
+  cosine 0.99 it falls back to CPU for the daemon session and
+  `_embedding_status` names why (`fallback_reason`). An unknown device,
+  no health within `spawn_timeout_seconds`, or a refused driver fall
+  back the same way.
+- **`mode: "cuda"`** — `--gpu nvidia -dev <CUDAn> -ngl 99`; needs a
+  CUDA composite. Device, check and fallback as for Vulkan.
+- **`mode: "auto"`** — the pre-ch-33 flags (`-ngl 99`, the engine's
+  own pick). Kept for configs that already say it.
+
+`embedding.pci` names the device by PCI address instead
+(`dddd:bb:dd.f`, or `bb:dd.f`); it wins over `device` and is the only
+name that tells two identical cards apart.
+
+Vulkan knobs: `vulkan_icd` hands the child one driver
+(`VK_ICD_FILENAMES`), e.g. a private RADV build; `allow_old_driver`
+sets `OPENCOTI_VK_ALLOW_OLD_DRIVER=1` (off: see below);
+`verify_backend` turns the probe check off. The daemon's own
+environment never decides: these variables are cleared for the child
+unless set here.
+
+The child always gets a private `HOME` and `TMPDIR` under
+`~/.claude/claude-hooks-llamafile/`. The daemon's sandbox
+(`ProtectSystem=strict`, `ProtectHome=read-only`) leaves the engine
+nowhere to unpack its bundled `ggml-vulkan` library, and it then
+loads whatever older copy sits in `~/.llamafile/v/<version>/` without
+a word (on solidpc: the r8 library under an r19 engine). Cosmopolitan
+also builds its `dlopen` helper in `TMPDIR` with the host's C
+compiler, so Vulkan needs `cc` on Linux.
+
+Measured on solidpc (Ryzen 5 5600G, Radeon Renoir iGPU, 2026-11-27):
+
+| | min cos vs mozilla CPU | ~460-token embed |
+|---|---|---|
+| opencoti r19 CPU | 0.99894 (mean 0.99963) | — |
+| opencoti r19 Vulkan, system Mesa 20.3.5 + override | −0.067 (mean 0.378) | wrong vectors, no error |
+| opencoti r19 Vulkan, Mesa 25.2.8 | 0.99905 (mean 0.99953) | 0.65 s (vs 10.6 s on the loaded CPU) |
+
+The engine refuses RADV from Mesa 20 or older for this reason, and
+Debian bullseye ships nothing newer. `scripts/build_private_radv.sh`
+builds RADV 25.2.8 (ACO only, no LLVM or GL) with its libdrm into a
+prefix of its own; point `embedding.vulkan_icd` at its
+`share/vulkan/icd.d/radeon_icd.x86_64.json`. The system Mesa is not
+touched.
+
+### Switching the backend at runtime
+
+The daemon serves the embedder's control surface twice: as signed RPC
+for `claude-hooks-daemon-ctl`, and as HTTP on
+`http://127.0.0.1:38091/embedder/` (`embedding.control_host` /
+`control_port`; 0 turns it off; switching is answered for loopback
+clients only).
+
+```bash
+claude-hooks-daemon-ctl embedder status            # backend in force, device, PCI, fallback
+claude-hooks-daemon-ctl embedder backends          # cpu / vulkan / cuda, every GPU + PCI
+claude-hooks-daemon-ctl embedder switch cpu --reason "opencoti gate on the iGPU"
+claude-hooks-daemon-ctl embedder switch vulkan --device RENOIR
+claude-hooks-daemon-ctl embedder switch cuda --pci 0000:2d:00.0
+claude-hooks-daemon-ctl embedder reset             # back to the configured backend
+
+curl -s 127.0.0.1:38091/embedder/backends
+curl -s -X POST 127.0.0.1:38091/embedder/backend -d '{"mode":"cpu","reason":"gate"}'
+curl -s -X POST 127.0.0.1:38091/embedder/reset -d '{}'
+```
+
+A switch resolves the device first (nothing changes when it is not
+there, 409), waits until the embedder is idle on two reads 0.25 s
+apart (`--timeout`, default 120 s; `--force` restarts after it
+anyway), stops the server and starts it on the new backend, with the
+same probe check and CPU fallback as any start. Embeds that arrive
+during the restart (a few seconds) wait on the daemon's lock; a LAN
+consumer that talks to `:38092` directly sees one failed request and
+its own fallback. A switch is kept in
+`~/.claude/claude-hooks-embedder-backend.json` across daemon restarts
+until `reset` (`--no-persist` keeps it for this daemon run only). A
+stopped embedder is not started: the next embed starts it on the new
+backend. Device lists are cached 5 minutes (`backends --refresh`).
+
+The gate pattern: before a measurement on the GPU the embedder uses,
+`embedder switch cpu --reason "<gate>"`; after it, `embedder reset`.
+
+"Idle" is three readings, any one of which means busy:
+
+- a client connection open to the embed port (`/proc/net/tcp` on Linux,
+  `netstat` on Windows). A request is visible there from the moment it
+  connects; `/slots` shows it only once a slot takes it, which for a
+  14k-character text on a loaded CPU was ~3 s later — the first live
+  switch cut such a request. Every embedder client here opens one
+  connection per request, so an idle client holds none for long;
+- a slot `is_processing`;
+- `/slots` not answering within 2 s while the server is up: the mozilla
+  engine answers it from its inference loop, so it stalls for the length
+  of an embed (`claude_hooks/embedder_gate.py`).
+
+PCI addresses: neither engine backend prints one in `--list-devices`, so
+the listing fills them from the host — CUDA from `nvidia-smi` (the child
+runs with `CUDA_DEVICE_ORDER=PCI_BUS_ID`, so `CUDAn` is nvidia-smi's
+index n), Vulkan from `/sys/bus/pci/devices` by vendor when exactly one
+display device of that vendor exists (else blank). The running device's
+address is then taken from the server's `/props`
+(`opencoti.devices[].pci`). On solidpc: `CUDA0` = `0000:01:00.0`,
+`Vulkan0` (Renoir) = `0000:18:00.0`.
+
+### Composites
+
+| asset (release `embedder-c14-r19`) | backends | runs on |
+|---|---|---|
+| `qwen3-embedding-0.6b-16k-opencoti-c14-r19.llamafile` | cpu, vulkan | Linux, Windows, macOS |
+| `…-opencoti-c14-r19-cuda-linux-x86_64.llamafile` | cpu, vulkan, cuda | Linux x86_64 |
+| `…-opencoti-c14-r19-cuda-win-x86_64.llamafile` | cpu, vulkan, cuda | Windows x86_64 |
+| `qwen3-embedding-0.6b-16k.llamafile` (release `v1.4.0`, legacy) | cpu, auto | any |
+
+`install.py` asks which one (a re-run keeps the configured one, a
+fresh install takes CPU + Vulkan) and which backend and device; the
+CUDA builds carry the CUDA 13 library and the CUDA 12 one for GPUs
+before compute capability 7.5, and are one per OS to stay under
+GitHub's 2 GiB asset limit. SHAs are in
+`vendor/llamafile/dist/SHA256SUMS.composite`.
+
+The opencoti composites are built by `make -C vendor/llamafile/dist
+fetch-opencoti opencoti opencoti-cuda` from the inputs pinned in
+`vendor/llamafile/opencoti-c14-r19/SHA256SUMS` (bare engine + Linux
+and Windows Vulkan libraries + the same GGUF; 932 MB against the
+mozilla composite's 1.5 GB). Its baked `.args` name no backend, and a
+test fails if they do.
 
 ### Failure modes
 
@@ -322,6 +449,8 @@ the `-ngl 99` attempt when no GPU is visible.
 | Composite missing | Pre-release host, or `install.py` not re-run | `LlamafileEmbedder` raises `EmbedderError`; composite falls back to Ollama primary if configured |
 | Port 38092 already bound | Another llamafile, or stale orphan | `EmbeddingManager.ensure_running` logs + raises; daemon restart will re-adopt the PID file at `~/.claude/embedding-server.pid` |
 | GPU spawn timeout | VRAM exhaustion | manager reaps and re-spawns with `--gpu disable`; subsequent embeds use CPU |
+| `fallback_reason: probe cosine … < 0.99` | The Vulkan driver computes wrong vectors (e.g. old Mesa) | CPU for the session; build a newer driver (`scripts/build_private_radv.sh`) and set `vulkan_icd` |
+| `fallback_reason: the engine lists no usable Vulkan device` | Driver refused as too old, or none installed | CPU for the session; same fix |
 | Daemon down | systemd stopped, or `daemon_client` can't reach `:47018` | `LlamafileEmbedder` falls back to a direct HTTP probe of `:38092` (engine still alive across daemon restarts via `start_new_session=True`) |
 
 ## Cross-platform notes

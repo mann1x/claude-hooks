@@ -393,7 +393,105 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="one project; default: every daemon on the host")
     lsp_sub.add_parser(
         "reap", help="stop orphaned and idle daemons, clear dead state")
+
+    p_emb = sub.add_parser(
+        "embedder", help="the daemon-managed embedder: backends, GPUs, switch")
+    emb_sub = p_emb.add_subparsers(dest="emb_cmd", required=True)
+    p_es = emb_sub.add_parser("status", help="backend in force, device, PCI, fallback")
+    p_eb = emb_sub.add_parser(
+        "backends", help="cpu / vulkan / cuda and every GPU with its PCI address")
+    p_eb.add_argument("--refresh", action="store_true",
+                      help="list the devices again instead of the 5-minute cache")
+    p_sw = emb_sub.add_parser(
+        "switch", help="move the embedder to another backend once it is idle")
+    p_sw.add_argument("mode", choices=("cpu", "vulkan", "cuda"))
+    p_sw.add_argument("--device", default="",
+                      help="device id (Vulkan0, CUDA1) or part of its name")
+    p_sw.add_argument("--pci", default="", help="device by PCI address (dddd:bb:dd.f)")
+    p_sw.add_argument("--reason", default="", help="why (shown in status)")
+    p_sw.add_argument("--timeout", type=float, default=120.0,
+                      help="seconds to wait for the embedder to go idle (default 120)")
+    p_sw.add_argument("--force", action="store_true",
+                      help="restart after --timeout even if still busy")
+    p_sw.add_argument("--no-persist", action="store_true",
+                      help="forget the switch when the daemon restarts")
+    p_rs = emb_sub.add_parser("reset", help="back to the configured backend")
+    p_rs.add_argument("--timeout", type=float, default=120.0)
+    p_rs.add_argument("--force", action="store_true")
+    for sp in (p_es, p_eb, p_sw, p_rs):
+        sp.add_argument("--json", action="store_true", help="print the raw answer")
     return ap
+
+
+def _fmt_device(d: Optional[dict]) -> str:
+    if not d:
+        return "-"
+    mem = f", {d['memory_mib']} MiB" if d.get("memory_mib") else ""
+    return f"{d['id']} {d['name']}{mem}, pci {d.get('pci') or 'unknown'}"
+
+
+def _print_status(st: dict) -> None:
+    b = st.get("backend") or {}
+    print(f"backend  : {b.get('mode')} ({b.get('source')}"
+          + (f", reason: {b['reason']}" if b.get("reason") else "") + ")")
+    print(f"running  : {'yes' if st.get('alive') else 'no'}"
+          + (f", pid {st.get('pid')}, port {st.get('port')}" if st.get("alive") else "")
+          + f", effective mode {st.get('mode')}")
+    print(f"device   : {_fmt_device(st.get('device'))}")
+    if st.get("fallback_reason"):
+        print(f"fallback : {st['fallback_reason']}")
+
+
+def cmd_embedder(args, **common) -> int:
+    """List the embedder's backends and GPUs, and switch between them.
+
+    The switch is graceful: the daemon waits until no embed is in
+    flight, then restarts the llamafile on the new backend (and checks
+    its vectors). A gate that needs the GPU switches the embedder to
+    cpu first and resets it after.
+    """
+    from claude_hooks import daemon_client as dc
+
+    if args.emb_cmd == "status":
+        res = dc.embedding_status(**common)
+    elif args.emb_cmd == "backends":
+        res = dc.embedding_backends(refresh=args.refresh, **common)
+    elif args.emb_cmd == "switch":
+        res = dc.embedding_switch(args.mode, device=args.device, pci=args.pci,
+                                  reason=args.reason, persist=not args.no_persist,
+                                  idle_timeout=args.timeout, force=args.force, **common)
+    else:
+        res = dc.embedding_reset(idle_timeout=args.timeout, force=args.force, **common)
+    if res is None:
+        print("daemon NOT RESPONDING — start it with `claude-hooks-daemon-ctl start`")
+        return 2
+    if res.get("available") is False:
+        print(f"unavailable: {res.get('reason')}")
+        return 1
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return 0 if res.get("ok", True) else 1
+    if args.emb_cmd == "status":
+        _print_status(res)
+        return 0
+    if args.emb_cmd == "backends":
+        for name, info in res.get("backends", {}).items():
+            mark = "available" if info.get("available") else "unavailable"
+            print(f"{name:7s} {mark}" + (f" — {info['reason']}" if info.get("reason") else ""))
+            for d in info.get("devices", []):
+                print(f"        {_fmt_device(d)}")
+        print()
+        _print_status(res.get("current") or {})
+        return 0
+    if not res.get("ok"):
+        print(f"not switched: {res.get('error')}")
+        return 1
+    how = ("restarted" + (" (forced while busy)" if res.get("forced") else "")
+           + f" after {res.get('waited_s')} s") if res.get("restarted") else \
+        "not running; the next embed starts on it"
+    print(f"switched, {how}")
+    _print_status(res.get("status") or {})
+    return 0
 
 
 def cmd_lsp(args, **common) -> int:
@@ -448,6 +546,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return cmd_tail(n=args.n)
     if args.cmd == "lsp":
         return cmd_lsp(args, **common)
+    if args.cmd == "embedder":
+        return cmd_embedder(args, **common)
     return 2  # unreachable — argparse rejects unknown subcommand
 
 

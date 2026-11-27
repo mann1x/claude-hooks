@@ -90,6 +90,34 @@ The `exchanges.embedding_version` column tracks which encoder produced each row'
 
 If you change anything in the embedding pipeline (model, dtype, prefix, pooling, normalization, truncation), **bump `EMBEDDING_VERSION`**. That triggers automatic re-embedding for everyone on upgrade. Don't change pipeline behavior silently — search results would degrade against indexed vectors from the old pipeline.
 
+The model cache is `getModelCacheDir()` in `src/paths.ts` (`EPISODIC_MEMORY_MODEL_CACHE`, else `<superpowers>/models`); `initEmbeddings()` sets `transformers.env.cacheDir` to it. Never leave it at transformers.js's default `.cache` inside its package: `npm install` deletes it, and a sandboxed server cannot write there to fetch it back. Spec: `test/model-cache-dir.test.ts`.
+
+A change of *model* is not a version bump: it is a new vector space. `index_meta.embedder` names the space the index holds (an index without the key holds bge-small), `vec_exchanges` is declared at that model's width, and `ensureVectorSpace()` in `src/vector-space.ts` switches the index (recreate the table at the new width, mark every exchange stale) before the first vector from another space is written. Search never compares across spaces: when the index holds another model's vectors, or the embedder is unreachable, default search keeps its BM25 half and `--vector` refuses. Never write vectors outside `writeExchangeVectors()` (it also removes an exchange's old windows), and never assume 384 dimensions. Spec: `test/configured-embedder.test.ts`.
+
+### Configured embedder
+
+`src/embedder-config.ts` resolves the embedder: `EPISODIC_MEMORY_EMBEDDER` (JSON or `local`), else `<superpowers>/embedder.json`, else the bundled bge-small. HTTP backends: `llamafile` (`/embedding`), `ollama` (`/api/embed`), `openai` (`/v1/embeddings`), optional `fallback` of the same model. `model` names the space, not the server, so a rebuild may run on a faster server of the same model. An unreadable config is an error (semantic search off), never a fallback to bge-small, which would switch the space and drop every vector. Query / document prefixes default per model (`modelPrefixes()`: qwen3-embedding gets its instruction). In claude-hooks, `claude_hooks/episodic_embedder.py` writes the file from the memory provider's embedder.
+
+### Exchange text and windows
+
+`src/exchange-text.ts` decides what is embedded: no user side for harness turns (task notifications, continued-session summaries, Stop hook feedback), no system reminders, no tool names, the question capped at 600 characters, and long answers cut into overlapping windows (`composeExchangeChunks()`, ≤ `MAX_CHUNKS`), one vector each, ids `<exchange id>` then `<exchange id>#<k>`. Search maps a window back to its exchange and keeps each exchange once. An exchange with nothing worth a vector gets none and is still found by BM25.
+
+### Exclusion markers and the catch-up list
+
+A marker counts only as an instruction: in a Claude Code record, the text of a user turn without `<system-reminder>` blocks (`scanMarkers()` / `lineCarriesMarker()` in `src/sync.ts`), never a tool result, assistant text or another record type; other harnesses' records count anywhere. A session that once read `sync.ts` quoted every marker in a tool result and was never indexed again. DO NOT INDEX keeps the whole conversation out (`shouldSkipIndexing()`); the summarizer and insights markers drop only the exchange whose prompt carries them (`isSummarizerPrompt()`), because Claude Code can start a session id with a summarizer turn (one such session had 667 exchanges, none indexed). `shouldSkipConversation()` (any marker, fail closed) still gates the summary queue: it is the summarizer's recursion guard (#87).
+
+`src/index-pending.ts`: sync used to index only the files it copied in the same run, and the archive copy keeps the source's mtime, so a file whose indexing was skipped or failed (embedder down, a marker, an error) was never looked at again — 17,838 exchanges in 4,450 conversations on one index. Now such a file goes to `index_pending`; every sync works through copied files, then the list, within `EPISODIC_MEMORY_INDEX_BATCH` exchanges (default 500), and a file leaves it when nothing past its high-water mark is left. `seedCatchUp()` lists the whole archive once per `CATCHUP_VERSION` (sync-cli). Spec: `test/index-catchup.test.ts`.
+
+### Spawned sessions are not indexed
+
+`src/spawned-session.ts` keeps `claude -p` / Agent SDK runs (Caliber, OpenWolf, skill generators, workflow agents) out of the index and the summary queue: an `entrypoint` starting `sdk-`, or (older Claude Code, which wrote `cli` for them too) a file opening with a `queue-operation` / `enqueue` record and no `file-history-snapshot` in its first `HEAD_RECORDS`; a subagent follows its parent session. Sync and all three indexer paths check it; `purgeSpawnedSessions()` removes ones already indexed once per `SPAWNED_FILTER_VERSION` (sync-cli phase, `index_meta.spawned_filter`). Archived copies are kept; `EPISODIC_MEMORY_INDEX_SPAWNED=1` indexes them again. Spec: `test/spawned-session.test.ts`, `test/sync-spawned.test.ts`.
+
+### Keyword fusion (BM25) search
+
+Default search (`both` mode) is reciprocal rank fusion (`fuseByRank()`) of the vector-similarity list and a BM25 keyword list from the `exchanges_fts` FTS5 index. `ensureFtsIndex()` in `src/db.ts` builds and keeps that index in step via triggers (needs `recursive_triggers = ON`); `src/compact.ts` rebuilds it after `VACUUM INTO`. `--text` keeps the exact whole-query substring match. Spec: `test/keyword-fusion.test.ts`.
+
+Every mode returns one result per conversation (`bestPerConversation()`: its best-ranked exchange), cut to the limit after grouping, from pools of max(5 × limit, 50); `per_conversation: false` gives every exchange. Spec: `test/search-per-conversation.test.ts`.
+
 ### Stored tool inputs and `compact`
 
 `tool_calls.tool_input` / `tool_result` are not read back by search, show, or the embedding migration — only `tool_name` is. `src/tool-input.ts` caps what `insertExchange` keeps to `EPISODIC_MEMORY_TOOL_INPUT_CHARS` (default `0` = store `NULL`). `src/compact.ts` / `src/compact-cli.ts` apply the cap to existing rows and rebuild the file via `VACUUM INTO` + atomic rename under the sync lock; it refuses the swap while another connection holds the database open. Don't add readers of those columns without raising the default. Spec: `test/compact.test.ts`.
@@ -104,24 +132,29 @@ Hand-edits to `dist/` get clobbered by `npm run build`. Always edit `src/`, then
 
 ### Test isolation
 
-Tests use `mkdtempSync`, set `TEST_DB_PATH`/`TEST_PROJECTS_DIR`/`EPISODIC_MEMORY_CONFIG_DIR` per-test, and clean up in `afterEach`. Don't reach for the real `~/.config/superpowers/`. The `test-utils.ts` helpers cover the common patterns.
+Tests use `mkdtempSync`, set `TEST_DB_PATH`/`TEST_PROJECTS_DIR`/`EPISODIC_MEMORY_CONFIG_DIR` per-test, and clean up in `afterEach`. Don't reach for the real `~/.config/superpowers/`. The `test-utils.ts` helpers cover the common patterns. `test/setup-isolated-config.ts` points `EPISODIC_MEMORY_MODEL_CACHE` at a shared `node_modules/.cache/episodic-test-models`, so embedding tests don't re-download the model per isolated config dir.
 
 ## File layout
 
 ```
 src/
-  embeddings.ts          # encoder pipeline; query and exchange embedders
+  embeddings.ts          # encoder pipeline (bundled ONNX or a configured server); query and exchange embedders
+  embedder-config.ts     # which embedder: EPISODIC_MEMORY_EMBEDDER / <superpowers>/embedder.json / bundled
+  vector-space.ts        # the index's vector space (model + width), switch + re-embed, window vectors
+  exchange-text.ts       # what an exchange is embedded as: cleaned text, overlapping windows
+  spawned-session.ts     # claude -p / Agent SDK transcripts: detect, keep out, purge from an index
+  index-pending.ts       # transcripts the index still owes: catch-up list, per-run budget, one-time seed
   embedding-migration.ts # version constant + lock + batch migration
-  search.ts              # vector + text search; multi-concept aggregation
+  search.ts              # vector + BM25 keyword fusion (RRF), one result per conversation; multi-concept aggregation
   indexer.ts             # incremental index from sources to vec_exchanges
   sync.ts / sync-cli.ts  # source→archive copy + index, with reentrancy guard
   summarizer.ts          # Claude Agent SDK calls; persistSession: false guard
-  db.ts                  # schema + migrations (incl. cascade + embedding_version)
+  db.ts                  # schema + migrations (incl. cascade, embedding_version, exchanges_fts)
   tool-input.ts          # EPISODIC_MEMORY_TOOL_INPUT_CHARS cap for tool_input/tool_result
   compact.ts / compact-cli.ts  # trim stored tool inputs + VACUUM INTO rebuild
   transcript-io.ts       # open/stat/read transcripts, .jsonl or .jsonl.zst
   compress-archive.ts / compress-archive-cli.ts  # zstd idle archived transcripts
-  paths.ts               # config/index/archive directory resolution
+  paths.ts               # config/index/archive/model-cache directory resolution
   parser.ts              # JSONL transcript → exchanges
   mcp-server.ts          # MCP tool surface (search, read)
   version.ts             # GENERATED — do not edit
@@ -139,3 +172,41 @@ scripts/
 ## When in doubt
 
 Read the relevant test file. Tests in this repo are the executable spec — particularly `test/embedding-migration.test.ts`, `test/sync-cli-reentrancy.test.ts`, `test/tool-calls-cascade.test.ts`, and `test/compact.test.ts`. They cover the load-bearing invariants (lock contention, recursion-guard, schema migrations, index compaction) and exercise the real subsystems rather than mocking them.
+
+<!-- caliber:managed:pre-commit -->
+## Before Committing
+
+**IMPORTANT:** Before every git commit, you MUST ensure Caliber syncs agent configs with the latest code changes.
+
+First, check if the pre-commit hook is already installed:
+```bash
+grep -q "caliber" .git/hooks/pre-commit 2>/dev/null && echo "hook-active" || echo "no-hook"
+```
+
+- If **hook-active**: the hook handles sync automatically — just commit normally. Tell the user: "Caliber will sync your agent configs automatically via the pre-commit hook."
+- If **no-hook**: run Caliber manually before committing:
+  1. Tell the user: "Caliber: Syncing agent configs with your latest changes..."
+  2. Run: `caliber refresh && git add CALIBER_LEARNINGS.md CLAUDE.md .claude/ 2>/dev/null`
+  3. After it completes, briefly tell the user what Caliber updated. Then proceed with the commit.
+
+**Valid `caliber refresh` options:** `--quiet` (suppress output) and `--dry-run` (preview without writing). Do not pass any other flags — options like `--auto-approve`, `--debug`, or `--force` do not exist and will cause errors.
+
+**`caliber config`** takes no flags — it runs an interactive provider setup. Do not pass `--provider`, `--api-key`, or `--endpoint`.
+
+If `caliber` is not found, tell the user: "This project uses Caliber for agent config sync. Run /setup-caliber to get set up."
+<!-- /caliber:managed:pre-commit -->
+
+<!-- caliber:managed:learnings -->
+## Session Learnings
+
+Read `CALIBER_LEARNINGS.md` for patterns and anti-patterns learned from previous sessions.
+These are auto-extracted from real tool usage — treat them as project-specific rules.
+<!-- /caliber:managed:learnings -->
+
+<!-- caliber:managed:sync -->
+## Context Sync
+
+This project uses [Caliber](https://github.com/caliber-ai-org/ai-setup) to keep AI agent configs in sync across Claude Code, Cursor, Copilot, and Codex.
+Configs update automatically before each commit via `caliber refresh`.
+If the pre-commit hook is not set up, run `/setup-caliber` to configure everything automatically.
+<!-- /caliber:managed:sync -->

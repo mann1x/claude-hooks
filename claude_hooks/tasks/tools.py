@@ -26,7 +26,7 @@ log = logging.getLogger("claude_hooks.tasks.tools")
 TOOL_NAMES = (
     "task-create", "task-ready", "task-list", "task-show", "task-start",
     "task-done", "task-wait", "task-cancel", "task-note", "task-update",
-    "task-link",
+    "task-link", "task-graph", "task-gate",
 )
 
 _ID = {"type": "string", "description": "task id, e.g. bm-42"}
@@ -61,7 +61,10 @@ def tool_catalog() -> list[dict]:
                 "area": {"type": "string",
                          "description": "dotted area, e.g. R9.gepo"},
                 "tags": _LIST,
-                "depends": {**_LIST, "description": "ids this waits for"},
+                "depends": {**_LIST, "description": (
+                    "ids this waits for, from any project on this host "
+                    "(e.g. op-347); it stays blocked until each is done "
+                    "or cancelled")},
                 "plan": {"type": "string",
                          "description": "path of the plan it belongs to"},
                 "due": {"type": "string", "description": "YYYY-MM-DD"},
@@ -105,15 +108,25 @@ def tool_catalog() -> list[dict]:
         {
             "name": "task-show",
             "description": "The whole task: fields, description, "
-                           "acceptance, log, and where its file is.",
+                           "acceptance, log, where its file is, and its "
+                           "graph across projects (dependencies, "
+                           "dependents, parent / children, related).",
             "inputSchema": {"type": "object", "properties": {"id": _ID},
                             "required": ["id"]},
         },
     ]
+    status_tool["task-start"] += (
+        " Claims it for this session; a task another live session holds is "
+        "refused unless force is true.")
     for name, desc in status_tool.items():
+        props = {"id": _ID, "note": _NOTE}
+        if name == "task-start":
+            props["force"] = {"type": "boolean", "default": False,
+                              "description": "take over another live "
+                                             "session's claim"}
         tools.append({"name": name, "description": desc,
-                      "inputSchema": {"type": "object", "properties": {
-                          "id": _ID, "note": _NOTE}, "required": ["id"]}})
+                      "inputSchema": {"type": "object", "properties": props,
+                                      "required": ["id"]}})
     tools += [
         {
             "name": "task-note",
@@ -140,6 +153,9 @@ def tool_catalog() -> list[dict]:
                 "add_depends": _LIST, "remove_depends": _LIST,
                 "plan": {"type": "string"},
                 "due": {"type": "string"},
+                "defer": {"type": "string", "description": (
+                    "YYYY-MM-DD: hide it (and its children) from "
+                    "task-ready until then; empty clears")},
                 "description": {"type": "string",
                                 "description": "replaces the description"},
                 "acceptance": {**_LIST,
@@ -153,15 +169,63 @@ def tool_catalog() -> list[dict]:
             "name": "task-link",
             "description": (
                 "Attach something to a task: a commit, file, mail id, "
-                "consultancy, plan, url or another task."),
+                "consultancy, plan, url or another task. Graph links take "
+                "a task id from any project: parent (its epic; one), "
+                "discovered-from, related, caused-by, supersedes (closes "
+                "the replaced task when it is in this project), "
+                "duplicate-of (closes this one). Only depends blocks."),
             "inputSchema": {"type": "object", "properties": {
                 "id": _ID,
                 "kind": {"type": "string", "enum": [
                     "commit", "file", "mail", "consultancy", "plan", "url",
-                    "task"]},
+                    "task", "parent", "discovered-from", "related",
+                    "caused-by", "supersedes", "duplicate-of"]},
                 "value": {"type": "string"},
                 "note": _NOTE,
             }, "required": ["id", "kind", "value"]},
+        },
+        {
+            "name": "task-graph",
+            "description": (
+                "The dependency graph across projects, in layers: layer 0 "
+                "can start now, tasks in one layer can run in parallel. "
+                "With id: what it waits for (down), what waits for it (up) "
+                "or both; without: this project's open work (all: every "
+                "project on this host). format mermaid draws it. view "
+                "blocked lists every blocked task with what blocks it "
+                "(dependencies and gates)."),
+            "inputSchema": {"type": "object", "properties": {
+                "id": _ID,
+                "direction": {"type": "string",
+                              "enum": ["both", "down", "up"],
+                              "default": "both"},
+                "all": {"type": "boolean", "default": False},
+                "format": {"type": "string", "enum": ["text", "mermaid"],
+                           "default": "text"},
+                "view": {"type": "string", "enum": ["graph", "blocked"],
+                         "default": "graph"},
+            }},
+        },
+        {
+            "name": "task-gate",
+            "description": (
+                "Make a task wait on something outside the task list; it "
+                "stays blocked until the gate opens. Gates: mail:<id> (mail "
+                "answered: acked with a note, or a reply naming #id), "
+                "human:<what> (a person's go-ahead; resolve it by hand), "
+                "timer:<ISO time>, commit:<sha>@<branch> (on the branch), "
+                "gh-pr:<owner/repo>#<n> (merged), gh-run:<owner/repo>#<id> "
+                "(succeeded). action: add / resolve / remove one gate, or "
+                "check (every gate of the task, or of the project without "
+                "id, GitHub included; resolved ones are recorded)."),
+            "inputSchema": {"type": "object", "properties": {
+                "id": _ID,
+                "action": {"type": "string",
+                           "enum": ["add", "resolve", "remove", "check"]},
+                "gate": {"type": "string",
+                         "description": "e.g. mail:2331, human:deploy"},
+                "note": _NOTE,
+            }, "required": ["action"]},
         },
     ]
     return tools
@@ -176,11 +240,19 @@ class TaskTools:
         self._svc = None
         self._background = background_embed
         self._embedding = threading.Lock()
+        self.session_fn: Optional[Callable[[], str]] = None
+        #: Returns the session's mailbox tools (or None); set by the memory
+        #: servers so a close can mail the projects it unblocks.
+        self.mailer_fn: Optional[Callable[[], Any]] = None
 
     @property
     def svc(self):
         if self._svc is None:
             self._svc = self._factory()
+        if self.session_fn is not None:
+            sid = self.session_fn()
+            if sid:
+                self._svc.session_id = sid
         return self._svc
 
     def call(self, name: str, args: dict) -> str:
@@ -212,22 +284,39 @@ class TaskTools:
             return self._list(a)
         if name == "task-show":
             task, path = svc.show(_id(a))
-            return f"{path}\n\n{task.to_markdown()}"
+            text = f"{path}\n\n{task.to_markdown()}"
+            try:
+                lines = svc.relations(task.id)
+            except Exception:
+                log.info("tasks: graph view failed", exc_info=True)
+                lines = []
+            if lines:
+                text += "\n## Graph\n" + "\n".join(f"- {ln}" for ln in lines)
+            return text
+        if name == "task-start":
+            me = self._me()
+            if me:
+                return self._claim(_id(a), me, a)
+        if name == "task-graph":
+            return self._graph(a)
         if name in ("task-start", "task-done", "task-wait", "task-cancel"):
             status = {"task-start": "active", "task-done": "done",
                       "task-wait": "waiting",
                       "task-cancel": "cancelled"}[name]
             t = svc.set_status(_id(a), status, a.get("note", ""))
             self._after_write()
-            return row_line(_row(t))
+            out = row_line(_row(t))
+            if status in CLOSED_STATUSES and svc.last_unblocked:
+                out += "\n" + self._unblocked(t, status, svc.last_unblocked)
+            return out
         if name == "task-note":
             t = svc.note(_id(a), a.get("text", ""))
             self._after_write()
             return f"noted on {t.id}: {t.log_lines[0]}"
         if name == "task-update":
             fields = {k: a[k] for k in (
-                "title", "priority", "area", "plan", "due", "description",
-                "acceptance") if k in a and a[k] is not None}
+                "title", "priority", "area", "plan", "due", "defer",
+                "description", "acceptance") if k in a and a[k] is not None}
             for k in ("add_tags", "remove_tags", "add_depends",
                       "remove_depends", "check", "uncheck"):
                 if a.get(k):
@@ -235,12 +324,135 @@ class TaskTools:
             t = svc.update(_id(a), note=a.get("note", ""), **fields)
             self._after_write()
             return f"{row_line(_row(t))}\n{t.log_lines[0]}"
+        if name == "task-gate":
+            return self._gate(a)
         if name == "task-link":
             t = svc.link(_id(a), a.get("kind", ""), a.get("value", ""),
                          a.get("note", ""))
             self._after_write()
-            return f"{t.id}: {t.log_lines[0]}"
+            # A closing link (duplicate-of) logs the close after the link.
+            line = next((ln for ln in t.log_lines[:2] if " linked " in ln),
+                        t.log_lines[0])
+            extra = f"\n{t.log_lines[0]}" if t.log_lines[0] != line else ""
+            return f"{t.id}: {line}{extra}"
         return f"unknown task tool {name}"
+
+    # ─── claims (phase 4) ────────────────────────────────────────────
+
+    def _me(self) -> str:
+        """``alias@host`` of this session, when the server gave us its
+        mailbox; the CLI has none and starts tasks without claiming."""
+        mailer = self.mailer_fn() if self.mailer_fn else None
+        alias = getattr(mailer, "alias", None)
+        host = getattr(mailer, "host", None)
+        return f"{alias}@{host}" if alias and host else ""
+
+    def _holder_live(self, owner: str) -> bool:
+        alias, _, host = owner.partition("@")
+        mailer = self.mailer_fn() if self.mailer_fn else None
+        store = getattr(mailer, "store", None)
+        if store is None:
+            return False
+        try:
+            return any(s.host == host for s in store.sessions(alias=alias))
+        except Exception:
+            log.info("tasks: claim liveness unknown", exc_info=True)
+            return False
+
+    def _claim(self, task_id: str, me: str, a: dict) -> str:
+        svc = self.svc
+        task, _ = svc.show(task_id)
+        owner = task.claimed_by
+        if (owner and owner != me and not a.get("force")
+                and task.is_open and self._holder_live(owner)):
+            return (f"Not done: {task_id} is claimed by {owner}, a live "
+                    "session. Ask it (mailbox-send), or task-start with "
+                    "force: true to take it over.")
+        if not task.is_open:
+            svc.set_status(task_id, "active", a.get("note", ""))
+        t = svc.claim(task_id, me, a.get("note", ""))
+        self._after_write()
+        return row_line(_row(t))
+
+    # ─── views (phase 4) ─────────────────────────────────────────────
+
+    def _graph(self, a: dict) -> str:
+        from claude_hooks.tasks.graph import mermaid, text_view, walk
+        svc = self.svc
+        g = svc.graph()
+        if str(a.get("view") or "graph") == "blocked":
+            return self._blocked(g)
+        if a.get("id"):
+            ids = walk(g, _id(a), str(a.get("direction") or "both"))
+        elif a.get("all"):
+            ids = [i for i, n in g.nodes.items() if g.ref(i).open]
+        else:
+            seeds = [i for i, n in g.nodes.items()
+                     if n.project == svc.project and g.ref(i).open]
+            ids = set()
+            for s in seeds:
+                ids |= walk(g, s, "down")
+        if str(a.get("format") or "text") == "mermaid":
+            return mermaid(g, ids)
+        return text_view(g, ids, here=svc.project)
+
+    def _blocked(self, g) -> str:
+        from claude_hooks.tasks.graph import describe
+        svc = self.svc
+        board = svc.board()
+        rows = board.get("blocked") or []
+        if not rows:
+            return f"Nothing blocked in {svc.project}."
+        out = [f"Blocked in {svc.project} ({len(rows)}):"]
+        for r in rows:
+            out.append(f"  {r['id']} · {r.get('title', '')}")
+            for d in r.get("open_depends") or []:
+                out.append(f"    waits for {describe(g.ref(d), here=svc.project)}")
+            for gt in r.get("open_gates") or []:
+                out.append(f"    gate {gt}")
+        return "\n".join(out)
+
+    def _gate(self, a: dict) -> str:
+        svc = self.svc
+        action = str(a.get("action") or "").strip().lower()
+        if action == "check":
+            tid = _id(a) if a.get("id") else ""
+            mailer = self.mailer_fn() if self.mailer_fn else None
+            res = svc.check_gates(task_id=tid,
+                                  mail_store=getattr(mailer, "store", None))
+            self._after_write()
+            if not res:
+                return "No open gates" + (f" on {tid}." if tid else ".")
+            return "\n".join(gate_line(t, g, v) for t, g, v in res)
+        t = svc.gate(_id(a), action, a.get("gate", ""), a.get("note", ""))
+        self._after_write()
+        return f"{row_line(_row(t))}\n{t.log_lines[0]}"
+
+    def _unblocked(self, t, status: str, nodes: list) -> str:
+        """What this close made ready, and the mail to the other projects'
+        sessions (ch-28 phase 2)."""
+        svc = self.svc
+        here = svc.project
+        items = ", ".join(n["id"] + (f" ({n['project']})"
+                                     if n["project"] != here else "")
+                          for n in nodes)
+        lines = [f"Ready now: {items}"]
+        if status != "done":
+            lines.append(f"({t.id} was {status}, not done: check that what "
+                         "waited for it still makes sense.)")
+        if any(n["project"] != here for n in nodes) and _unblock_mail_on():
+            mailer = self.mailer_fn() if self.mailer_fn else None
+            if (mailer is None or svc.index is None
+                    or not getattr(mailer, "alias", None)):
+                # No mailbox, or no sending identity (the CLI).
+                lines.append("(no mail sent from here: the other projects "
+                             "will see it in task-ready)")
+            else:
+                from claude_hooks.tasks.notify import mail_unblocked
+                lines += mail_unblocked(
+                    mailer, svc.index, closed_id=t.id, closed_title=t.title,
+                    closed_project=here, status=status, unblocked=nodes)
+        return "\n".join(lines)
 
     def _ready(self, limit: int, area: Optional[str]) -> str:
         svc = self.svc
@@ -311,6 +523,22 @@ class TaskTools:
         threading.Thread(target=run, name="task-embed", daemon=True).start()
 
 
+def gate_line(task_id: str, gate: str, v) -> str:
+    mark = {True: "open", False: "closed", None: "unchecked"}[v.resolved]
+    if v.failed:
+        mark = "stuck"
+    return f"{task_id} {gate}: {mark} — {v.why}"
+
+
+def _unblock_mail_on() -> bool:
+    try:
+        from claude_hooks.config import load_config
+        from claude_hooks.tasks.hook import settings
+        return bool(settings(load_config()).get("unblock_mail", True))
+    except Exception:
+        return True
+
+
 def _id(a: dict) -> str:
     raw = str(a.get("id") or "").strip().lower().lstrip("#")
     if not is_task_id(raw):
@@ -320,7 +548,8 @@ def _id(a: dict) -> str:
 
 def _row(t) -> dict:
     return {"id": t.id, "status": t.status, "priority": t.priority,
-            "area": t.area, "title": t.title, "updated": t.updated}
+            "area": t.area, "title": t.title, "updated": t.updated,
+            "claimed_by": t.claimed_by, "defer": t.defer}
 
 
 def _rel(svc, task_id: str) -> str:
@@ -340,13 +569,22 @@ def _in_area(r: dict, area: str) -> bool:
 def tools_for_provider(provider, *, cwd: Optional[str] = None,
                        session_id: Optional[str] = None) -> TaskTools:
     """Bound to the session's project; works with no provider (files)."""
-    import os
     from claude_hooks.tasks import service_for
-    sid = (session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
-           or os.environ.get("CLAUDE_SESSION_ID", ""))
 
     def factory():
-        svc = service_for(provider, cwd=cwd, session_id=sid)
+        svc = service_for(provider, cwd=cwd, session_id=_live_sid(session_id))
         svc.embed_on_write = False
         return svc
-    return TaskTools(factory)
+    tools = TaskTools(factory)
+    if not session_id:
+        # An MCP server outlives the session it was spawned in: stamp each
+        # log line with the session running now, not the first one.
+        tools.session_fn = lambda: _live_sid(None)
+    return tools
+
+
+def _live_sid(session_id: Optional[str]) -> str:
+    if session_id:
+        return session_id
+    from claude_hooks.resources.api import session_id_here
+    return session_id_here()

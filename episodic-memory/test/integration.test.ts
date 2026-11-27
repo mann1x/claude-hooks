@@ -146,9 +146,10 @@ describe('Integration Tests', () => {
 
       // If Docker appears in the conversation, we should find it
       if (results.length > 0) {
+        // Text search is case-insensitive, and one exchange per conversation
+        // is returned, so the representative may spell it 'docker'.
         const hasDocker = results.some(r =>
-          r.exchange.userMessage.includes('Docker') ||
-          r.exchange.assistantMessage.includes('Docker')
+          (r.exchange.userMessage + r.exchange.assistantMessage).toLowerCase().includes('docker')
         );
         expect(hasDocker).toBe(true);
       }

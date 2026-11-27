@@ -42,7 +42,7 @@ if TYPE_CHECKING:  # pragma: no cover — the runtime import is lazy, in
 
 from consultants import config as cc
 from consultants.engine import sessions_index, storage
-from consultants.server import inflight
+from consultants.server import attention_push, inflight
 
 log = logging.getLogger("consultants.server")
 
@@ -840,6 +840,9 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         if tried:
             runner_input["tried"] = tried
 
+        # The caller's inbox socket: the engine wakes it when the run
+        # needs an answer or ends (attention_push, backup_models #2414).
+        notify = attention_push.notify_from_body(body)
         inflight.register({
             "sid": sid, "kind": "consult",
             "cwd": str(cwd_path), "cwd_display": discovered_display[0],
@@ -851,10 +854,12 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             "root_sid": sid, "parent_sid": None,
             "started_at": state.started_at,
             **({"shell": shell} if shell else {}),
+            **({"notify": notify} if notify else {}),
         })
         # Hand off to the executor. The runner mutates ``state`` and
         # writes the on-disk artifacts; we just track completion.
         _submit_run(app, app.state.run_council, state, runner_input)
+        attention_push.start(state, notify, cwd=str(cwd_path))
 
         return {
             "sid": sid,
@@ -1159,6 +1164,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             runner_input["retry_lanes"] = list(retry_lanes)
         if shell:
             runner_input["shell"] = shell
+        notify = attention_push.notify_from_body(body)
         inflight.register({
             "sid": child_sid, "kind": "follow-up",
             "cwd": parent.cwd,
@@ -1172,8 +1178,10 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             "started_at": child.started_at,
             **({"retry_lanes": list(retry_lanes)} if retry_lanes else {}),
             **({"shell": shell} if shell else {}),
+            **({"notify": notify} if notify else {}),
         })
         _submit_run(app, app.state.run_follow_up, child, runner_input)
+        attention_push.start(child, notify, cwd=parent.cwd)
 
         return {
             "ok": True,
@@ -1791,6 +1799,9 @@ def _resume_one(app, rec: dict) -> bool:
     log.warning("resuming council %s (%s, %s) after an engine restart",
                 sid, kind or "consult", cfg.effort)
     _submit_run(app, runner, state, runner_input)
+    notify = rec.get("notify")
+    attention_push.start(state, notify if isinstance(notify, dict) else None,
+                         cwd=str(cwd))
     return True
 
 

@@ -23,6 +23,13 @@ import pytest
 from claude_hooks import embedding_manager as em
 
 
+@pytest.fixture(autouse=True)
+def _private_home(isolated_home):
+    """Every spawn builds the child's private HOME/TMPDIR under
+    ~/.claude (llamafile_backend.child_env); keep it off the real home."""
+    return isolated_home
+
+
 # --------------------------------------------------------------------- #
 # Fakes
 # --------------------------------------------------------------------- #

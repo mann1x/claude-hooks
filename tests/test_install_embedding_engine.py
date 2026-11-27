@@ -240,7 +240,9 @@ class TestSetupLlamafileEngine:
         cfg = {}
         # Pretend the composite is already on disk so no download
         # attempt fires.
-        target = install._LLAMAFILE_DIST_DIR / install._DEFAULT_LLAMAFILE_ASSET
+        # ch-33: a fresh install takes the CPU + Vulkan opencoti composite.
+        target = (install._LLAMAFILE_DIST_DIR
+                  / install._EMBEDDER_COMPOSITES["vulkan"]["asset"])
         with patch.object(Path, "is_file", return_value=True):
             block = install._setup_llamafile_engine(
                 cfg, non_interactive=True, dry_run=False,
@@ -250,19 +252,21 @@ class TestSetupLlamafileEngine:
         assert block["model_gguf"] == ""
         assert block["ctx_size"] == install._DEFAULT_LLAMAFILE_CTX
         assert block["pooling"] == "last"
-        assert block["mode"] == "auto"  # existing missing -> default auto
+        # ch-33: a fresh install runs on CPU; a GPU backend is chosen, never implied.
+        assert block["mode"] == "cpu"
         assert block["port"] == 38092
 
     def test_interactive_default_path(self, tmp_path, monkeypatch):
-        """User accepts defaults + chooses 'auto' GPU mode."""
+        """User accepts every default. ch-33: the backend default is cpu
+        even with a GPU present — a detected GPU no longer implies one."""
         cfg = {}
         monkeypatch.setattr("builtins.input", _scripted_input([
+            "",       # ch-33: embedder composite (default)
             "",   # accept default settings
-            "",   # accept GPU mode default (auto when GPU detected)
+            "",   # accept backend default (cpu)
             "",   # #242: accept LAN-exposure default (loopback)
         ]))
         with patch.object(Path, "is_file", return_value=True):
-            # Pretend an NVIDIA GPU was detected.
             with patch("claude_hooks.gpu_probe.probe", return_value={
                     "vendor": "nvidia", "total_mb": 24000,
                     "free_mb": 22000, "raw": "x",
@@ -270,7 +274,7 @@ class TestSetupLlamafileEngine:
                 block = install._setup_llamafile_engine(
                     cfg, non_interactive=False, dry_run=False,
                 )
-        assert block["mode"] == "auto"
+        assert block["mode"] == "cpu"
         assert block["model_gguf"] == ""  # default = baked composite
         # #242: default LAN-exposure answer is loopback.
         assert block["host"] == "127.0.0.1"
@@ -278,6 +282,7 @@ class TestSetupLlamafileEngine:
     def test_interactive_cpu_mode(self, tmp_path, monkeypatch):
         cfg = {}
         monkeypatch.setattr("builtins.input", _scripted_input([
+            "",       # ch-33: embedder composite (default)
             "",      # accept default settings
             "cpu",   # force CPU mode
             "",      # #242: accept LAN-exposure default (loopback)
@@ -299,6 +304,7 @@ class TestSetupLlamafileEngine:
 
         cfg = {}
         monkeypatch.setattr("builtins.input", _scripted_input([
+            "",       # ch-33: embedder composite (default)
             "n",          # decline default settings
             str(gguf),    # custom GGUF path
             "8192",       # custom ctx
@@ -321,6 +327,7 @@ class TestSetupLlamafileEngine:
 
         cfg = {}
         monkeypatch.setattr("builtins.input", _scripted_input([
+            "",       # ch-33: embedder composite (default)
             "n",                # decline default
             str(not_gguf),      # bad path (magic wrong) -> re-prompt
             str(good),          # good path
@@ -397,6 +404,7 @@ class TestSetupEmbeddingEngine:
             "",       # model default
             "",       # num_ctx default
             "y",      # use llamafile fallback? yes
+            "",       # ch-33: embedder composite (default)
             "",       # accept llamafile defaults
             "cpu",    # CPU mode for predictability
             "",       # #242: accept LAN-exposure default (loopback)
@@ -425,6 +433,7 @@ class TestSetupEmbeddingEngine:
             "n",      # use Ollama? no
             "n",      # #237: use remote llamafile? no
             "n",      # use OpenAI? no
+            "",       # ch-33: embedder composite (default)
             "",       # accept llamafile defaults
             "cpu",    # CPU mode
             "",       # #242: accept LAN-exposure default (loopback)
@@ -451,6 +460,7 @@ class TestSetupEmbeddingEngine:
             "text-embedding-3-large",             # model
             "${OPENAI_API_KEY}",                  # api_key
             "y",                                  # use llamafile fallback? yes
+            "",       # ch-33: embedder composite (default)
             "",                                   # llamafile defaults
             "cpu",                                # CPU
             "",                                   # #242: LAN-exposure default
@@ -477,6 +487,7 @@ class TestSetupEmbeddingEngine:
             "n",      # use Ollama? no
             "n",      # #237: use remote llamafile? no
             "n",      # use OpenAI? no
+            "",       # ch-33: embedder composite (default)
             "",       # llamafile defaults
             "cpu",    # CPU
             "",       # #242: LAN-exposure default

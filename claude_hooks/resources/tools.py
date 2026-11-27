@@ -50,6 +50,13 @@ def tool_catalog() -> list[dict]:
                         "description": "what it is for; shown to others"},
              "ttl": {"type": "string",
                      "description": "end it after this long, e.g. 3h"},
+             "perf": {"type": "boolean",
+                      "description": (
+                          "does timing matter? true: a measurement — others "
+                          "keep load off; false: a rebuild or long job — "
+                          "others may copy files or do light work beside "
+                          "it. Quiet claims are always true. Say it: "
+                          "unstated, others must guess.")},
              "queue": {"type": "boolean",
                        "description": "keep the booking when busy"}},
              "required": ["resources", "reason"]}},
@@ -112,12 +119,31 @@ def _names(a: dict, key: str, singular: str) -> list[str]:
     return out
 
 
+def _proc_of(owner) -> dict:
+    """The process an owner follows, for the store's ownership test."""
+    return {"pid": owner.pid, "pid_started": owner.pid_started}
+
+
 def _line(c: Claim) -> str:
     since = (c.granted_at or c.created_at)[:19].replace("T", " ")
     ttl = (f", until {c.expires_at[:19].replace('T', ' ')}" if c.expires_at
            else f", for {c.ttl_s // 60} min once granted" if c.ttl_s else "")
     why = f" — {c.reason}" if c.reason else ""
-    return f"{c.label()} [{c.owner}, since {since} UTC{ttl}, id {c.id}]{why}"
+    return (f"{c.label()} [{c.owner}, since {since} UTC{ttl}, id {c.id}, "
+            f"{model.perf_tag(c)}]{why}")
+
+
+def _perf_arg(a: dict):
+    """``perf`` as True / False / None; strings from loose callers too."""
+    v = a.get("perf")
+    if isinstance(v, bool) or v is None:
+        return v
+    text = str(v).strip().lower()
+    if text in ("true", "yes", "1", "on"):
+        return True
+    if text in ("false", "no", "0", "off"):
+        return False
+    raise SpecError(f"perf must be true or false, not {v!r}")
 
 
 class ResourceTools:
@@ -160,11 +186,17 @@ class ResourceTools:
                      for s in _names(a, "resources", "resource")]
             owner = self._owner_fn()
             out = st.request(items, owner, reason=str(a.get("reason") or ""),
-                             ttl_s=parse_duration(a.get("ttl")))
+                             ttl_s=parse_duration(a.get("ttl")),
+                             perf=_perf_arg(a))
             if out.granted:
                 verb = "ALREADY HELD" if out.reused else "GRANTED"
-                return (f"{verb} {out.claim.id}: {out.claim.label()}. "
-                        f"Release with resource-release when done.")
+                hint = ("" if model.perf_of(out.claim) is not None else
+                        " Timing not stated: pass perf=true for a "
+                        "measurement or perf=false so others know they may "
+                        "work beside it.")
+                return (f"{verb} {out.claim.id}: {out.claim.label()} "
+                        f"[{model.perf_tag(out.claim)}]. Release with "
+                        f"resource-release when done.{hint}")
             why = out.block.describe() if out.block else "busy"
             if a.get("queue"):
                 note = ("\nNOTE: blocked by a claim of this same session — "
@@ -187,10 +219,12 @@ class ResourceTools:
             if not ids and not names and not a.get("all"):
                 return "Name claims, resources, or all=true."
             if ids:
-                done, refused = st.release(ids, session_id=owner.session_id)
+                done, refused = st.release(ids, session_id=owner.session_id,
+                                           **_proc_of(owner))
             else:
                 done, refused = st.release(session_id=owner.session_id,
-                                           resources=names)
+                                           resources=names,
+                                           **_proc_of(owner))
             lines = [f"RELEASED {c.id}: {c.label()}" for c in done]
             lines += [f"REFUSED {c.id}: held by {c.owner}, not this session"
                       for c in refused]
@@ -205,7 +239,8 @@ class ResourceTools:
             if not ids and not names and not a.get("all"):
                 return "Name claims, resources, or all=true."
             done, refused = st.extend(ids, session_id=owner.session_id,
-                                      resources=names, ttl_s=ttl, by_s=by)
+                                      resources=names, ttl_s=ttl, by_s=by,
+                                      **_proc_of(owner))
             lines = [(f"EXTENDED {c.id}: {c.label()} until "
                       f"{c.expires_at[:19].replace('T', ' ')} UTC (was "
                       f"{was[:19].replace('T', ' ') or 'no end'})")

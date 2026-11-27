@@ -10,7 +10,7 @@ plan should not depend on either.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Optional, Sequence
 
 log = logging.getLogger("claude_hooks.tasks")
 
@@ -87,13 +87,17 @@ def embedder_for_provider(provider):
 
 
 def service_for(provider=None, *, cwd: Optional[str] = None,
-                session_id: str = "", embed: bool = True):
+                session_id: str = "", embed: bool = True,
+                read_only_worktrees: Optional[Sequence[str]] = None):
     """The task service for the session's project.
 
     ``provider`` may be None (files only). ``embed=False`` keeps the
     write path free of embedder round-trips; :meth:`embed_pending`
-    catches up later.
+    catches up later. ``read_only_worktrees`` defaults to
+    ``hooks.tasks.read_only_worktrees`` from the config.
     """
+    if read_only_worktrees is None:
+        read_only_worktrees = read_only_worktree_globs()
     from claude_hooks.mailbox.store import host_name
     from claude_hooks.tasks.files import project_root
     from claude_hooks.tasks.service import TaskService
@@ -108,7 +112,24 @@ def service_for(provider=None, *, cwd: Optional[str] = None,
             embedder, model = embedder_for_provider(provider)
     return TaskService(project_root(cwd), index, host=host_name(),
                        session_id=session_id, embedder=embedder,
-                       embed_model=model)
+                       embed_model=model,
+                       read_only_worktrees=read_only_worktrees)
+
+
+def read_only_worktree_globs(config: Optional[dict] = None) -> tuple:
+    """``hooks.tasks.read_only_worktrees``: directory-name globs of linked
+    worktrees whose task tools change nothing, even on a branch."""
+    if config is None:
+        try:
+            from claude_hooks.config import load_config
+            config = load_config()
+        except Exception:
+            return ()
+    section = ((config or {}).get("hooks") or {}).get("tasks") or {}
+    globs = section.get("read_only_worktrees") or ()
+    if isinstance(globs, str):
+        globs = [globs]
+    return tuple(str(g) for g in globs if str(g).strip())
 
 
 def tasks_enabled(config: Optional[dict] = None) -> bool:

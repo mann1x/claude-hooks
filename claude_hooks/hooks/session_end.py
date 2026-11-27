@@ -3,7 +3,11 @@ SessionEnd handler — fires when a session terminates.
 
 If ``episodic.mode`` is ``client`` and a ``server_url`` is configured,
 pushes the session transcript to the remote episodic-server for indexing.
-On the server host, triggers a local ``episodic-memory sync`` instead.
+On the server host, asks the local episodic-server for a background sync
+(``POST /sync?background=1``) and spawns ``episodic-memory sync`` itself
+only when the server does not answer: the hook daemon runs under
+``ProtectSystem=strict`` and may write only ``~/.claude``, so a sync it
+spawns cannot open its log, the archive or the index, and dies unseen.
 """
 
 from __future__ import annotations
@@ -197,8 +201,34 @@ def sync_env(ep_cfg: dict) -> dict:
     return env
 
 
+def _ask_server_to_sync(ep_cfg: dict) -> bool:
+    """Ask the episodic-server on this host to start a background sync.
+    True when it said it started one."""
+    from claude_hooks.episodic_url import server_base_url
+
+    base = server_base_url(ep_cfg)
+    if not base:
+        return False
+    req = urllib.request.Request(f"{base}/sync?background=1", data=b"", method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=float(ep_cfg.get("timeout", 5.0))) as resp:
+            ok = resp.status == 202
+    except (OSError, ValueError) as e:
+        log.warning("episodic-server sync request failed (%s); syncing locally", e)
+        return False
+    if ok:
+        log.debug("episodic-server started a sync")
+    else:
+        log.warning("episodic-server answered %s to a sync request; syncing locally",
+                    resp.status)
+    return ok
+
+
 def _local_sync(ep_cfg: dict) -> Optional[dict]:
-    """Trigger a local episodic-memory sync (server mode)."""
+    """Have the episodic index synced (server mode): by the server, else by
+    a local ``episodic-memory sync --background``."""
+    if _ask_server_to_sync(ep_cfg):
+        return None
     episodic_bin = ep_cfg.get("binary", "episodic-memory")
     try:
         # Windows: hook context inherits a console from the .cmd shim;

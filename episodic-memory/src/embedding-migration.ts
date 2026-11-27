@@ -15,9 +15,16 @@
 import path from 'path';
 import Database from 'better-sqlite3';
 import { acquireFileLock, releaseFileLock, FileLockHandle } from './file-lock.js';
+import { ExchangeVectors, writeExchangeVectors } from './vector-space.js';
 
-/** Bump when anything in the embedding pipeline changes (model, dtype, prefix). */
-export const EMBEDDING_VERSION = 1;
+/**
+ * Bump when anything in the embedding pipeline changes (model, dtype, prefix,
+ * the text an exchange is embedded as).
+ *   1  bge-small-en-v1.5
+ *   2  exchange text without harness turns, reminders or tool names (exchange-text.ts)
+ * A change of model is not a version: it is a new vector space (vector-space.ts).
+ */
+export const EMBEDDING_VERSION = 2;
 
 /**
  * Lock primitives for the migration are the same as for sync (#97) and any
@@ -64,11 +71,9 @@ export function pickStaleBatch(db: Database.Database, limit: number): StaleRow[]
 export function recordReembedded(
   db: Database.Database,
   id: string,
-  embedding: number[],
+  embedding: ExchangeVectors,
 ): void {
-  db.prepare('DELETE FROM vec_exchanges WHERE id = ?').run(id);
-  db.prepare('INSERT INTO vec_exchanges (id, embedding) VALUES (?, ?)')
-    .run(id, Buffer.from(new Float32Array(embedding).buffer));
+  writeExchangeVectors(db, id, embedding);
   db.prepare('UPDATE exchanges SET embedding_version = ? WHERE id = ?')
     .run(EMBEDDING_VERSION, id);
 }
@@ -89,10 +94,23 @@ export function getMigrationLockPath(indexDir: string): string {
   return path.join(indexDir, '.embedding-migration.lock');
 }
 
+/** Rows embedded and committed together; an interrupted run keeps every finished group. */
+export const MIGRATION_GROUP = 32;
+
+export type ExchangeEmbedFn =
+  (user: string, assistant: string, toolNames?: string[]) => Promise<ExchangeVectors>;
+export type ExchangeBatchEmbedFn =
+  (rows: Array<{ userMessage: string; assistantMessage: string }>) => Promise<ExchangeVectors[]>;
+
 /**
  * Run a single migration batch: re-embed up to `batchSize` rows whose
  * embedding_version is behind. Lock-protected; exits silently if another
  * process holds the lock.
+ *
+ * Rows go through `embedMany` (one request per group to an embedding server)
+ * when given, else `embedFn` row by row, and each group of MIGRATION_GROUP is
+ * committed as soon as it is embedded, so a long rebuild that stops keeps
+ * what it finished.
  *
  * Returns the number of rows re-embedded (0 if nothing to do or locked out).
  */
@@ -100,7 +118,8 @@ export async function runMigrationBatch(
   db: Database.Database,
   indexDir: string,
   batchSize: number,
-  embedFn: (user: string, assistant: string, toolNames?: string[]) => Promise<number[]>,
+  embedFn: ExchangeEmbedFn,
+  options: { embedMany?: ExchangeBatchEmbedFn; group?: number; log?: (msg: string) => void } = {},
 ): Promise<number> {
   const remaining = countStale(db);
   if (remaining === 0) return 0;
@@ -112,25 +131,44 @@ export async function runMigrationBatch(
     return 0;
   }
 
+  const group = Math.max(1, options.group ?? MIGRATION_GROUP);
+  const log = options.log ?? ((m: string) => console.error(m));
   try {
     const rows = pickStaleBatch(db, batchSize);
     if (rows.length === 0) return 0;
 
-    console.error(`episodic-memory: re-embedding batch of ${rows.length} (${remaining} stale total)...`);
+    log(`episodic-memory: re-embedding batch of ${rows.length} (${remaining} stale total)...`);
 
-    // Compute embeddings outside the transaction (async work),
-    // then write atomically (one transaction per batch for durability).
-    const embeddings: Array<{ id: string; vec: number[] }> = [];
-    for (const row of rows) {
-      const tools = row.tools ? row.tools.split(',') : undefined;
-      const vec = await embedFn(row.user_message, row.assistant_message, tools);
-      embeddings.push({ id: row.id, vec });
-    }
-    const writeTx = db.transaction((items: typeof embeddings) => {
+    const writeTx = db.transaction((items: Array<{ id: string; vec: ExchangeVectors }>) => {
       for (const item of items) recordReembedded(db, item.id, item.vec);
     });
-    writeTx(embeddings);
-    return embeddings.length;
+    const started = Date.now();
+    let done = 0;
+    let lastLog = started;
+    for (let i = 0; i < rows.length; i += group) {
+      const slice = rows.slice(i, i + group);
+      // Embed outside the transaction (async work), then write the group atomically.
+      let vecs: ExchangeVectors[];
+      if (options.embedMany) {
+        vecs = await options.embedMany(slice.map((r) => ({
+          userMessage: r.user_message, assistantMessage: r.assistant_message,
+        })));
+      } else {
+        vecs = [];
+        for (const row of slice) {
+          const tools = row.tools ? row.tools.split(',') : undefined;
+          vecs.push(await embedFn(row.user_message, row.assistant_message, tools));
+        }
+      }
+      writeTx(slice.map((row, j) => ({ id: row.id, vec: vecs[j] })));
+      done += slice.length;
+      if (Date.now() - lastLog > 30_000) {
+        lastLog = Date.now();
+        const rate = done / ((lastLog - started) / 1000);
+        log(`episodic-memory: re-embedded ${done}/${rows.length} (${rate.toFixed(1)}/s)`);
+      }
+    }
+    return done;
   } finally {
     releaseMigrationLock(lock);
   }

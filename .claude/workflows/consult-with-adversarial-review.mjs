@@ -21,8 +21,10 @@ export const meta = {
 //   1. Thread --cwd on EVERY claude-consultants call (every prompt does).
 //   2. Detect the followup cap on JSON `ok == false`, never on $?.
 //   3. Gate on the per-run answer being COMPLETE before trusting
-//      consultancy.status — `--wait` only prints the result once the
-//      run reaches `completed`, so the wait IS the gate.
+//      consultancy.status — `--wait --wait-until terminal` only prints
+//      the result once the run reaches `completed`, so the wait IS the
+//      gate (the default `attention` would return at a checkpoint this
+//      agent cannot answer; the checkpoint auto-resumes instead).
 //   4. Cap the skeptic panel by verify_budget.
 // ----------------------------------------------------------------- //
 
@@ -104,7 +106,7 @@ function consultPrompt() {
     CWD_RULE,
     `Run exactly:`,
     `  claude-consultants consult --message ${JSON.stringify(question)}` +
-      ` --cwd "${cwd}"${effortFlag} --wait`,
+      ` --cwd "${cwd}"${effortFlag} --wait --wait-until terminal`,
     ``,
     `--wait blocks until the council reaches a terminal status, then`,
     `prints one JSON object on stdout. Parse it. The "ok" field is the`,
@@ -173,7 +175,7 @@ function followupPrompt(sid, brief) {
     `Run exactly:`,
     `  claude-consultants follow-up ${sid}` +
       ` --message ${'<the brief as one --message string>'}` +
-      ` --cwd "${cwd}" --wait`,
+      ` --cwd "${cwd}" --wait --wait-until terminal`,
     ``,
     `Discipline: the engine may refuse with HTTP 200 and a JSON body`,
     `{"ok": false, "reason": "followup_limit_reached"} when the followup`,

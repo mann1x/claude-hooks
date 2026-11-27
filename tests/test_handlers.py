@@ -8,7 +8,8 @@ wiring is also covered here under TestStopStoreHandler.
 
 from __future__ import annotations
 
-from unittest.mock import patch
+import urllib.error
+from unittest.mock import MagicMock, patch
 
 
 from claude_hooks.hooks import session_end, session_start, stop, user_prompt_submit
@@ -303,18 +304,47 @@ class TestSessionEndHandler:
             )
         m.assert_not_called()
 
-    def test_episodic_server_triggers_local_sync(self, base_config):
+    def test_episodic_server_asks_the_server_to_sync(self, base_config):
+        # The hook daemon may write only ~/.claude: a sync it spawned died
+        # on EROFS opening its log, so on the server host the episodic-server
+        # (which may write the archive and the index) runs it.
+        cfg = base_config(episodic={"mode": "server", "server_host": "10.0.0.9",
+                                    "server_port": 4242})
+        resp = MagicMock(status=202)
+        resp.__enter__.return_value = resp
+        with patch("urllib.request.urlopen", return_value=resp) as up, \
+                patch("subprocess.Popen") as popen:
+            session_end.handle(event={}, config=cfg, providers=[])
+        req = up.call_args.args[0]
+        assert req.full_url == "http://10.0.0.9:4242/sync?background=1"
+        assert req.get_method() == "POST"
+        popen.assert_not_called()
+
+    def test_episodic_server_unreachable_syncs_locally(self, base_config):
         cfg = base_config(episodic={"mode": "server", "binary": "episodic-memory"})
-        with patch("subprocess.Popen") as m:
+        with patch("urllib.request.urlopen",
+                   side_effect=urllib.error.URLError("refused")), \
+                patch("subprocess.Popen") as m:
             session_end.handle(event={}, config=cfg, providers=[])
         m.assert_called_once()
         args = m.call_args.args[0]
         assert args[0] == "episodic-memory"
         assert "sync" in args
 
+    def test_episodic_server_other_answer_syncs_locally(self, base_config):
+        cfg = base_config(episodic={"mode": "server"})
+        resp = MagicMock(status=200)
+        resp.__enter__.return_value = resp
+        with patch("urllib.request.urlopen", return_value=resp), \
+                patch("subprocess.Popen") as m:
+            session_end.handle(event={}, config=cfg, providers=[])
+        m.assert_called_once()
+
     def test_episodic_server_binary_missing_is_caught(self, base_config):
         cfg = base_config(episodic={"mode": "server", "binary": "does-not-exist"})
-        with patch("subprocess.Popen", side_effect=FileNotFoundError("no bin")):
+        with patch("urllib.request.urlopen",
+                   side_effect=urllib.error.URLError("refused")), \
+                patch("subprocess.Popen", side_effect=FileNotFoundError("no bin")):
             # Must not raise.
             r = session_end.handle(event={}, config=cfg, providers=[])
         assert r is None

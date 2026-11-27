@@ -21,10 +21,16 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
 
 from claude_hooks._atomic import write_text_atomic
-from claude_hooks.tasks.files import TaskDir, TaskNotFound, file_hash
+from claude_hooks.tasks.files import (
+    CONFIG, TASKS_DIR, Checkout, TaskDir, TaskNotFound, checkout_of,
+    file_hash, git_main_root,
+)
+from claude_hooks.tasks.graph import (
+    REVERSE_NAMES, TASK_LINK_KINDS, Graph, Ref, describe,
+)
 from claude_hooks.tasks.model import (
     ACCEPTANCE, CLOSED_STATUSES, DESCRIPTION, OPEN_STATUSES, PRIORITIES,
-    Task, normalise_status, parse_stamp, stamp, utcnow,
+    Task, is_task_id, normalise_status, parse_stamp, split_id, stamp, utcnow,
 )
 from claude_hooks.tasks.store import TaskIndex, embed_text
 
@@ -53,7 +59,7 @@ URGENCY = {
 }
 
 LINK_KINDS = ("commits", "files", "mail", "consultancies", "plans", "urls",
-              "tasks")
+              "tasks") + TASK_LINK_KINDS
 
 #: What a link kind is called in one entry, and every spelling accepted
 #: for it. The tool schema advertises the singular names, so each of
@@ -62,11 +68,22 @@ LINK_KINDS = ("commits", "files", "mail", "consultancies", "plans", "urls",
 _LINK_SINGULAR = {
     "commits": "commit", "files": "file", "mail": "mail",
     "consultancies": "consultancy", "plans": "plan", "urls": "url",
-    "tasks": "task",
+    "tasks": "task", **{k: k for k in TASK_LINK_KINDS},
 }
 _LINK_ALIASES = {**{k: k for k in LINK_KINDS},
                  **{v: k for k, v in _LINK_SINGULAR.items()},
-                 "mails": "mail"}
+                 "mails": "mail",
+                 # graph links (ch-28), every spelling a model reaches for
+                 "epic": "parent", "child-of": "parent",
+                 "discovered": "discovered-from", "found-in": "discovered-from",
+                 "relates-to": "related", "related-to": "related",
+                 "relates": "related", "relate": "related",
+                 "cause": "caused-by", "caused": "caused-by",
+                 "replaces": "supersedes", "supersede": "supersedes",
+                 "duplicate": "duplicate-of", "duplicates": "duplicate-of",
+                 "dup": "duplicate-of"}
+_LINK_ALIASES.update({k.replace("-", "_"): v for k, v in
+                      list(_LINK_ALIASES.items()) if "-" in k})
 
 
 @dataclass
@@ -126,9 +143,20 @@ class TaskService:
     def __init__(self, root, index: Optional[TaskIndex] = None, *,
                  host: str = "", session_id: str = "",
                  embedder: Optional[Callable[[str], Optional[list]]] = None,
-                 embed_model: str = "", embed_on_write: bool = True):
-        self.dir = TaskDir(Path(root))
+                 embed_model: str = "", embed_on_write: bool = True,
+                 read_only_worktrees: Sequence[str] = ()):
+        #: The checkout the session is in; ``dir`` is the folder it reads,
+        #: which for a read-only worktree is the main checkout's.
+        self.origin = Path(root)
+        self.dir = TaskDir(self.origin)
         self.index = index
+        #: Directory-name globs of linked worktrees that change nothing
+        #: even on a branch (``hooks.tasks.read_only_worktrees``).
+        self.read_only_worktrees = tuple(read_only_worktrees or ())
+        self._checkout: Optional[Checkout] = None
+        #: Whether this checkout owns the project's index rows; decided
+        #: once per service, see :meth:`_writes_index`.
+        self._owner: Optional[bool] = None
         self.host = host
         self.session_id = session_id or ""
         self.embedder = embedder
@@ -139,6 +167,19 @@ class TaskService:
         #: Regenerate TASKS.md after each write. Bulk callers (the
         #: importer) turn it off and write the board once at the end.
         self.board_on_write = True
+        #: What the last close made ready, every project (``set_status``).
+        self.last_unblocked: list[dict] = []
+        # A read-only worktree (a release snapshot) shows the live list of
+        # its main checkout; it writes nothing either way. A worker keeps
+        # its own folder: its task's file travels on its branch.
+        co = self.checkout
+        if co.kind == "read-only":
+            main = TaskDir(co.main_root)
+            if main.exists:
+                self.dir = main
+        if not TaskDir(self.origin).exists:
+            # Whether it is a mirror depends on the folder it may get.
+            self._checkout = None
 
     # ─── setup ───────────────────────────────────────────────────────
 
@@ -150,10 +191,99 @@ class TaskService:
     def initialised(self) -> bool:
         return self.dir.exists
 
+    @property
+    def checkout(self) -> Checkout:
+        """Where this checkout stands in its repository.
+
+        A linked worktree is a mirror of the main checkout unless both
+        have a task folder and they name different projects (a worktree
+        deliberately tracking its own). One with no folder of its own is
+        a mirror too: starting one there made a new project named after
+        the worktree directory.
+        """
+        if self._checkout is None:
+            co = checkout_of(self.origin, self.read_only_worktrees)
+            own = TaskDir(self.origin)
+            if co.mirror and own.exists:
+                main = TaskDir(co.main_root)
+                if main.exists and main.project != own.project:
+                    co = Checkout()
+            self._checkout = co
+        return self._checkout
+
+    def _refuse_in_mirror(self, what: str) -> None:
+        co = self.checkout
+        if not co.mirror:
+            return
+        raise ValueError(
+            f"{self.origin} is a {co.kind} worktree of {co.main_root}: "
+            f"{what} in the main checkout, which hands out the ids")
+
+    def _writes_index(self) -> bool:
+        """Whether this checkout may write the project's index rows.
+
+        Rows are keyed on the project name, which every checkout of a
+        repository shares, so only one checkout may write them. A mirror
+        never does. Otherwise the registered owner ``(root, host)`` does;
+        an unregistered project is taken. Ownership moves only when the
+        registered root is on this host and is gone or is a worktree of
+        this checkout, or by :meth:`adopt`. Without this a session in an
+        older release worktree rewrote the rows with that branch's copies
+        and deleted every row whose file the branch lacked.
+        """
+        if self.index is None or self.checkout.mirror:
+            return False
+        if self._owner is None:
+            try:
+                self._owner = self._claim()
+            except Exception:
+                log.warning("tasks: cannot read the project registry; the "
+                            "index is left alone", exc_info=True)
+                return False        # not cached: the next call retries
+        return self._owner
+
+    def _claim(self) -> bool:
+        root, host = str(self.dir.root), self.host
+        row = self.index.project_row(self.project)
+        # A row with no host on either side is no evidence of another
+        # machine: the same root is ours.
+        same_host = row is not None and (row["host"] == host
+                                         or not row["host"] or not host)
+        if row is None or (row["root"] == root and same_host):
+            self._register()
+            return True
+        if row["host"] == host:
+            old = Path(row["root"])
+            gone = not (old / TASKS_DIR / CONFIG).is_file()
+            main = git_main_root(old)
+            ours = main is not None and main == _resolved(self.dir.root)
+            if gone or ours:
+                log.warning("tasks: %s moves from %s (%s) to %s",
+                            self.project, row["root"],
+                            "gone" if gone else "a worktree of it", root)
+                self._register()
+                return True
+        log.warning("tasks: %s is indexed from %s on %s; this checkout (%s "
+                    "on %s) leaves the index alone — `claude-hooks-tasks "
+                    "adopt` moves it here", self.project, row["root"],
+                    row["host"] or "?", root, host)
+        return False
+
+    def adopt(self) -> ReconcileStats:
+        """Make this checkout the one that indexes the project, then
+        reconcile. Refused in a mirror."""
+        self._refuse_in_mirror("adopt the project")
+        if self.index is None:
+            raise ValueError("no task index on this host")
+        self._register()
+        self._owner = True
+        return self.reconcile(force=True)
+
     def init(self, *, prefix: Optional[str] = None,
              project: Optional[str] = None) -> dict:
         if self.dir.exists:
             return self.dir.config()
+        self._refuse_in_mirror("tasks are started")
         taken: set[str] = set()
         name = project or self.dir.root.name
         if self.index is not None:
@@ -165,7 +295,8 @@ class TaskService:
         cfg = self.dir.init(prefix=prefix, project=project, taken=taken)
         # Per-host state and in-flight locks never belong in a commit.
         write_text_atomic(self.dir.dir / ".gitignore", GITIGNORE)
-        self._register()
+        self._owner = None          # the project exists now; decide afresh
+        self._writes_index()
         return cfg
 
     def _register(self) -> None:
@@ -211,7 +342,7 @@ class TaskService:
     # ─── index sync ──────────────────────────────────────────────────
 
     def _index_one(self, task: Task, path: Path, text: str) -> None:
-        if self.index is None:
+        if not self._writes_index():
             return
         try:
             self.index.upsert(self.project, task, root=str(self.dir.root),
@@ -242,17 +373,17 @@ class TaskService:
         state = read_state(self.dir.dir, STATE_FILE)
         return state if isinstance(state, dict) else {}
 
-    def reconcile(self) -> ReconcileStats:
+    def reconcile(self, *, force: bool = False) -> ReconcileStats:
         """Bring the index in line with the files; the files win.
 
         Unchanged files are recognised by ``(mtime_ns, size)`` from a
         per-host state file, so a quiet project costs one directory
-        scan, not a read of every task.
+        scan, not a read of every task. ``force`` rewrites every row
+        (after :meth:`adopt`, whose rows still name the old root).
         """
         stats = ReconcileStats()
-        if self.index is None or not self.dir.exists:
+        if not self.dir.exists or not self._writes_index():
             return stats
-        self._register()
         state = self._load_state()
         new_state: dict = {}
         known = self.index.hashes(self.project)
@@ -265,7 +396,7 @@ class TaskService:
                 h = cached[1]
             else:
                 h = None
-            if h is not None and known.get(tf.id) == h:
+            if not force and h is not None and known.get(tf.id) == h:
                 seen.add(tf.id)
                 new_state[tf.id] = [key, h]
                 continue
@@ -283,7 +414,7 @@ class TaskService:
             h = file_hash(text)
             seen.add(tf.id)
             new_state[tf.id] = [key, h]
-            if known.get(tf.id) != h:
+            if force or known.get(tf.id) != h:
                 self.index.upsert(self.project, task, root=str(self.dir.root),
                                   host=self.host, file_hash=h,
                                   archived=tf.archived)
@@ -300,7 +431,8 @@ class TaskService:
 
     def embed_pending(self, limit: int = 50) -> int:
         """Embed rows missing a current vector; returns how many."""
-        if self.index is None or self.embedder is None or not self.embed_model:
+        if (self.embedder is None or not self.embed_model
+                or not self._writes_index()):
             return 0
         n = 0
         for row in self.index.needing_embedding(
@@ -328,6 +460,7 @@ class TaskService:
         title = " ".join(str(title or "").split())
         if not title:
             raise ValueError("a task needs a title")
+        self._refuse_in_mirror("tasks are created")
         if not self.dir.exists:
             self.init()
         priority = (priority or "M").upper()[:1]
@@ -349,12 +482,26 @@ class TaskService:
             t.touch(self.session_id, now)
             return t
 
-        task, path, text = self.dir.create(make)
+        task, path, text = self.dir.create(make, floor=self._id_floor())
         self._index_one(task, path, text)
         self._refresh_board()
         return task
 
+    def _id_floor(self) -> int:
+        """The highest number the index holds for this project, read by
+        any checkout (reading is harmless): a clone behind the one that
+        indexes must not reuse a number it has not pulled yet."""
+        if self.index is None:
+            return 0
+        try:
+            return self.index.max_number(self.project, self.dir.prefix)
+        except Exception:
+            log.info("tasks: no id floor from the index", exc_info=True)
+            return 0
+
     def _modify(self, task_id: str, change: Callable[[Task], None]) -> Task:
+        if self.checkout.kind == "read-only":
+            self._refuse_in_mirror("tasks are changed")
         task_id = task_id.strip().lower()
         with self._locked(task_id):
             task, _, _ = self.dir.read(task_id)
@@ -375,15 +522,53 @@ class TaskService:
             log.warning("tasks: TASKS.md not regenerated", exc_info=True)
 
     def set_status(self, task_id: str, status: str, note: str = "") -> Task:
+        """Change a task's status. Closing one records, in
+        :attr:`last_unblocked`, the open tasks in every project whose last
+        open dependency it was (read before the close)."""
         status = normalise_status(status)
+        self.last_unblocked = []
+        if status in CLOSED_STATUSES:
+            self._refuse_in_mirror("tasks are closed")
+            self.last_unblocked = self._would_unblock(task_id)
 
         def change(t: Task) -> None:
             if t.status == status and not note:
                 return
             prev = t.status
             t.status = status
+            if status in CLOSED_STATUSES:
+                t.claimed_by = ""
             msg = f"{prev} → {status}" if prev != status else status
             t.add_log(f"{msg}: {note}" if note else msg,
+                      session=self.session_id)
+        return self._modify(task_id, change)
+
+    def _would_unblock(self, task_id: str) -> list[dict]:
+        tid = task_id.strip().lower()
+        try:
+            g = self.graph()
+            cur = g.nodes.get(tid)
+            if cur is not None and cur.status not in OPEN_STATUSES:
+                return []               # already closed: unblocks nothing new
+            return [{"id": n.id, "project": n.project, "title": n.title,
+                     "status": n.status} for n in g.unblocked_by(tid)]
+        except Exception:
+            log.info("tasks: could not work out what %s unblocks", tid,
+                     exc_info=True)
+            return []
+
+    def claim(self, task_id: str, owner: str, note: str = "") -> Task:
+        """Start a task as ``owner`` (``alias@host``). Whether another live
+        session already holds it is the caller's check (it knows the
+        mailbox); this records the claim."""
+        def change(t: Task) -> None:
+            prev, before = t.status, t.claimed_by
+            t.status, t.claimed_by = "active", owner
+            what = f"{prev} → active" if prev != "active" else "active"
+            if before and before != owner:
+                what += f", taken over from {before}"
+            t.add_log(f"{what}, claimed by {owner}"
+                      + (f": {note}" if note else ""),
                       session=self.session_id)
         return self._modify(task_id, change)
 
@@ -401,6 +586,7 @@ class TaskService:
                add_depends: Sequence[str] = (),
                remove_depends: Sequence[str] = (),
                plan: Optional[str] = None, due: Optional[str] = None,
+               defer: Optional[str] = None,
                description: Optional[str] = None, acceptance=None,
                check: Sequence[int] = (), uncheck: Sequence[int] = (),
                note: str = "") -> Task:
@@ -451,6 +637,10 @@ class TaskService:
             if due is not None:
                 t.due = _due(due)
                 what.append(f"due {t.due or '-'}")
+            if defer is not None:
+                t.defer = _due(defer)
+                what.append(f"deferred until {t.defer}" if t.defer
+                            else "no longer deferred")
             if description is not None:
                 t.set_section(DESCRIPTION, description)
                 what.append("description")
@@ -476,10 +666,38 @@ class TaskService:
         value = str(value).strip()
         if not value:
             raise ValueError("a link needs a value")
+        task_id = task_id.strip().lower()
+        closes = ""            # the task this link closes, if any
+        if kind in TASK_LINK_KINDS:
+            value = value.lower().lstrip("#")
+            if not is_task_id(value):
+                raise ValueError(f"a {kind} link takes a task id, not "
+                                 f"{value!r}")
+            if value == task_id:
+                raise ValueError(f"a task cannot be its own {kind}")
+            g = self.graph()
+            ref = g.ref(value)
+            if not ref.found and not g.index_error:
+                raise ValueError(f"cannot link {kind} {value}: {ref.reason}")
+            if kind == "parent":
+                path = g.cycle_through(task_id, [value], kind="parent")
+                if path:
+                    raise ValueError("that parent would close a loop: "
+                                     + " → ".join(path))
+            if kind == "duplicate-of":
+                closes = task_id
+            elif kind == "supersedes" and g.is_local(value):
+                closes = value
+            if closes:
+                self._refuse_in_mirror("tasks are closed")
 
         def change(t: Task) -> None:
             if kind == "plans" and not t.plan:
                 t.plan = value
+            elif kind == "parent":
+                if t.links.get("parent") == [value]:
+                    return
+                t.links["parent"] = [value]
             else:
                 items = list(t.links.get(kind) or [])
                 if value in items:
@@ -487,21 +705,167 @@ class TaskService:
                 items.append(value)
                 t.links[kind] = items
             t.add_log(f"linked {_LINK_SINGULAR[kind]} {value}"
-                      + (f": {note}" if note
-                                                        else ""),
+                      + (f": {note}" if note else ""),
                       session=self.session_id)
-        return self._modify(task_id, change)
+        task = self._modify(task_id, change)
+        if closes == task_id and task.is_open:
+            task = self.set_status(task_id, "cancelled",
+                                   f"duplicate of {value}")
+        elif closes and closes != task_id:
+            try:
+                old, _ = self.show(closes)
+            except TaskNotFound:
+                old = None
+            if old is not None and old.is_open:
+                self.set_status(closes, "cancelled",
+                                f"superseded by {task_id}")
+        return task
 
     def _check_depends(self, deps: Optional[Iterable[str]], *,
                        self_id: str = "") -> list[str]:
-        out = []
+        """Validate dependency ids: this project's must exist; another
+        project's must resolve through the index (kept, and blocking, when
+        the index cannot be read); none may close a cycle, across
+        projects included."""
+        out, foreign = [], []
+        prefix = self.dir.prefix if self.dir.exists else ""
         for d in _clean_list(deps or ()):
-            d = d.lower()
+            d = d.lower().lstrip("#")
+            if not is_task_id(d):
+                raise ValueError(f"{d!r} is not a task id (e.g. op-347)")
             if d == self_id.lower():
                 raise ValueError("a task cannot depend on itself")
-            if self.dir.exists and self.dir.find(d) is None:
-                raise ValueError(f"no task {d} to depend on")
+            if split_id(d)[0] == prefix:
+                if self.dir.find(d) is None:
+                    raise ValueError(f"no task {d} to depend on")
+            else:
+                foreign.append(d)
             out.append(d)
+        if not foreign and not (self_id and out):
+            return out
+        g = self.graph()
+        for d in foreign:
+            ref = g.ref(d)
+            if not ref.found and not g.index_error:
+                raise ValueError(f"cannot depend on {d}: {ref.reason}")
+            if not ref.found:
+                log.warning("tasks: %s kept unresolved (%s); it blocks until "
+                            "it resolves", d, ref.reason)
+        if self_id and out:
+            path = g.cycle_through(self_id.lower(), out)
+            if path:
+                raise ValueError("that would close a cycle: "
+                                 + " → ".join(path))
+        return out
+
+    # ─── gates (phase 3) ─────────────────────────────────────────────
+
+    def gate(self, task_id: str, action: str, gate: str = "",
+             note: str = "") -> Task:
+        """``add`` / ``resolve`` / ``remove`` one gate on a task. Resolving
+        by hand is how a ``human`` gate opens; any gate may be resolved or
+        removed by hand, with the reason logged."""
+        from claude_hooks.tasks.gates import normalise
+        action = (action or "").strip().lower()
+        if action not in ("add", "resolve", "remove"):
+            raise ValueError("action is one of add, resolve, remove, check")
+        g = normalise(gate)
+
+        def change(t: Task) -> None:
+            gates = [str(x) for x in t.links.get("gates") or []]
+            if action == "add":
+                if g in gates:
+                    return
+                gates.append(g)
+                t.add_log(f"waits on gate {g}" + (f": {note}" if note
+                                                  else ""),
+                          session=self.session_id)
+            else:
+                if g not in gates:
+                    raise ValueError(f"{t.id} has no gate {g}; its gates: "
+                                     f"{', '.join(gates) or 'none'}")
+                gates.remove(g)
+                verb = "resolved" if action == "resolve" else "removed"
+                t.add_log(f"gate {g} {verb}: {note or 'by hand'}",
+                          session=self.session_id)
+            if gates:
+                t.links["gates"] = gates
+            else:
+                t.links.pop("gates", None)
+        return self._modify(task_id, change)
+
+    def check_gates(self, *, cheap_only: bool = False, mail_store=None,
+                    task_id: str = "", checker=None) -> list[tuple]:
+        """Evaluate the open gates of this project's open tasks (or of one
+        task) and record each that resolved: removed from the task, the
+        reason logged. A gate that will never resolve is logged once.
+        Returns ``(task_id, gate, Verdict)`` for every gate checked; a
+        read-only checkout only reports."""
+        from claude_hooks.tasks.gates import Checker
+        checker = checker or Checker(mail_store=mail_store,
+                                     root=self.dir.root)
+        results = []
+        for task, tf, _ in self.dir.iter_tasks():
+            if tf.archived or not task.is_open:
+                continue
+            if task_id and task.id != task_id.lower():
+                continue
+            for g in [str(x) for x in task.links.get("gates") or []]:
+                v = checker.check(g, cheap_only=cheap_only)
+                results.append((task.id, g, v))
+                if self.checkout.kind == "read-only":
+                    continue
+                if v.resolved:
+                    self.gate(task.id, "resolve", g, v.why)
+                elif v.failed:
+                    line = f"gate {g} will not open by itself: {v.why}"
+                    if not any(line in ln for ln in task.log_lines[:20]):
+                        self.note(task.id, line)
+        return results
+
+    # ─── the graph ───────────────────────────────────────────────────
+
+    def graph(self, rows: Optional[list[dict]] = None) -> Graph:
+        """This project from its files (or its own rows), every other
+        project from the index. Reading the index is open to any
+        checkout; only writing it is not."""
+        rows = self.snapshot() if rows is None else rows
+        prefix = self.dir.prefix if self.dir.exists else ""
+        return Graph(self.project, prefix, rows, self.index)
+
+    def relations(self, task_id: str,
+                  graph: Optional[Graph] = None) -> list[str]:
+        """One line per edge kind, both directions, every project:
+        ``depends: op-2 (opencoti, active)``, ``children: ch-3 (pending)``."""
+        task, _ = self.show(task_id)
+        g = graph or self.graph()
+        here = self.project
+
+        def refs(ids):
+            return ", ".join(describe(g.ref(i), here=here) for i in ids)
+
+        def nodes(ns):
+            return ", ".join(describe(Ref(n.id, n.project, n.status,
+                                          n.title), here=here) for n in ns)
+        out = []
+        if task.depends:
+            out.append(f"depends: {refs(task.depends)}")
+        for kind in TASK_LINK_KINDS:
+            ids = [str(i).lower() for i in task.links.get(kind) or []]
+            back = g.reverse(task.id, kind)
+            if kind == "related":
+                back = [n for n in back if n.id not in ids]
+                parts = [p for p in (refs(ids), nodes(back)) if p]
+                if parts:
+                    out.append("related: " + ", ".join(parts))
+                continue
+            if ids:
+                out.append(f"{kind}: {refs(ids)}")
+            if back:
+                out.append(f"{REVERSE_NAMES[kind]}: {nodes(back)}")
+        dependents = g.reverse(task.id)
+        if dependents:
+            out.append(f"{REVERSE_NAMES['depends']}: {nodes(dependents)}")
         return out
 
     # ─── reads ───────────────────────────────────────────────────────
@@ -511,8 +875,9 @@ class TaskService:
         return task, path
 
     def snapshot(self) -> list[dict]:
-        """Every task as a row, from the index when there is one."""
-        if self.index is not None:
+        """Every task as a row, from the index when this checkout writes
+        it; otherwise from the files, which are what this checkout sees."""
+        if self._writes_index():
             try:
                 self.reconcile()
                 return self.index.all_rows(self.project)
@@ -526,6 +891,8 @@ class TaskService:
                 "status": task.status, "priority": task.priority,
                 "area": task.area, "tags": task.tags,
                 "depends": task.depends, "plan": task.plan, "due": task.due,
+                "links": task.links, "claimed_by": task.claimed_by,
+                "defer": task.defer,
                 "created": task.created, "updated": task.updated,
                 "archived": tf.archived,
                 "log": "\n".join(task.log_lines[:3]),
@@ -537,36 +904,54 @@ class TaskService:
         """Open tasks split into active / ready / waiting / blocked, each
         ordered by urgency, plus recently closed ones."""
         rows = self.snapshot() if rows is None else rows
-        status_of = {r["id"]: r["status"] for r in rows}
-        blocking: dict[str, int] = {}
-        for r in rows:
-            if r["status"] in OPEN_STATUSES:
-                for d in r.get("depends") or []:
-                    blocking[d] = blocking.get(d, 0) + 1
+        g = self.graph(rows)
         out: dict = {"active": [], "ready": [], "waiting": [], "blocked": [],
-                     "closed": []}
+                     "deferred": [], "closed": []}
         now = utcnow()
+
+        def deferred(r) -> bool:
+            dt = parse_stamp(r.get("defer") or "")
+            return dt is not None and dt > now
+        held = {r["id"] for r in rows
+                if r["status"] in OPEN_STATUSES and deferred(r)}
+        parent_of = {r["id"]: ((r.get("links") or {}).get("parent") or [""])[0]
+                     for r in rows}
         for r in rows:
             if r["status"] in CLOSED_STATUSES:
                 out["closed"].append(r)
                 continue
-            open_deps = [d for d in r.get("depends") or []
-                         if status_of.get(d) in OPEN_STATUSES]
-            r = dict(r, open_depends=open_deps)
-            r["urgency"] = urgency(r, blocking=blocking.get(r["id"], 0),
-                                   blocked=bool(open_deps), now=now)
+            refs = g.open_depends(r.get("depends") or [])
+            open_deps = [x.id for x in refs]
+            gates = [str(x) for x in (r.get("links") or {}).get("gates")
+                     or []]
+            r = dict(r, open_depends=open_deps, open_gates=gates,
+                     blocking=len(g.dependents_open(r["id"])))
+            unresolved = {x.id: x.reason for x in refs if not x.found}
+            if unresolved:
+                r["unresolved"] = unresolved
+            r["urgency"] = urgency(r, blocking=r["blocking"],
+                                   blocked=bool(open_deps or gates), now=now)
             if r["status"] == "active":
                 out["active"].append(r)
+            elif r["id"] in held or parent_of.get(r["id"]) in held:
+                out["deferred"].append(r)
             elif r["status"] == "waiting":
                 out["waiting"].append(r)
-            elif open_deps:
+            elif open_deps or gates:
                 out["blocked"].append(r)
             else:
                 out["ready"].append(r)
-        for k in ("active", "ready", "waiting", "blocked"):
+        for k in ("active", "ready", "waiting", "blocked", "deferred"):
             out[k].sort(key=lambda r: (-r["urgency"], r.get("num", 0)))
         out["closed"].sort(key=lambda r: r.get("updated") or "", reverse=True)
         return out
+
+
+def _resolved(p: Path) -> Path:
+    try:
+        return Path(p).resolve()
+    except OSError:
+        return Path(p).absolute()
 
 
 def _clean_list(items) -> list[str]:

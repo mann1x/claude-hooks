@@ -33,7 +33,8 @@ LOG = "Log"
 #: Field order in the file. A stable order keeps diffs to the line that
 #: changed, which is what makes the files reviewable in git.
 FIELDS = ("id", "title", "status", "priority", "area", "tags", "depends",
-          "plan", "due", "links", "created", "updated", "sessions")
+          "plan", "due", "links", "created", "updated", "sessions",
+          "claimed_by", "defer")
 LIST_FIELDS = ("tags", "depends", "sessions")
 
 _ID = re.compile(r"^([a-z][a-z0-9]*)-(\d+)$")
@@ -236,6 +237,12 @@ class Task:
     created: str = ""
     updated: str = ""
     sessions: list = field(default_factory=list)
+    #: The session that claimed it (``alias@host``), set by ``task-start``
+    #: and cleared when it closes (ch-28 phase 4). Not ``owner``: people
+    #: write that key by hand with a person's name.
+    claimed_by: str = ""
+    #: Hidden from ``task-ready`` (with its children) until this time.
+    defer: str = ""
     #: ``[(heading, text)]`` in file order; Description / Acceptance /
     #: Log are three of them, anything else a person added is kept.
     sections: list = field(default_factory=list)

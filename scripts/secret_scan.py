@@ -92,6 +92,18 @@ def _top() -> str:
         else str(REPO)
 
 
+def _native(path: str, *, windows: Optional[bool] = None) -> str:
+    """``/c/Users/x`` (an MSYS / Cygwin git's spelling) as Windows spells
+    it. A native gitleaks cannot open the MSYS form: it logged
+    ``no such file or directory``, scanned 0 bytes and exited 0, so on
+    pandorum the gate passed every commit."""
+    if os.name == "nt" if windows is None else windows:
+        m = re.match(r"^/(?:cygdrive/)?([A-Za-z])(/.*)?$", path)
+        if m:
+            return m.group(1).upper() + ":" + (m.group(2) or "/").replace("/", "\\")
+    return path
+
+
 def run_gitleaks(mode: str) -> int:
     exe = find_gitleaks()
     if exe is None:
@@ -106,7 +118,13 @@ def run_gitleaks(mode: str) -> int:
         cmd += ["--gitleaks-ignore-path", str(IGNORE)]
     if mode == "staged":
         cmd += ["--staged", "-v"]
-    cmd.append(_top())
+    top = _native(_top())
+    if not os.path.isdir(top):
+        # gitleaks exits 0 on a target it cannot open; fail closed here.
+        print(f"secret_scan: cannot scan {top!r}, not a directory — the "
+              f"commit is refused", file=sys.stderr)
+        return 2
+    cmd.append(top)
     return subprocess.run(cmd).returncode
 
 

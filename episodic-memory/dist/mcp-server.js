@@ -3258,8 +3258,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path3) {
-      let input2 = path3;
+    function removeDotSegments(path4) {
+      let input2 = path4;
       const output2 = [];
       let nextSlash = -1;
       let len = 0;
@@ -3333,11 +3333,11 @@ var require_utils = __commonJS({
       }
       return output2.join("");
     }
-    function removeDotSegmentsRelative(path3) {
-      if (path3 === "" || path3[0] === "/") {
-        return removeDotSegments(path3);
+    function removeDotSegmentsRelative(path4) {
+      if (path4 === "" || path4[0] === "/") {
+        return removeDotSegments(path4);
       }
-      const segments = path3.split("/");
+      const segments = path4.split("/");
       const last = segments.length - 1;
       const output2 = [];
       let trailingDirectory = false;
@@ -3700,8 +3700,8 @@ var require_schemes = __commonJS({
       }
       if (wsComponent.resourceName) {
         const queryIndex = wsComponent.resourceName.indexOf("?");
-        const path3 = queryIndex === -1 ? wsComponent.resourceName : wsComponent.resourceName.slice(0, queryIndex);
-        wsComponent.path = path3 && path3 !== "/" ? path3 : void 0;
+        const path4 = queryIndex === -1 ? wsComponent.resourceName : wsComponent.resourceName.slice(0, queryIndex);
+        wsComponent.path = path4 && path4 !== "/" ? path4 : void 0;
         wsComponent.query = queryIndex === -1 ? void 0 : wsComponent.resourceName.slice(queryIndex + 1);
         wsComponent.resourceName = void 0;
       }
@@ -7238,12 +7238,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs5, exportName) {
+    function addFormats(ajv, list, fs6, exportName) {
       var _a3;
       var _b;
       (_a3 = (_b = ajv.opts.code).formats) !== null && _a3 !== void 0 ? _a3 : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs5[f]);
+        ajv.addFormat(f, fs6[f]);
     }
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -7805,10 +7805,10 @@ function mergeDefs(...defs) {
 function cloneDef(schema) {
   return mergeDefs(schema._zod.def);
 }
-function getElementAtPath(obj, path3) {
-  if (!path3)
+function getElementAtPath(obj, path4) {
+  if (!path4)
     return obj;
-  return path3.reduce((acc, key) => acc?.[key], obj);
+  return path4.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -8148,11 +8148,11 @@ function explicitlyAborted(x2, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path3, issues) {
+function prefixIssues(path4, issues) {
   return issues.map((iss) => {
     var _a3;
     (_a3 = iss).path ?? (_a3.path = []);
-    iss.path.unshift(path3);
+    iss.path.unshift(path4);
     return iss;
   });
 }
@@ -8614,16 +8614,16 @@ function flattenError(error62, mapper = (issue2) => issue2.message) {
 }
 function formatError(error62, mapper = (issue2) => issue2.message) {
   const fieldErrors = { _errors: [] };
-  const processError = (error63, path3 = []) => {
+  const processError = (error63, path4 = []) => {
     for (const issue2 of error63.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path3, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path4, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path3, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path4, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path3, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path4, ...issue2.path]);
       } else {
-        const fullpath = [...path3, ...issue2.path];
+        const fullpath = [...path4, ...issue2.path];
         if (fullpath.length === 0) {
           fieldErrors._errors.push(mapper(issue2));
         } else {
@@ -8662,17 +8662,17 @@ function formatError(error62, mapper = (issue2) => issue2.message) {
 }
 function treeifyError(error62, mapper = (issue2) => issue2.message) {
   const result = { errors: [] };
-  const processError = (error63, path3 = []) => {
+  const processError = (error63, path4 = []) => {
     var _a3;
     for (const issue2 of error63.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path3, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path4, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path3, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path4, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path3, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path4, ...issue2.path]);
       } else {
-        const fullpath = [...path3, ...issue2.path];
+        const fullpath = [...path4, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -8711,8 +8711,8 @@ function treeifyError(error62, mapper = (issue2) => issue2.message) {
 }
 function toDotPath(_path) {
   const segs = [];
-  const path3 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
-  for (const seg of path3) {
+  const path4 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
+  for (const seg of path4) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -12725,8 +12725,8 @@ var error3 = () => {
         const sizing = getSizing(issue2.origin);
         if (sizing) {
           const maxValue = Number(issue2.maximum);
-          const unit = getBelarusianPlural(maxValue, sizing.unit.one, sizing.unit.few, sizing.unit.many);
-          return `\u0417\u0430\u043D\u0430\u0434\u0442\u0430 \u0432\u044F\u043B\u0456\u043A\u0456: \u0447\u0430\u043A\u0430\u043B\u0430\u0441\u044F, \u0448\u0442\u043E ${issue2.origin ?? "\u0437\u043D\u0430\u0447\u044D\u043D\u043D\u0435"} \u043F\u0430\u0432\u0456\u043D\u043D\u0430 ${sizing.verb} ${adj}${issue2.maximum.toString()} ${unit}`;
+          const unit2 = getBelarusianPlural(maxValue, sizing.unit.one, sizing.unit.few, sizing.unit.many);
+          return `\u0417\u0430\u043D\u0430\u0434\u0442\u0430 \u0432\u044F\u043B\u0456\u043A\u0456: \u0447\u0430\u043A\u0430\u043B\u0430\u0441\u044F, \u0448\u0442\u043E ${issue2.origin ?? "\u0437\u043D\u0430\u0447\u044D\u043D\u043D\u0435"} \u043F\u0430\u0432\u0456\u043D\u043D\u0430 ${sizing.verb} ${adj}${issue2.maximum.toString()} ${unit2}`;
         }
         return `\u0417\u0430\u043D\u0430\u0434\u0442\u0430 \u0432\u044F\u043B\u0456\u043A\u0456: \u0447\u0430\u043A\u0430\u043B\u0430\u0441\u044F, \u0448\u0442\u043E ${issue2.origin ?? "\u0437\u043D\u0430\u0447\u044D\u043D\u043D\u0435"} \u043F\u0430\u0432\u0456\u043D\u043D\u0430 \u0431\u044B\u0446\u044C ${adj}${issue2.maximum.toString()}`;
       }
@@ -12735,8 +12735,8 @@ var error3 = () => {
         const sizing = getSizing(issue2.origin);
         if (sizing) {
           const minValue = Number(issue2.minimum);
-          const unit = getBelarusianPlural(minValue, sizing.unit.one, sizing.unit.few, sizing.unit.many);
-          return `\u0417\u0430\u043D\u0430\u0434\u0442\u0430 \u043C\u0430\u043B\u044B: \u0447\u0430\u043A\u0430\u043B\u0430\u0441\u044F, \u0448\u0442\u043E ${issue2.origin} \u043F\u0430\u0432\u0456\u043D\u043D\u0430 ${sizing.verb} ${adj}${issue2.minimum.toString()} ${unit}`;
+          const unit2 = getBelarusianPlural(minValue, sizing.unit.one, sizing.unit.few, sizing.unit.many);
+          return `\u0417\u0430\u043D\u0430\u0434\u0442\u0430 \u043C\u0430\u043B\u044B: \u0447\u0430\u043A\u0430\u043B\u0430\u0441\u044F, \u0448\u0442\u043E ${issue2.origin} \u043F\u0430\u0432\u0456\u043D\u043D\u0430 ${sizing.verb} ${adj}${issue2.minimum.toString()} ${unit2}`;
         }
         return `\u0417\u0430\u043D\u0430\u0434\u0442\u0430 \u043C\u0430\u043B\u044B: \u0447\u0430\u043A\u0430\u043B\u0430\u0441\u044F, \u0448\u0442\u043E ${issue2.origin} \u043F\u0430\u0432\u0456\u043D\u043D\u0430 \u0431\u044B\u0446\u044C ${adj}${issue2.minimum.toString()}`;
       }
@@ -15363,8 +15363,8 @@ var error24 = () => {
         const sizing = getSizing(issue2.origin);
         if (sizing) {
           const maxValue = Number(issue2.maximum);
-          const unit = getArmenianPlural(maxValue, sizing.unit.one, sizing.unit.many);
-          return `\u0549\u0561\u0583\u0561\u0566\u0561\u0576\u0581 \u0574\u0565\u056E \u0561\u0580\u056A\u0565\u0584\u2024 \u057D\u057A\u0561\u057D\u057E\u0578\u0582\u0574 \u0567, \u0578\u0580 ${withDefiniteArticle(issue2.origin ?? "\u0561\u0580\u056A\u0565\u0584")} \u056F\u0578\u0582\u0576\u0565\u0576\u0561 ${adj}${issue2.maximum.toString()} ${unit}`;
+          const unit2 = getArmenianPlural(maxValue, sizing.unit.one, sizing.unit.many);
+          return `\u0549\u0561\u0583\u0561\u0566\u0561\u0576\u0581 \u0574\u0565\u056E \u0561\u0580\u056A\u0565\u0584\u2024 \u057D\u057A\u0561\u057D\u057E\u0578\u0582\u0574 \u0567, \u0578\u0580 ${withDefiniteArticle(issue2.origin ?? "\u0561\u0580\u056A\u0565\u0584")} \u056F\u0578\u0582\u0576\u0565\u0576\u0561 ${adj}${issue2.maximum.toString()} ${unit2}`;
         }
         return `\u0549\u0561\u0583\u0561\u0566\u0561\u0576\u0581 \u0574\u0565\u056E \u0561\u0580\u056A\u0565\u0584\u2024 \u057D\u057A\u0561\u057D\u057E\u0578\u0582\u0574 \u0567, \u0578\u0580 ${withDefiniteArticle(issue2.origin ?? "\u0561\u0580\u056A\u0565\u0584")} \u056C\u056B\u0576\u056B ${adj}${issue2.maximum.toString()}`;
       }
@@ -15373,8 +15373,8 @@ var error24 = () => {
         const sizing = getSizing(issue2.origin);
         if (sizing) {
           const minValue = Number(issue2.minimum);
-          const unit = getArmenianPlural(minValue, sizing.unit.one, sizing.unit.many);
-          return `\u0549\u0561\u0583\u0561\u0566\u0561\u0576\u0581 \u0583\u0578\u0584\u0580 \u0561\u0580\u056A\u0565\u0584\u2024 \u057D\u057A\u0561\u057D\u057E\u0578\u0582\u0574 \u0567, \u0578\u0580 ${withDefiniteArticle(issue2.origin)} \u056F\u0578\u0582\u0576\u0565\u0576\u0561 ${adj}${issue2.minimum.toString()} ${unit}`;
+          const unit2 = getArmenianPlural(minValue, sizing.unit.one, sizing.unit.many);
+          return `\u0549\u0561\u0583\u0561\u0566\u0561\u0576\u0581 \u0583\u0578\u0584\u0580 \u0561\u0580\u056A\u0565\u0584\u2024 \u057D\u057A\u0561\u057D\u057E\u0578\u0582\u0574 \u0567, \u0578\u0580 ${withDefiniteArticle(issue2.origin)} \u056F\u0578\u0582\u0576\u0565\u0576\u0561 ${adj}${issue2.minimum.toString()} ${unit2}`;
         }
         return `\u0549\u0561\u0583\u0561\u0566\u0561\u0576\u0581 \u0583\u0578\u0584\u0580 \u0561\u0580\u056A\u0565\u0584\u2024 \u057D\u057A\u0561\u057D\u057E\u0578\u0582\u0574 \u0567, \u0578\u0580 ${withDefiniteArticle(issue2.origin)} \u056C\u056B\u0576\u056B ${adj}${issue2.minimum.toString()}`;
       }
@@ -16288,18 +16288,18 @@ var error32 = () => {
         const adj = issue2.inclusive ? "\uC774\uD558" : "\uBBF8\uB9CC";
         const suffix = adj === "\uBBF8\uB9CC" ? "\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4" : "\uC5EC\uC57C \uD569\uB2C8\uB2E4";
         const sizing = getSizing(issue2.origin);
-        const unit = sizing?.unit ?? "\uC694\uC18C";
+        const unit2 = sizing?.unit ?? "\uC694\uC18C";
         if (sizing)
-          return `${issue2.origin ?? "\uAC12"}\uC774 \uB108\uBB34 \uD07D\uB2C8\uB2E4: ${issue2.maximum.toString()}${unit} ${adj}${suffix}`;
+          return `${issue2.origin ?? "\uAC12"}\uC774 \uB108\uBB34 \uD07D\uB2C8\uB2E4: ${issue2.maximum.toString()}${unit2} ${adj}${suffix}`;
         return `${issue2.origin ?? "\uAC12"}\uC774 \uB108\uBB34 \uD07D\uB2C8\uB2E4: ${issue2.maximum.toString()} ${adj}${suffix}`;
       }
       case "too_small": {
         const adj = issue2.inclusive ? "\uC774\uC0C1" : "\uCD08\uACFC";
         const suffix = adj === "\uC774\uC0C1" ? "\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4" : "\uC5EC\uC57C \uD569\uB2C8\uB2E4";
         const sizing = getSizing(issue2.origin);
-        const unit = sizing?.unit ?? "\uC694\uC18C";
+        const unit2 = sizing?.unit ?? "\uC694\uC18C";
         if (sizing) {
-          return `${issue2.origin ?? "\uAC12"}\uC774 \uB108\uBB34 \uC791\uC2B5\uB2C8\uB2E4: ${issue2.minimum.toString()}${unit} ${adj}${suffix}`;
+          return `${issue2.origin ?? "\uAC12"}\uC774 \uB108\uBB34 \uC791\uC2B5\uB2C8\uB2E4: ${issue2.minimum.toString()}${unit2} ${adj}${suffix}`;
         }
         return `${issue2.origin ?? "\uAC12"}\uC774 \uB108\uBB34 \uC791\uC2B5\uB2C8\uB2E4: ${issue2.minimum.toString()} ${adj}${suffix}`;
       }
@@ -18112,8 +18112,8 @@ var error46 = () => {
         const sizing = getSizing(issue2.origin);
         if (sizing) {
           const maxValue = Number(issue2.maximum);
-          const unit = getRussianPlural(maxValue, sizing.unit.one, sizing.unit.few, sizing.unit.many);
-          return `\u0421\u043B\u0438\u0448\u043A\u043E\u043C \u0431\u043E\u043B\u044C\u0448\u043E\u0435 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435: \u043E\u0436\u0438\u0434\u0430\u043B\u043E\u0441\u044C, \u0447\u0442\u043E ${issue2.origin ?? "\u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435"} \u0431\u0443\u0434\u0435\u0442 \u0438\u043C\u0435\u0442\u044C ${adj}${issue2.maximum.toString()} ${unit}`;
+          const unit2 = getRussianPlural(maxValue, sizing.unit.one, sizing.unit.few, sizing.unit.many);
+          return `\u0421\u043B\u0438\u0448\u043A\u043E\u043C \u0431\u043E\u043B\u044C\u0448\u043E\u0435 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435: \u043E\u0436\u0438\u0434\u0430\u043B\u043E\u0441\u044C, \u0447\u0442\u043E ${issue2.origin ?? "\u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435"} \u0431\u0443\u0434\u0435\u0442 \u0438\u043C\u0435\u0442\u044C ${adj}${issue2.maximum.toString()} ${unit2}`;
         }
         return `\u0421\u043B\u0438\u0448\u043A\u043E\u043C \u0431\u043E\u043B\u044C\u0448\u043E\u0435 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435: \u043E\u0436\u0438\u0434\u0430\u043B\u043E\u0441\u044C, \u0447\u0442\u043E ${issue2.origin ?? "\u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435"} \u0431\u0443\u0434\u0435\u0442 ${adj}${issue2.maximum.toString()}`;
       }
@@ -18122,8 +18122,8 @@ var error46 = () => {
         const sizing = getSizing(issue2.origin);
         if (sizing) {
           const minValue = Number(issue2.minimum);
-          const unit = getRussianPlural(minValue, sizing.unit.one, sizing.unit.few, sizing.unit.many);
-          return `\u0421\u043B\u0438\u0448\u043A\u043E\u043C \u043C\u0430\u043B\u0435\u043D\u044C\u043A\u043E\u0435 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435: \u043E\u0436\u0438\u0434\u0430\u043B\u043E\u0441\u044C, \u0447\u0442\u043E ${issue2.origin} \u0431\u0443\u0434\u0435\u0442 \u0438\u043C\u0435\u0442\u044C ${adj}${issue2.minimum.toString()} ${unit}`;
+          const unit2 = getRussianPlural(minValue, sizing.unit.one, sizing.unit.few, sizing.unit.many);
+          return `\u0421\u043B\u0438\u0448\u043A\u043E\u043C \u043C\u0430\u043B\u0435\u043D\u044C\u043A\u043E\u0435 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435: \u043E\u0436\u0438\u0434\u0430\u043B\u043E\u0441\u044C, \u0447\u0442\u043E ${issue2.origin} \u0431\u0443\u0434\u0435\u0442 \u0438\u043C\u0435\u0442\u044C ${adj}${issue2.minimum.toString()} ${unit2}`;
         }
         return `\u0421\u043B\u0438\u0448\u043A\u043E\u043C \u043C\u0430\u043B\u0435\u043D\u044C\u043A\u043E\u0435 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435: \u043E\u0436\u0438\u0434\u0430\u043B\u043E\u0441\u044C, \u0447\u0442\u043E ${issue2.origin} \u0431\u0443\u0434\u0435\u0442 ${adj}${issue2.minimum.toString()}`;
       }
@@ -26331,13 +26331,13 @@ function resolveRef(ref, ctx) {
   if (!ref.startsWith("#")) {
     throw new Error("External $ref is not supported, only local refs (#/...) are allowed");
   }
-  const path3 = ref.slice(1).split("/").filter(Boolean);
-  if (path3.length === 0) {
+  const path4 = ref.slice(1).split("/").filter(Boolean);
+  if (path4.length === 0) {
     return ctx.rootSchema;
   }
   const defsKey = ctx.version === "draft-2020-12" ? "$defs" : "definitions";
-  if (path3[0] === defsKey) {
-    const key = path3[1] === void 0 ? void 0 : decodeJSONPointerSegment(path3[1]);
+  if (path4[0] === defsKey) {
+    const key = path4[1] === void 0 ? void 0 : decodeJSONPointerSegment(path4[1]);
     if (!key || !ctx.defs[key]) {
       throw new Error(`Reference not found: ${ref}`);
     }
@@ -30355,8 +30355,8 @@ var StdioServerTransport = class {
 
 // src/db.ts
 import Database from "better-sqlite3";
-import path2 from "path";
-import fs2 from "fs";
+import path3 from "path";
+import fs3 from "fs";
 import * as sqliteVec from "sqlite-vec";
 
 // src/paths.ts
@@ -30388,6 +30388,11 @@ function getSuperpowersDir() {
 function getIndexDir() {
   return ensureDir(path.join(getSuperpowersDir(), "conversation-index"));
 }
+function getModelCacheDir() {
+  return ensureDir(
+    process.env.EPISODIC_MEMORY_MODEL_CACHE || path.join(getSuperpowersDir(), "models")
+  );
+}
 function getDbPath() {
   if (process.env.EPISODIC_MEMORY_DB_PATH || process.env.TEST_DB_PATH) {
     return process.env.EPISODIC_MEMORY_DB_PATH || process.env.TEST_DB_PATH;
@@ -30398,6 +30403,150 @@ function getDbPath() {
 // src/file-lock.ts
 import * as lockfile from "proper-lockfile";
 var DEFAULT_STALE_MS = 10 * 60 * 1e3;
+
+// src/embedder-config.ts
+import fs2 from "fs";
+import path2 from "path";
+var LOCAL_MODEL = "Xenova/bge-small-en-v1.5";
+var LOCAL_DIMS = 384;
+var BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: ";
+var QWEN3_QUERY_PREFIX = "Instruct: Given a search query, retrieve relevant passages from past conversations that answer the query\nQuery: ";
+function modelPrefixes(model) {
+  const m2 = model.toLowerCase();
+  if (m2.includes("qwen3-embedding")) return { query: QWEN3_QUERY_PREFIX, document: "" };
+  if (m2.includes("nomic-embed")) return { query: "search_query: ", document: "search_document: " };
+  if (m2.includes("bge-")) return { query: BGE_QUERY_PREFIX, document: "" };
+  if (m2.includes("e5-")) return { query: "query: ", document: "passage: " };
+  return { query: "", document: "" };
+}
+var EmbedderConfigError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "EmbedderConfigError";
+  }
+};
+function getEmbedderConfigPath() {
+  return path2.join(getSuperpowersDir(), "embedder.json");
+}
+var KINDS = ["local", "llamafile", "ollama", "openai"];
+function fromObject(raw, source, depth = 0) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new EmbedderConfigError(`${source}: expected a JSON object`);
+  }
+  const o = raw;
+  const kind = o.kind ?? "local";
+  if (!KINDS.includes(kind)) {
+    throw new EmbedderConfigError(`${source}: unknown kind ${JSON.stringify(o.kind)} (${KINDS.join(" | ")})`);
+  }
+  if (kind === "local") return localConfig(source);
+  const url2 = o.url;
+  const model = o.model;
+  if (typeof url2 !== "string" || !/^https?:\/\//.test(url2)) {
+    throw new EmbedderConfigError(`${source}: ${kind} needs "url" (http:// or https://)`);
+  }
+  if (typeof model !== "string" || !model.trim()) {
+    throw new EmbedderConfigError(`${source}: ${kind} needs "model", the name of its vector space`);
+  }
+  const prefixes = modelPrefixes(model);
+  const str = (k2, d2) => typeof o[k2] === "string" ? o[k2] : d2;
+  const num = (k2, d2) => {
+    const v2 = o[k2];
+    return typeof v2 === "number" && Number.isFinite(v2) && v2 > 0 ? v2 : d2;
+  };
+  const cfg = {
+    kind,
+    model: model.trim(),
+    url: url2,
+    apiKey: typeof o.api_key === "string" && o.api_key ? o.api_key : void 0,
+    queryPrefix: str("query_prefix", prefixes.query),
+    documentPrefix: str("document_prefix", prefixes.document),
+    maxChars: num("max_chars", 2e3),
+    timeoutMs: num("timeout_ms", 6e4),
+    batch: Math.floor(num("batch", 16)),
+    source
+  };
+  if (o.fallback !== void 0 && o.fallback !== null) {
+    if (depth > 0) throw new EmbedderConfigError(`${source}: a fallback cannot have its own fallback`);
+    const fb = fromObject(o.fallback, `${source} (fallback)`, depth + 1);
+    if (spaceId(fb) !== spaceId(cfg)) {
+      throw new EmbedderConfigError(
+        `${source}: the fallback writes ${JSON.stringify(spaceId(fb))}, not ${JSON.stringify(spaceId(cfg))}; a fallback must serve the same model, or its vectors land in another space`
+      );
+    }
+    cfg.fallback = fb;
+  }
+  return cfg;
+}
+function localConfig(source = "default") {
+  return {
+    kind: "local",
+    model: LOCAL_MODEL,
+    queryPrefix: BGE_QUERY_PREFIX,
+    documentPrefix: "",
+    maxChars: 2e3,
+    timeoutMs: 0,
+    batch: 1,
+    source
+  };
+}
+function resolveEmbedderConfig() {
+  const env = process.env.EPISODIC_MEMORY_EMBEDDER;
+  if (env !== void 0 && env.trim() !== "") {
+    const v2 = env.trim();
+    if (v2 === "local") return localConfig("EPISODIC_MEMORY_EMBEDDER");
+    let raw2;
+    try {
+      raw2 = JSON.parse(v2);
+    } catch (e) {
+      throw new EmbedderConfigError(`EPISODIC_MEMORY_EMBEDDER is not JSON: ${e.message}`);
+    }
+    return fromObject(raw2, "EPISODIC_MEMORY_EMBEDDER");
+  }
+  const file2 = getEmbedderConfigPath();
+  let text;
+  try {
+    text = fs2.readFileSync(file2, "utf-8");
+  } catch (e) {
+    if (e.code === "ENOENT") return localConfig();
+    throw new EmbedderConfigError(`${file2}: ${e.message}`);
+  }
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    throw new EmbedderConfigError(`${file2} is not JSON: ${e.message}`);
+  }
+  return fromObject(raw, file2);
+}
+function spaceId(cfg) {
+  return cfg.documentPrefix ? `${cfg.model}|doc=${cfg.documentPrefix}` : cfg.model;
+}
+
+// src/vector-space.ts
+var LEGACY_SPACE = { id: LOCAL_MODEL, dims: LOCAL_DIMS };
+function vecTableDims(db) {
+  const row = db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'vec_exchanges'`
+  ).get();
+  const m2 = row?.sql.match(/FLOAT\s*\[\s*(\d+)\s*\]/i);
+  return m2 ? Number(m2[1]) : null;
+}
+function storedSpace(db) {
+  let id = LEGACY_SPACE.id;
+  try {
+    const row = db.prepare(`SELECT value FROM index_meta WHERE key = 'embedder'`).get();
+    if (row?.value) id = row.value;
+  } catch {
+  }
+  return { id, dims: vecTableDims(db) ?? LEGACY_SPACE.dims };
+}
+var produced = null;
+function noteProducedSpace(space) {
+  produced = space;
+}
+function producedSpace() {
+  return produced;
+}
 
 // src/db.ts
 function migrateSchema(db) {
@@ -30476,9 +30625,9 @@ function migrateToolCallsCascade(db) {
 }
 function initDatabase() {
   const dbPath = getDbPath();
-  const dbDir = path2.dirname(dbPath);
-  if (!fs2.existsSync(dbDir)) {
-    fs2.mkdirSync(dbDir, { recursive: true });
+  const dbDir = path3.dirname(dbPath);
+  if (!fs3.existsSync(dbDir)) {
+    fs3.mkdirSync(dbDir, { recursive: true });
   }
   const db = new Database(dbPath);
   sqliteVec.load(db);
@@ -30551,18 +30700,63 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_git_branch ON exchanges(git_branch)
   `);
   db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_archive_path ON exchanges(archive_path)
+  `);
+  db.exec(`
     CREATE INDEX IF NOT EXISTS idx_tool_name ON tool_calls(tool_name)
   `);
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_tool_exchange ON tool_calls(exchange_id)
   `);
+  ensureFtsIndex(db);
   return db;
+}
+var FTS_VERSION = "1";
+function ensureFtsIndex(db) {
+  db.pragma("recursive_triggers = ON");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
+      user_message, assistant_message,
+      content='exchanges', content_rowid='rowid',
+      tokenize='unicode61 remove_diacritics 2'
+    );
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_ai AFTER INSERT ON exchanges BEGIN
+      INSERT INTO exchanges_fts(rowid, user_message, assistant_message)
+      VALUES (new.rowid, new.user_message, new.assistant_message);
+    END;
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_ad AFTER DELETE ON exchanges BEGIN
+      INSERT INTO exchanges_fts(exchanges_fts, rowid, user_message, assistant_message)
+      VALUES ('delete', old.rowid, old.user_message, old.assistant_message);
+    END;
+    CREATE TRIGGER IF NOT EXISTS exchanges_fts_au
+    AFTER UPDATE OF user_message, assistant_message ON exchanges BEGIN
+      INSERT INTO exchanges_fts(exchanges_fts, rowid, user_message, assistant_message)
+      VALUES ('delete', old.rowid, old.user_message, old.assistant_message);
+      INSERT INTO exchanges_fts(rowid, user_message, assistant_message)
+      VALUES (new.rowid, new.user_message, new.assistant_message);
+    END;
+  `);
+  const built = db.prepare(`SELECT value FROM index_meta WHERE key = 'fts_version'`).get();
+  if (built?.value === FTS_VERSION) return;
+  try {
+    db.transaction(() => {
+      const again = db.prepare(`SELECT value FROM index_meta WHERE key = 'fts_version'`).get();
+      if (again?.value === FTS_VERSION) return;
+      rebuildFtsIndex(db);
+    }).immediate();
+  } catch (err) {
+    if (err?.code !== "SQLITE_BUSY") throw err;
+  }
+}
+function rebuildFtsIndex(db) {
+  db.exec(`INSERT INTO exchanges_fts(exchanges_fts) VALUES ('rebuild')`);
+  db.prepare(`INSERT OR REPLACE INTO index_meta (key, value) VALUES ('fts_version', ?)`).run(FTS_VERSION);
 }
 
 // src/embeddings.ts
-var MODEL_ID = "Xenova/bge-small-en-v1.5";
+var MODEL_ID = LOCAL_MODEL;
 var MODEL_DTYPE = "q8";
-var BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: ";
 function resolveIntraOpThreads() {
   const override = process.env.EPISODIC_MEMORY_EMBED_THREADS;
   if (override !== void 0) {
@@ -30575,19 +30769,37 @@ function resolveIntraOpThreads() {
   return null;
 }
 var embeddingPipeline = null;
+var embedderConfig = null;
 var EmbeddingsUnavailableError = class extends Error {
   constructor(message, options) {
     super(message, options);
     this.name = "EmbeddingsUnavailableError";
   }
 };
-async function initEmbeddings() {
+function getEmbedderConfig() {
+  if (!embedderConfig) {
+    try {
+      embedderConfig = resolveEmbedderConfig();
+    } catch (error62) {
+      if (error62 instanceof EmbedderConfigError) {
+        throw new EmbeddingsUnavailableError(
+          `Embedder configuration unusable, semantic search is off until it is fixed: ${error62.message}`,
+          { cause: error62 }
+        );
+      }
+      throw error62;
+    }
+  }
+  return embedderConfig;
+}
+async function initLocalPipeline() {
   if (embeddingPipeline) return;
   let pipeline;
   try {
     const transformers = await import("@huggingface/transformers");
     transformers.env.allowLocalModels = true;
     transformers.env.useBrowserCache = false;
+    transformers.env.cacheDir = getModelCacheDir();
     pipeline = transformers.pipeline;
   } catch (error62) {
     throw new EmbeddingsUnavailableError(
@@ -30611,23 +30823,109 @@ async function initEmbeddings() {
   embeddingPipeline = await pipeline("feature-extraction", MODEL_ID, options);
   console.error("Embedding model loaded");
 }
-async function generateEmbedding(text) {
-  if (!embeddingPipeline) {
-    await initEmbeddings();
-  }
-  const truncated = text.substring(0, 2e3);
-  const output2 = await embeddingPipeline(truncated, {
-    pooling: "mean",
-    normalize: true
-  });
-  return Array.from(output2.data);
+async function initEmbeddings() {
+  const cfg = getEmbedderConfig();
+  if (cfg.kind === "local") await initLocalPipeline();
 }
-function withQueryPrefix(query) {
-  if (query.startsWith(BGE_QUERY_PREFIX)) return query;
-  return BGE_QUERY_PREFIX + query;
+function unit(v2) {
+  let n = 0;
+  for (let i = 0; i < v2.length; i++) n += v2[i] * v2[i];
+  n = Math.sqrt(n) || 1;
+  return Array.from(v2, (x2) => x2 / n);
+}
+async function embedRemote(cfg, texts) {
+  let body;
+  if (cfg.kind === "llamafile") body = { content: texts };
+  else if (cfg.kind === "ollama") body = { model: cfg.model, input: texts, truncate: true };
+  else body = { model: cfg.model, input: texts };
+  const headers = { "Content-Type": "application/json" };
+  if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
+  let res;
+  try {
+    res = await fetch(cfg.url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(cfg.timeoutMs)
+    });
+  } catch (error62) {
+    throw new EmbeddingsUnavailableError(
+      `${cfg.kind} embedder unreachable at ${cfg.url} (${cfg.source}): ${error62 instanceof Error ? error62.message : String(error62)}`,
+      { cause: error62 }
+    );
+  }
+  if (!res.ok) {
+    const detail = (await res.text().catch(() => "")).slice(0, 300);
+    throw new EmbeddingsUnavailableError(`${cfg.kind} embedder at ${cfg.url}: HTTP ${res.status} ${detail}`);
+  }
+  const data = await res.json();
+  let vectors;
+  if (cfg.kind === "llamafile") {
+    const items = Array.isArray(data) ? data : [data];
+    vectors = [...items].sort((a, b2) => (a.index ?? 0) - (b2.index ?? 0)).map((it) => Array.isArray(it?.embedding?.[0]) ? it.embedding[0] : it?.embedding);
+  } else if (cfg.kind === "ollama") {
+    vectors = data?.embeddings;
+  } else {
+    vectors = [...data?.data ?? []].sort((a, b2) => (a.index ?? 0) - (b2.index ?? 0)).map((it) => it.embedding);
+  }
+  if (!Array.isArray(vectors) || vectors.length !== texts.length || !vectors.every((v2) => Array.isArray(v2) && v2.length > 0 && typeof v2[0] === "number")) {
+    throw new EmbeddingsUnavailableError(
+      `${cfg.kind} embedder at ${cfg.url} answered ${texts.length} text(s) with an unexpected shape`
+    );
+  }
+  return vectors.map(unit);
+}
+async function embedLocal(texts) {
+  await initLocalPipeline();
+  const out = [];
+  for (const text of texts) {
+    const output2 = await embeddingPipeline(text, { pooling: "mean", normalize: true });
+    out.push(Array.from(output2.data));
+  }
+  return out;
+}
+async function embedTexts(texts) {
+  if (texts.length === 0) return [];
+  const cfg = getEmbedderConfig();
+  const cut = texts.map((t) => t.substring(0, cfg.maxChars));
+  let vectors;
+  if (cfg.kind === "local") {
+    vectors = await embedLocal(cut);
+  } else {
+    vectors = [];
+    for (let i = 0; i < cut.length; i += cfg.batch) {
+      const part = cut.slice(i, i + cfg.batch);
+      try {
+        vectors.push(...await embedRemote(cfg, part));
+      } catch (error62) {
+        if (!cfg.fallback || !(error62 instanceof EmbeddingsUnavailableError)) throw error62;
+        console.error(`episodic-memory: ${error62.message}; using the fallback`);
+        const fb = cfg.fallback;
+        const again = texts.slice(i, i + cfg.batch).map((t) => t.substring(0, fb.maxChars));
+        vectors.push(...fb.kind === "local" ? await embedLocal(again) : await embedRemote(fb, again));
+      }
+    }
+  }
+  const dims = vectors[0].length;
+  const before = producedSpace();
+  if (!vectors.every((v2) => v2.length === dims) || before !== null && before.dims !== dims) {
+    throw new EmbeddingsUnavailableError(
+      `${cfg.model} returned ${dims}-dimension vectors after ${before?.dims ?? "other"}-dimension ones; is every server named in the embedder config serving the same model?`
+    );
+  }
+  noteProducedSpace({ id: spaceId(cfg), dims });
+  return vectors;
+}
+async function generateEmbedding(text) {
+  const [v2] = await embedTexts([text]);
+  return v2;
+}
+function withQueryPrefix(query, prefix = BGE_QUERY_PREFIX) {
+  if (!prefix || query.startsWith(prefix)) return query;
+  return prefix + query;
 }
 async function generateQueryEmbedding(query) {
-  return generateEmbedding(withQueryPrefix(query));
+  return generateEmbedding(withQueryPrefix(query, getEmbedderConfig().queryPrefix));
 }
 
 // src/summary-sentinel.ts
@@ -30639,11 +30937,10 @@ function isErroredSentinel(content) {
 }
 
 // src/search.ts
-import fs4 from "fs";
-import readline from "readline";
+import fs5 from "fs";
 
 // src/transcript-io.ts
-import fs3 from "fs";
+import fs4 from "fs";
 import zlib from "zlib";
 var ZST_SUFFIX = ".zst";
 function hasZstd() {
@@ -30655,9 +30952,9 @@ function requireZstd(file2) {
   }
 }
 function resolveTranscript(canonical) {
-  if (fs3.existsSync(canonical)) return canonical;
+  if (fs4.existsSync(canonical)) return canonical;
   const zst = canonical + ZST_SUFFIX;
-  return fs3.existsSync(zst) ? zst : null;
+  return fs4.existsSync(zst) ? zst : null;
 }
 function transcriptExists(canonical) {
   return resolveTranscript(canonical) !== null;
@@ -30666,14 +30963,14 @@ function statTranscript(canonical) {
   const actual = resolveTranscript(canonical);
   if (!actual) return null;
   try {
-    return fs3.statSync(actual);
+    return fs4.statSync(actual);
   } catch {
     return null;
   }
 }
 function openTranscriptStream(canonical) {
   const actual = resolveTranscript(canonical) ?? canonical;
-  const raw = fs3.createReadStream(actual);
+  const raw = fs4.createReadStream(actual);
   if (!actual.endsWith(ZST_SUFFIX)) return raw;
   requireZstd(actual);
   const out = zlib.createZstdDecompress();
@@ -30690,6 +30987,34 @@ async function readTranscript(canonical) {
 
 // src/search.ts
 var SIDECHAIN_DISTANCE_PENALTY = 0.05;
+var RRF_K = 60;
+var FUSION_POOL_MIN = 50;
+var VECTOR_WINDOW_FETCH = 2;
+function buildFtsQuery(query) {
+  const terms = (query.match(/[\p{L}\p{N}_]+(?:[-.:/][\p{L}\p{N}_]+)*/gu) || []).map((t) => t.toLowerCase());
+  const unique = [...new Set(terms)];
+  return unique.length ? unique.map((t) => `"${t.replace(/"/g, '""')}"`).join(" OR ") : null;
+}
+function bestPerConversation(rows) {
+  const seen = /* @__PURE__ */ new Set();
+  return rows.filter((r) => !seen.has(r.archive_path) && (seen.add(r.archive_path), true));
+}
+function fuseByRank(lists, limit) {
+  const scored = /* @__PURE__ */ new Map();
+  for (const list of lists) {
+    list.forEach((row, i) => {
+      const hit = scored.get(row.id);
+      const add = 1 / (RRF_K + i + 1);
+      if (hit) {
+        hit.score += add;
+        if (hit.row.distance == null && row.distance != null) hit.row = row;
+      } else {
+        scored.set(row.id, { row, score: add });
+      }
+    });
+  }
+  return [...scored.values()].sort((a, b2) => b2.score - a.score).slice(0, limit).map((x2) => x2.row);
+}
 function buildSearchFilters(options) {
   const parts = [];
   const params = [];
@@ -30785,6 +31110,23 @@ function exchangeFromRow(row) {
     thinkingTriggers: row.thinking_triggers || void 0
   };
 }
+async function vectorQuery(db, query) {
+  const cfg = getEmbedderConfig();
+  const stored = storedSpace(db);
+  if (stored.id !== spaceId(cfg)) {
+    throw new EmbeddingsUnavailableError(
+      `the index holds ${stored.id} vectors and the configured embedder (${cfg.source}) writes ${spaceId(cfg)}; the next sync re-embeds them`
+    );
+  }
+  await initEmbeddings();
+  const v2 = await generateQueryEmbedding(query);
+  if (v2.length !== stored.dims) {
+    throw new EmbeddingsUnavailableError(
+      `${cfg.model} returned ${v2.length}-dimension vectors, the index holds ${stored.dims}`
+    );
+  }
+  return v2;
+}
 function l2DistanceToCosineSimilarity(distance) {
   const similarity = 1 - distance * distance / 2;
   return Math.max(-1, Math.min(1, similarity));
@@ -30802,6 +31144,9 @@ function validateISODate(dateStr, paramName) {
 async function searchConversations(query, options = {}) {
   const { limit = 10, mode = "both", after, before } = options;
   const includeSidechains = options.include_sidechains !== false;
+  const perConversation = options.per_conversation !== false;
+  const pool = Math.max(limit * 5, FUSION_POOL_MIN);
+  const finish = (rows) => (perConversation ? bestPerConversation(rows) : rows).slice(0, limit);
   const sidechainClause = includeSidechains ? "" : "AND e.is_sidechain = 0";
   if (after) validateISODate(after, "--after");
   if (before) validateISODate(before, "--before");
@@ -30809,32 +31154,62 @@ async function searchConversations(query, options = {}) {
   let results = [];
   const { sql: filterClause, params: filterParams } = buildSearchFilters(options);
   if (mode === "vector" || mode === "both") {
-    await initEmbeddings();
-    const queryEmbedding = await generateQueryEmbedding(query);
-    const k2 = limit * 3;
-    const stmt = db.prepare(`
-      SELECT
-        ${EXCHANGE_SELECT_COLUMNS},
-        vec.distance
-      FROM vec_exchanges AS vec
-      JOIN exchanges AS e ON vec.id = e.id
-      WHERE vec.embedding MATCH ?
-        AND k = ?
-        ${sidechainClause}
-        ${filterClause}
-      ORDER BY (vec.distance + e.is_sidechain * ?) ASC
-    `);
-    results = stmt.all(
-      Buffer.from(new Float32Array(queryEmbedding).buffer),
-      k2,
-      ...filterParams,
-      SIDECHAIN_DISTANCE_PENALTY
-    );
-    if (results.length > limit) {
-      results = results.slice(0, limit);
+    try {
+      const queryEmbedding = await vectorQuery(db, query);
+      const k2 = Math.min(
+        pool * VECTOR_WINDOW_FETCH,
+        4096
+      );
+      const stmt = db.prepare(`
+        SELECT
+          ${EXCHANGE_SELECT_COLUMNS},
+          vec.distance
+        FROM vec_exchanges AS vec
+        JOIN exchanges AS e ON e.id = CASE WHEN instr(vec.id, '#') > 0
+                                          THEN substr(vec.id, 1, instr(vec.id, '#') - 1)
+                                          ELSE vec.id END
+        WHERE vec.embedding MATCH ?
+          AND k = ?
+          ${sidechainClause}
+          ${filterClause}
+        ORDER BY (vec.distance + e.is_sidechain * ?) ASC
+      `);
+      const seen = /* @__PURE__ */ new Set();
+      results = stmt.all(
+        Buffer.from(new Float32Array(queryEmbedding).buffer),
+        k2,
+        ...filterParams,
+        SIDECHAIN_DISTANCE_PENALTY
+      ).filter((r) => !seen.has(r.id) && seen.add(r.id));
+    } catch (error62) {
+      if (mode === "vector" || !(error62 instanceof EmbeddingsUnavailableError)) throw error62;
+      console.error(`episodic-memory: keyword ranking only \u2014 ${error62.message}`);
+      results = [];
+    }
+    if (mode === "vector") {
+      results = finish(results);
     }
   }
-  if (mode === "text" || mode === "both") {
+  if (mode === "both") {
+    const ftsQuery = buildFtsQuery(query);
+    let keywordRows = [];
+    if (ftsQuery) {
+      keywordRows = db.prepare(`
+        SELECT
+          ${EXCHANGE_SELECT_COLUMNS},
+          NULL AS distance
+        FROM exchanges_fts AS f
+        JOIN exchanges AS e ON e.rowid = f.rowid
+        WHERE exchanges_fts MATCH ?
+          ${sidechainClause}
+          ${filterClause}
+        ORDER BY bm25(exchanges_fts)
+        LIMIT ?
+      `).all(ftsQuery, ...filterParams, pool);
+    }
+    results = finish(fuseByRank([results, keywordRows], Infinity));
+  }
+  if (mode === "text") {
     const { sql: textMatchSql, params: textMatchParams } = buildTextMatchClause(query);
     const textStmt = db.prepare(`
       SELECT
@@ -30847,25 +31222,16 @@ async function searchConversations(query, options = {}) {
       ORDER BY e.is_sidechain ASC, e.timestamp DESC
       LIMIT ?
     `);
-    const textResults = textStmt.all(...textMatchParams, ...filterParams, limit);
-    if (mode === "both") {
-      const seenIds = new Set(results.map((r) => r.id));
-      for (const textResult of textResults) {
-        if (!seenIds.has(textResult.id)) {
-          results.push(textResult);
-        }
-      }
-    } else {
-      results = textResults;
-    }
+    results = finish(textStmt.all(...textMatchParams, ...filterParams, perConversation ? pool : limit));
   }
+  const lastLines = lastIndexedLines(db, results.map((row) => row.archive_path));
   db.close();
   return results.map((row) => {
     const exchange = exchangeFromRow(row);
     const summaryPath = row.archive_path.replace(".jsonl", "-summary.txt");
     let summary;
-    if (fs4.existsSync(summaryPath)) {
-      const raw = fs4.readFileSync(summaryPath, "utf-8");
+    if (fs5.existsSync(summaryPath)) {
+      const raw = fs5.readFileSync(summaryPath, "utf-8");
       if (!isErroredSentinel(raw)) {
         summary = raw.trim();
       }
@@ -30874,27 +31240,29 @@ async function searchConversations(query, options = {}) {
     const snippet = snippetText + (exchange.userMessage.length > 200 ? "..." : "");
     return {
       exchange,
-      similarity: mode === "text" ? void 0 : l2DistanceToCosineSimilarity(row.distance),
+      similarity: mode === "text" || row.distance == null ? void 0 : l2DistanceToCosineSimilarity(row.distance),
       snippet,
-      summary
+      summary,
+      lastLine: lastLines.get(row.archive_path)
     };
   });
 }
-async function countLines(filePath) {
-  try {
-    const fileStream = openTranscriptStream(filePath);
-    const rl = readline.createInterface({
-      input: fileStream,
-      crlfDelay: Infinity
-    });
-    let count = 0;
-    for await (const line of rl) {
-      if (line.trim()) count++;
-    }
-    return count;
-  } catch (error62) {
-    return 0;
+function lastIndexedLines(db, archivePaths) {
+  const unique = [...new Set(archivePaths)];
+  const out = /* @__PURE__ */ new Map();
+  if (unique.length === 0) return out;
+  const rows = db.prepare(
+    `SELECT archive_path, MAX(line_end) AS last_line FROM exchanges
+       WHERE archive_path IN (${unique.map(() => "?").join(", ")})
+       GROUP BY archive_path`
+  ).all(...unique);
+  for (const row of rows) {
+    if (row.last_line !== null) out.set(row.archive_path, row.last_line);
   }
+  return out;
+}
+function fileInfo(sizeKB, lastLine) {
+  return lastLine !== void 0 ? `${sizeKB}KB, ${lastLine} lines` : `${sizeKB}KB`;
 }
 function getFileSizeInKB(filePath) {
   try {
@@ -30937,9 +31305,8 @@ async function formatResults(results) {
 `;
     }
     const fileSizeKB = getFileSizeInKB(result.exchange.archivePath);
-    const totalLines = await countLines(result.exchange.archivePath);
     const lineRange = `${result.exchange.lineStart}-${result.exchange.lineEnd}`;
-    output2 += `   Lines ${lineRange} in ${result.exchange.archivePath} (${fileSizeKB}KB, ${totalLines} lines)
+    output2 += `   Lines ${lineRange} in ${result.exchange.archivePath} (${fileInfo(fileSizeKB, result.lastLine)})
 
 `;
   }
@@ -30977,7 +31344,8 @@ async function searchMultipleConcepts(concepts, options = {}) {
         exchange: firstResult.exchange,
         snippet: firstResult.snippet,
         conceptSimilarities,
-        averageSimilarity
+        averageSimilarity,
+        lastLine: firstResult.lastLine
       });
     }
   }
@@ -31012,9 +31380,8 @@ async function formatMultiConceptResults(results, concepts) {
 `;
     }
     const fileSizeKB = getFileSizeInKB(result.exchange.archivePath);
-    const totalLines = await countLines(result.exchange.archivePath);
     const lineRange = `${result.exchange.lineStart}-${result.exchange.lineEnd}`;
-    output2 += `   Lines ${lineRange} in ${result.exchange.archivePath} (${fileSizeKB}KB, ${totalLines} lines)
+    output2 += `   Lines ${lineRange} in ${result.exchange.archivePath} (${fileInfo(fileSizeKB, result.lastLine)})
 
 `;
   }

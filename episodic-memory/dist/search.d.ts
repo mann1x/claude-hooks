@@ -1,3 +1,4 @@
+import Database from 'better-sqlite3';
 import { SearchResult, MultiConceptResult } from './types.js';
 export interface SearchOptions {
     limit?: number;
@@ -8,7 +9,27 @@ export interface SearchOptions {
     session_id?: string;
     git_branch?: string;
     include_sidechains?: boolean;
+    per_conversation?: boolean;
 }
+/**
+ * The FTS5 query for a free-text search: every token as a quoted term, OR-ed,
+ * so BM25 ranks rows holding more (and rarer) terms first. Quoting makes
+ * operators and punctuation literal; the tokenizer splits `op-296` into the
+ * phrase "op 296". Null when the query has no token.
+ */
+export declare function buildFtsQuery(query: string): string | null;
+/**
+ * Keep each conversation's best-ranked row (rows arrive in rank order). A
+ * long session otherwise fills several of the top 10 with neighbouring
+ * exchanges of one piece of work.
+ */
+export declare function bestPerConversation<T extends {
+    archive_path: string;
+}>(rows: T[]): T[];
+/** Reciprocal rank fusion of ranked row lists (rows keyed by `id`). */
+export declare function fuseByRank<T extends {
+    id: string;
+}>(lists: T[][], limit: number): T[];
 /**
  * Escape LIKE wildcards so user input is treated as a literal substring.
  * Callers must use `ESCAPE '\\'` on the LIKE expression.
@@ -40,6 +61,13 @@ export declare function buildTextMatchClause(query: string): {
  */
 export declare function l2DistanceToCosineSimilarity(distance: number): number;
 export declare function searchConversations(query: string, options?: SearchOptions): Promise<SearchResult[]>;
+/**
+ * Each transcript's last indexed line, in one query over the index
+ * (`idx_archive_path`). Result formatting used to read every result's whole
+ * transcript to count its lines; one 6.4 GB live transcript made a search
+ * take ~97 s.
+ */
+export declare function lastIndexedLines(db: Database.Database, archivePaths: string[]): Map<string, number>;
 export declare function formatResults(results: Array<SearchResult & {
     summary?: string;
 }>): Promise<string>;

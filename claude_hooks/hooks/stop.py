@@ -175,18 +175,19 @@ def _with_task_nudge(result: Optional[dict], event: dict, config: dict,
 
 
 def _host_kept_quiet(event: dict, config: dict) -> bool:
-    """Another session keeps this host quiet (a performance measurement):
-    background work such as a reindex waits for a later turn."""
+    """Another session measures on this host (a quiet claim, or one
+    stated ``--perf``): background work such as a reindex waits for a
+    later turn."""
     try:
         from claude_hooks.resources import api
         from claude_hooks.resources.hook import enabled
         if not enabled(config):
             return False
-        holder = api.quiet_holder(session_id=event.get("session_id") or "")
+        holder = api.perf_holder(session_id=event.get("session_id") or "")
     except Exception:
         return False
     if holder is not None:
-        log.info("host kept quiet by %s (%s): background reindex skipped",
+        log.info("host measured on by %s (%s): background reindex skipped",
                  holder.owner, holder.reason)
     return holder is not None
 
@@ -209,7 +210,7 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     # it never adds latency to the hook itself.
     reindex_cfg = (config.get("hooks") or {}).get("claudemem_reindex") or {}
     if (
-        reindex_cfg.get("enabled", True)
+        reindex_cfg.get("enabled", False)
         and reindex_cfg.get("check_on_stop", True)
         and turn_modified
         and not _host_kept_quiet(event, config)

@@ -146,7 +146,10 @@ class TestPgvectorReconnects(unittest.TestCase):
         a dead-but-present connection was reused forever."""
         from unittest import mock
 
-        import psycopg
+        try:
+            import psycopg
+        except ImportError:
+            self.skipTest("psycopg is not installed")
 
         dead, fresh = _Conn(closed=True), _Conn()
         p = _pg(dead)
@@ -158,7 +161,10 @@ class TestPgvectorReconnects(unittest.TestCase):
     def test_healthy_connection_is_kept(self):
         from unittest import mock
 
-        import psycopg
+        try:
+            import psycopg
+        except ImportError:
+            self.skipTest("psycopg is not installed")
 
         alive = _Conn()
         p = _pg(alive)
@@ -192,7 +198,10 @@ class TestPgvectorCountIsHonest(unittest.TestCase):
         was None, skipping recovery in exactly the case needing it."""
         from unittest import mock
 
-        import psycopg
+        try:
+            import psycopg
+        except ImportError:
+            self.skipTest("psycopg is not installed")
 
         dead, fresh = _Conn(closed=True), _Conn()
         p = _pg(dead)

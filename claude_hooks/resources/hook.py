@@ -59,7 +59,8 @@ def _store():
 def _short(c) -> str:
     since = (c.granted_at or c.created_at)[11:16]
     why = f" ({c.reason})" if c.reason else ""
-    return f"{c.label()} — {c.owner} since {since} UTC{why}"
+    return (f"{c.label()} — {c.owner} since {since} UTC{why} "
+            f"[{model.perf_tag(c)}]")
 
 
 # ─── SessionStart ───────────────────────────────────────────────────────
@@ -68,7 +69,10 @@ HOWTO = ("Resources: before using a shared host, GPU, pod or the cloud "
          "account for real work, claim it — `resource-acquire` (MCP) or "
          "`claude-hooks-res acquire|wait|run` (shared / exclusive / quiet); "
          "a busy claim can be booked and waited for in the background. No "
-         "mail needed.")
+         "mail needed. Say whether timing matters: `perf: true` / `--perf` "
+         "for a measurement (others keep load off), `perf: false` / "
+         "`--no-perf` for a rebuild or long job (others may copy files or "
+         "do light work beside it); quiet is always a measurement.")
 
 
 def session_block(*, event: dict, config: Optional[dict] = None) -> str:
@@ -76,7 +80,13 @@ def session_block(*, event: dict, config: Optional[dict] = None) -> str:
         return ""
     sid = event.get("session_id") or ""
     try:
-        outs, _, _ = _store().status()
+        st = _store()
+        client = event.get("claude_client")
+        if sid and client:
+            # After /clear or resume the process's claims carry the
+            # session id it had before; they are this session's.
+            st.adopt(sid, int(client[0]), client[1])
+        outs, _, _ = st.status()
     except Exception as e:
         log.debug("resources: status failed", exc_info=True)
         return f"{HOWTO} (store unreachable: {type(e).__name__})"
@@ -137,11 +147,17 @@ def _is_claude_pid(pid: Optional[int]) -> bool:
         return True        # gone, or not Linux: the session's to release
 
 
+#: SessionEnd reasons after which the same Claude Code process goes on
+#: with a new session id; its claims go with it (adopted at SessionStart)
+#: and still end when the process does.
+CONTINUING_REASONS = frozenset({"clear", "resume"})
+
+
 def session_end(*, event: dict, config: Optional[dict] = None) -> int:
     if not enabled(config):
         return 0
     sid = event.get("session_id") or ""
-    if not sid:
+    if not sid or event.get("reason") in CONTINUING_REASONS:
         return 0
     try:
         st = _store()
@@ -214,6 +230,12 @@ def _touches(claim, named: Iterable[str], local_host: str) -> bool:
       every command another session runs on solidpc.
     """
     named = set(named)
+    if model.perf_of(claim) and not any(i.mode == model.QUIET
+                                        for i in claim.items):
+        # A measurement: load anywhere on its host can skew it.
+        roots = {model.root(n) for n in named} | {local_host}
+        if any(model.root(it.resource) in roots for it in claim.items):
+            return True
     for it in claim.items:
         if it.mode == model.QUIET:
             roots = {model.root(n) for n in named} | {local_host}
@@ -263,15 +285,36 @@ def pre_tool_note(*, event: dict, config: Optional[dict] = None
     lines = ["Resource note: this command reaches resources another session "
              "holds:"]
     for c in new:
-        kind = ("keeps the host QUIET" if any(i.mode == model.QUIET
-                                              for i in c.items)
-                else "holds it exclusively")
-        lines.append(f"- {_short(c)}: {kind}")
+        lines.append(f"- {_short(c)}: {_kind(c)}")
     specs = " ".join(sorted({i.resource for c in new for i in c.items}))
-    lines.append(f"If this is real work on them (not a read-only look), wait "
-                 f"for them instead — in the background: `claude-hooks-res "
-                 f"wait {specs} -r \"<why>\"`. (Said once per claim.)")
+    if all(model.perf_of(c) is False for c in new):
+        lines.append(f"None of them is a measurement: light work beside them "
+                     f"(copying files, network, a build) is fine. Real work "
+                     f"on those resources still waits — in the background: "
+                     f"`claude-hooks-res wait {specs} -r \"<why>\"`. (Said "
+                     f"once per claim.)")
+    else:
+        lines.append(f"If this is real work on them (not a read-only look), "
+                     f"wait for them instead — in the background: "
+                     f"`claude-hooks-res wait {specs} -r \"<why>\"`. (Said "
+                     f"once per claim.)")
     return "\n".join(lines)
+
+
+def _kind(c) -> str:
+    """How a claim stands in the way, and whether timing matters to it."""
+    if any(i.mode == model.QUIET for i in c.items):
+        return "keeps the host QUIET (a measurement: keep all load off)"
+    excl = any(i.mode == model.EXCLUSIVE for i in c.items)
+    perf = model.perf_of(c)
+    if perf:
+        return ("holds it exclusively for a measurement: keep load off the "
+                "host" if excl else "measures on it: keep load off the host")
+    if perf is False:
+        return ("holds it exclusively, not a measurement: light work beside "
+                "it is fine" if excl else "uses it, not a measurement")
+    return ("holds it exclusively (whether timing matters is not stated)"
+            if excl else "uses it (whether timing matters is not stated)")
 
 
 # ─── daemon ─────────────────────────────────────────────────────────────

@@ -79,17 +79,31 @@ def statements(dialect: str) -> list[str]:
 
 CLAIM_COLUMNS = ("seq", "id", "items", "state", "session_id", "alias", "host",
                  "pid", "pid_started", "reason", "cwd", "created_at",
-                 "granted_at", "renewed_at", "expires_at", "lease_s", "ttl_s")
-#: A table made before ``ttl_s`` existed (2026-10-24), read until the
-#: first locked write migrates it.
-LEGACY_CLAIM_COLUMNS = CLAIM_COLUMNS[:-1]
+                 "granted_at", "renewed_at", "expires_at", "lease_s", "ttl_s",
+                 "perf")
+#: Columns added after the table was first made, oldest first, with the
+#: statement that adds each. A table missing some is read with
+#: :func:`readable_columns` until the first locked write migrates it.
+ADDED_CLAIM_COLUMNS = (
+    # A queued claim's TTL starts at its grant: counted from the request, a
+    # claim queued behind a long job expired before it was ever held.
+    ("ttl_s", "ALTER TABLE resource_claims ADD COLUMN ttl_s INTEGER "
+              "NOT NULL DEFAULT 0"),
+    # Whether timing matters to the holder: 1 yes, 0 no, NULL not stated.
+    # opencoti held off copying a model over the network on 2026-11-27
+    # because a shared GPU claim for an index rebuild did not say it was
+    # not a measurement.
+    ("perf", "ALTER TABLE resource_claims ADD COLUMN perf INTEGER"),
+)
+#: A table made before ``ttl_s`` existed (2026-10-24).
+LEGACY_CLAIM_COLUMNS = CLAIM_COLUMNS[:-2]
+
+
+def readable_columns(present: set[str]) -> tuple[str, ...]:
+    """The claim columns a table that has ``present`` can be read with."""
+    return tuple(c for c in CLAIM_COLUMNS if c in present)
 
 
 def migrations(dialect: str, columns: set[str]) -> list[str]:
-    """Columns added after the table was first made. ``ttl_s`` lets a
-    queued claim's TTL start at its grant: counted from the request, a
-    claim queued behind a long job expired before it was ever held."""
-    if "ttl_s" in columns:
-        return []
-    return ["ALTER TABLE resource_claims ADD COLUMN ttl_s INTEGER "
-            "NOT NULL DEFAULT 0"]
+    """The statements adding every column this table is missing."""
+    return [stmt for name, stmt in ADDED_CLAIM_COLUMNS if name not in columns]

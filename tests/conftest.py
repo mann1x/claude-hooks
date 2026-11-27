@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -544,6 +545,37 @@ def _ollama_slots_off(monkeypatch):
     monkeypatch.setenv("CLAUDE_HOOKS_OLLAMA_SLOTS_DISABLE", "1")
 
 
+# The installer fetches the embedder composite (0.9-1.9 GB, a GitHub release
+# asset) whenever the default target is missing and its SHA is committed in
+# vendor/llamafile/dist/SHA256SUMS.composite. A test walking the dialog must
+# never start that download: on a host without the built composite (pandorum,
+# CI) it would. TestDownloadComposite tests the function itself, with
+# subprocess.run mocked.
+@pytest.fixture(autouse=True)
+def _no_host_gpu_probe(monkeypatch):
+    """The embedder's device listing fills PCI addresses from nvidia-smi and
+    sysfs; a test sees no host GPU unless it gives its own."""
+    from claude_hooks import llamafile_backend
+    monkeypatch.setattr(llamafile_backend, "cuda_pci", lambda **kw: {})
+    monkeypatch.setattr(llamafile_backend, "display_devices", lambda *a, **kw: [])
+
+
+@pytest.fixture(autouse=True)
+def _no_composite_download(request, monkeypatch):
+    install = sys.modules.get("install")
+    if install is None or not hasattr(install, "_download_composite_llamafile"):
+        return
+    if request.node.cls is not None and request.node.cls.__name__ == "TestDownloadComposite":
+        return
+    calls = []
+
+    def _refuse(target, *a, **kw):
+        calls.append(str(target))
+        return False
+
+    monkeypatch.setattr(install, "_download_composite_llamafile", _refuse)
+
+
 # The host's Ollama Cloud key (``ollama.api_key_file`` in the real
 # config/claude-hooks.json, or OLLAMA_API_KEY from a shell profile) must
 # never reach a test: a client built for https://ollama.com would carry it
@@ -566,10 +598,17 @@ def _no_ollama_cloud_key(monkeypatch):
 #
 # The session identity Claude Code exports (CLAUDE_CODE_SESSION_ID,
 # CLAUDE_PROJECT_DIR) is cleared too: a test run from a session shell would
-# otherwise bind the mailbox to that live session's id and project.
+# otherwise bind the mailbox to that live session's id and project. For the
+# same reason ~/.claude/sessions (each Claude Code process's live session) is
+# swapped for an empty folder. The session's inbox socket and token go as
+# well: the consultants engine posts there (attention_push), and a test must
+# never wake the live session that runs it.
 @pytest.fixture(autouse=True)
-def _interactive_session(monkeypatch):
+def _interactive_session(monkeypatch, tmp_path):
     for name in ("CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ATTENDED",
                  "CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID",
-                 "CLAUDE_PROJECT_DIR"):
+                 "CLAUDE_PROJECT_DIR", "CLAUDE_CODE_MESSAGING_SOCKET",
+                 "CLAUDE_CODE_MESSAGING_TOKEN"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CLAUDE_HOOKS_SESSIONS_DIR",
+                       str(tmp_path / "claude-sessions"))

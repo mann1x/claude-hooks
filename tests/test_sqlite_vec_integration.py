@@ -2,7 +2,10 @@
 Integration tests for the SQLite + sqlite-vec provider.
 
 Requires: pip install sqlite-vec
-Requires: Ollama running with nomic-embed-text model
+Requires: the claude-hooks embedder (llamafile, qwen3-embedding-0.6b) on
+127.0.0.1:38092 — the embedder every provider uses — or, with
+OLLAMA_EMBEDDINGS_URL set, an Ollama serving nomic-embed-text (CI hosts
+without the llamafile). Skips when neither answers; never spawns one.
 
 Skip with: pytest -k "not integration"
 """
@@ -18,12 +21,21 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 
-# Ollama embeddings URL. Override with OLLAMA_EMBEDDINGS_URL env var to
-# point at a remote Ollama (CI often runs one on a LAN host). Default
-# assumes a local Ollama on the stdlib port.
-OLLAMA_URL = os.environ.get(
-    "OLLAMA_EMBEDDINGS_URL", "http://localhost:11434/api/embeddings"
+# Default: the claude-hooks embedder (2026-11-27: the test used to embed
+# with nomic-embed-text on the host's Ollama, ~27 GPU calls per suite run).
+# OLLAMA_EMBEDDINGS_URL selects Ollama + nomic-embed-text instead.
+OLLAMA_URL = os.environ.get("OLLAMA_EMBEDDINGS_URL", "")
+LLAMAFILE_URL = os.environ.get(
+    "CLAUDE_HOOKS_TEST_EMBED_URL", "http://127.0.0.1:38092/embedding"
 )
+
+
+def _embedder_options() -> tuple[str, dict]:
+    if OLLAMA_URL:
+        return "ollama", {"url": OLLAMA_URL, "model": "nomic-embed-text",
+                          "timeout": 30.0}
+    return "llamafile", {"url": LLAMAFILE_URL, "model": "qwen3-embedding:0.6b",
+                         "timeout": 60.0, "daemon_ensure": False}
 
 
 def _skip_if_no_deps():
@@ -31,24 +43,17 @@ def _skip_if_no_deps():
         import sqlite_vec  # noqa: F401
     except ImportError:
         raise unittest.SkipTest("sqlite-vec not installed")
-    # Check that Ollama is reachable with the embedding model.
-    import urllib.request
-    import json
+    # Check that the embedder answers (one real embed).
+    from claude_hooks.embedders import make_embedder
 
+    name, opts = _embedder_options()
     try:
-        body = json.dumps({"model": "nomic-embed-text", "prompt": "test"}).encode()
-        req = urllib.request.Request(
-            OLLAMA_URL,
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read())
-            if "embedding" not in data:
-                raise unittest.SkipTest("Ollama nomic-embed-text not available")
+        if not make_embedder(name, opts).embed("test"):
+            raise unittest.SkipTest(f"{name} embedder returned no vector")
+    except unittest.SkipTest:
+        raise
     except Exception as e:
-        raise unittest.SkipTest(f"Ollama not reachable at {OLLAMA_URL}: {e}")
+        raise unittest.SkipTest(f"{name} embedder not reachable at {opts['url']}: {e}")
 
 
 class TestSqliteVecIntegration(unittest.TestCase):
@@ -82,15 +87,8 @@ class TestSqliteVecIntegration(unittest.TestCase):
             source="test",
             confidence="high",
         )
-        options = {
-            "table": table,
-            "embedder": "ollama",
-            "embedder_options": {
-                "url": OLLAMA_URL,
-                "model": "nomic-embed-text",
-                "timeout": 30.0,
-            },
-        }
+        name, opts = _embedder_options()
+        options = {"table": table, "embedder": name, "embedder_options": opts}
         return SqliteVecProvider(server, options)
 
     def _seed(self, table: str):

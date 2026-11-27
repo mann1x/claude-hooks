@@ -44,6 +44,11 @@ DEFAULTS = {
     "stop_nudge": True,
     "mirror_builtin": True,
     "session_ready": 5,
+    # Linked worktrees, by directory name, whose task tools change
+    # nothing even on a branch (a detached one never does).
+    "read_only_worktrees": [],
+    # Closing a task mails the session of each other project it unblocks.
+    "unblock_mail": True,
 }
 
 _MENTION = re.compile(r"(?<![\w-])([a-z][a-z0-9]{0,7})-(\d{1,6})(?![\w-])",
@@ -58,11 +63,14 @@ def settings(config: dict) -> dict:
 
 
 def _service(event: dict, config: dict, providers, *, embed: bool = False):
-    from claude_hooks.tasks import service_for, sql_provider
+    from claude_hooks.tasks import (
+        read_only_worktree_globs, service_for, sql_provider,
+    )
     root = os.environ.get("CLAUDE_PROJECT_DIR") or event.get("cwd") or None
     svc = service_for(sql_provider(providers), cwd=root,
                       session_id=str(event.get("session_id") or ""),
-                      embed=embed)
+                      embed=embed,
+                      read_only_worktrees=read_only_worktree_globs(config))
     svc.embed_on_write = False
     return svc
 
@@ -81,11 +89,38 @@ def session_block(*, event: dict, config: dict, providers) -> str:
                     "For work that outlives this turn, `task-create` starts "
                     "one (files under `.claude-hooks/tasks/`, kept across "
                     "compaction and sessions).")
+        opened = _check_cheap_gates(svc, providers)
         board = svc.board()
-        return render_session(board, svc.project, int(s["session_ready"]))
+        text = render_session(board, svc.project, int(s["session_ready"]))
+        if opened:
+            text += "\nGates opened since last time: " + "; ".join(opened)
+        return text
     except Exception:
         log.warning("tasks: session block failed", exc_info=True)
         return ""
+
+
+def _check_cheap_gates(svc, providers) -> list[str]:
+    """Mail, timer and commit gates, checked at session start (GitHub
+    ones only on request); returns ``"<id> <gate>: <why>"`` per gate that
+    opened. Soft-fails to nothing."""
+    try:
+        if not any((t.links.get("gates") for t, tf, _ in
+                    svc.dir.iter_tasks() if not tf.archived)):
+            return []
+        mail_store = None
+        try:
+            from claude_hooks.mailbox.integration import store_for_provider
+            from claude_hooks.tasks import sql_provider
+            prov = sql_provider(providers)
+            mail_store = store_for_provider(prov) if prov else None
+        except Exception:
+            log.info("tasks: no mailbox for gates", exc_info=True)
+        res = svc.check_gates(cheap_only=True, mail_store=mail_store)
+        return [f"{t} {g}: {v.why}" for t, g, v in res if v.resolved]
+    except Exception:
+        log.info("tasks: gate check failed", exc_info=True)
+        return []
 
 
 def render_session(board: dict, project: str, ready_n: int = 5) -> str:

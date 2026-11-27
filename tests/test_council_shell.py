@@ -218,6 +218,7 @@ class TestProvider:
         assert out.startswith("error: no sandbox on this host")
         assert "netns" in out
 
+    @pytest.mark.skipif(os.name == "nt", reason="the council shell is Linux-only (plan E7)")
     def test_a_run_is_scoped_to_the_lane_and_logged(self, tmp_path):
         be = _FakeBackend()
         p = ShellToolProvider(sid="csl-t", backend=be,

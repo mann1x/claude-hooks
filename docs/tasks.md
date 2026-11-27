@@ -57,6 +57,143 @@ from before the move is read once and removed where that is allowed.
   - Set your own with `claude-hooks-tasks init --prefix xx` before the
     first task.
 
+## Worktrees and clones: one checkout indexes a project
+
+Index rows are keyed on the project name, which every checkout of a
+repository shares, so exactly one checkout writes them. Without that, a
+session in an older release worktree rewrote the rows with that branch's
+copies and deleted every row whose file the branch lacked (`reconcile()`
+lets the files win), and a worktree could hand out a number the main
+checkout had already given out.
+
+| checkout | reads | writes the index | create / done / cancel | edit an existing task |
+|---|---|---|---|---|
+| main worktree (or no git) | its folder | yes, if it owns the project | yes | yes |
+| linked worktree on a branch (**worker**) | its folder | never | refused, naming the main checkout | yes, in its own file (the change travels on its branch) |
+| detached linked worktree, or named by `read_only_worktrees` (**read-only**) | the main checkout's folder | never | refused | refused |
+
+- The kind is read from git's own files (`.git` → `gitdir:` →
+  `commondir`), no `git` subprocess: `checkout_of()` in
+  `claude_hooks/tasks/files.py`. A submodule or a bare repository's
+  worktree has no main checkout and counts as main.
+- A linked worktree with no task folder of its own is a mirror too:
+  creating there used to start a new project named after the worktree.
+  One whose own folder names a different project is its own main.
+- `hooks.tasks.read_only_worktrees` (directory-name globs, default `[]`)
+  makes branch worktrees read-only, e.g. `["opencoti-rel-*"]`, whose
+  release checkouts are partly on `release/*` branches.
+- **Ownership.** `task_projects` names the owner `(root, host)`. Another
+  root never takes the rows, another host's clone included; it works on
+  its files and leaves the index alone (logged once). The rows move only
+  when the registered root is on this host and is gone, or is a worktree
+  of this checkout, or with `claude-hooks-tasks adopt`, which rewrites
+  every row.
+- **Id floor.** A new id is above the local folder and the index's highest
+  number for the project, so a clone behind the owner never reuses a
+  number it has not pulled yet.
+- `claude-hooks-tasks where` prints the checkout's kind, which folder it
+  reads, who indexes the project and whether this checkout writes.
+
+## The graph: dependencies and links across projects
+
+Every project on a host indexes into the same store, and prefixes are
+unique there, so a task id names one task everywhere: `op-347` is
+opencoti's task 347 from any project.
+
+- **`depends` takes any project's ids.** This project's must exist.
+  Another project's must resolve through the index: an unknown prefix or
+  an unknown task is refused (typo guard). When the index cannot be read
+  the id is kept and blocks until it resolves.
+- **Unresolved is blocking, never done.** A dependency counts as met only
+  when it resolves to a `done` or `cancelled` task; `task-ready` marks an
+  unresolved one with `?` (`after op-347?`).
+- **Cycles are refused** on every write, across projects:
+  `that would close a cycle: op-1 → ch-1 → op-1`.
+- **Blocking counts reach across projects**: a task another project waits
+  for ranks higher in its own project's `task-ready`.
+- **Typed links** (`task-link <id> <kind> <task id>`), stored in `links`;
+  only `depends` blocks:
+
+  | kind | meaning | also |
+  |---|---|---|
+  | `parent` | the epic it belongs to | one value; a loop is refused |
+  | `discovered-from` | found while working on that task | |
+  | `related` | see also | shown from both sides |
+  | `caused-by` | root cause | |
+  | `supersedes` | replaces that task | closes it when it is in this project |
+  | `duplicate-of` | same as that task | closes this one |
+
+- **A task only writes its own project's files.** A link into another
+  project is stored on our side; `task-show` computes the other side
+  (dependents, children, related, led to, caused, superseded by,
+  duplicated by) from the index and lists it under `## Graph`.
+- Cross-project answers are as fresh as the other project's last
+  reconcile, which every task tool call and session start runs.
+
+### Gates: waiting on something outside the task list
+
+A task can wait on more than other tasks. `task-gate <id> add <gate>`
+(CLI: `claude-hooks-tasks gate <id> add <gate>`) adds one; it blocks like
+an open dependency until it opens, then it is removed and the log says
+why.
+
+| gate | opens when | checked |
+|---|---|---|
+| `mail:<id>` | the mail is answered: acked with a note, or a reply from its recipient naming `#<id>` | session start, `check` |
+| `human:<what>` | someone resolves it: `task-gate <id> resolve human:<what>` | by hand |
+| `timer:<ISO time>` | the time has passed | session start, `check` |
+| `commit:<sha>@<branch>` | the branch contains the commit (`git merge-base --is-ancestor`) | session start, `check` |
+| `gh-pr:<owner/repo>#<n>` | the pull request is merged | `check` only |
+| `gh-run:<owner/repo>#<id>` | the workflow run succeeded | `check` only |
+
+`task-gate` with `action: check` (CLI `claude-hooks-tasks gates`) checks
+every open gate of the project, GitHub included, and records what opened.
+A gate that will never open by itself (a PR closed unmerged, a failed
+run, cancelled mail) is logged once and stays, for a person to resolve or
+remove. Gates live in the task's `links` under `gates`, so older code
+keeps them. A read-only checkout reports but records nothing.
+
+### Views: layers, blocked, Mermaid
+
+`task-graph` (CLI `claude-hooks-tasks graph [id] [--up|--down] [--all]
+[--mermaid]`) prints the graph in layers: layer 0 can start now, a layer
+waits only on the ones above it, and the tasks of one layer can run in
+parallel. Without an id it shows this project's open work with what it
+waits for in other projects; with one, what that task waits for
+(`down`), what waits for it (`up`) or both; `all` takes every project on
+the host. A dependency left out of the drawing that is still open keeps
+its dependent out of layer 0. `format: mermaid` draws a flowchart grouped
+by project. `view: blocked` (CLI `claude-hooks-tasks blocked`) lists every
+blocked task with each dependency and gate that holds it.
+
+### Claims and defer
+
+- `task-start` from a session claims the task (`claimed_by: alias@host`
+  in its file). Another session starting it is refused while the holder's
+  session is live in the mailbox registry; `force: true` takes it over
+  (logged). Closing clears the claim. The CLI starts without claiming.
+- `task-update defer=YYYY-MM-DD` hides a task, and every task whose
+  `parent` it is, from `task-ready` until the date (a `Deferred` section);
+  an empty value clears it. An active task is never deferred.
+- `claimed_by` and `defer` ride the index row inside its `links` JSON
+  (`_claimed_by`, `_defer`) rather than as new columns: other hosts' older
+  code writes that table with a fixed column list.
+
+### Closing a task tells the projects it unblocks
+
+`task-done` / `task-cancel` end with `Ready now: …`: every open task, in
+any project, whose last open dependency was the one closed (worked out
+from the graph before the close). For each other project the closing
+session mails the session working there — the live registration whose
+working directory is that project's indexed checkout on its host, the
+most recently seen first — and the send's reply carries the doorbell
+line, so an idle terminal hears of it now. A cancelled dependency is
+said to be cancelled, not done. No session registered there: the reply
+says so, and the project sees the task ready in its own `task-ready`.
+Nothing is written into the other project. The mail goes out from the
+MCP tools (the memory servers hand the task tools the session's mailbox);
+the CLI only lists. `hooks.tasks.unblock_mail: false` turns the mail off.
+
 ## The task file
 
 ```markdown
@@ -105,7 +242,9 @@ What and why, kept current.
 | `task-start` / `task-done` / `task-wait` / `task-cancel` | status change, with an optional log note |
 | `task-note` | append a log line |
 | `task-update` | change fields; `check` / `uncheck` tick acceptance items by number |
-| `task-link` | attach a commit, file, mail, consultancy, plan, url or task |
+| `task-graph` | layers of the dependency graph (one task up / down, this project, or all), Mermaid, or every blocked task with its blockers |
+| `task-gate` | add / resolve / remove a gate, or check them (mail, human, timer, commit, gh-pr, gh-run) |
+| `task-link` | attach a commit, file, mail, consultancy, plan, url or task; or a graph link to any project's task (`parent`, `discovered-from`, `related`, `caused-by`, `supersedes`, `duplicate-of`) |
 
 Writes return immediately; a background thread embeds what changed.
 
@@ -131,9 +270,13 @@ claude-hooks-tasks show bm-42
 claude-hooks-tasks add "title" -p H --area R9 --depends bm-41 --accept "a" "b"
 claude-hooks-tasks start|done|wait|cancel bm-42 -m "note"
 claude-hooks-tasks note bm-42 "text"
+claude-hooks-tasks update bm-42 --add-depends op-296 -p H --defer 2026-12-01 --check 1 -m "why"
 claude-hooks-tasks link bm-42 commit 2f01f52
+claude-hooks-tasks link bm-42 parent bm-40     # graph links take any project's id
 claude-hooks-tasks init [--prefix xx]
 claude-hooks-tasks reindex                     # files → index, then embed what is missing
+claude-hooks-tasks where                       # checkout kind, who indexes the project
+claude-hooks-tasks adopt                       # index the project from this checkout
 claude-hooks-tasks board                       # regenerate TASKS.md
 claude-hooks-tasks import --transcript <session.jsonl> [--dry-run]
 ```
