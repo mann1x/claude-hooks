@@ -87,6 +87,7 @@ class _Stub:
 
 
 def test_the_retry_graph_runs_only_the_failed_lanes(tmp_path):
+    pytest.importorskip("langgraph.graph")  # the graph needs the consultants env
     from consultants.engine.graph import GraphDeps, build_follow_up_graph
     clients = {"researcher": _Stub("RETRIED FINDING"),
                "synthesizer": _Stub("NEW ANSWER")}

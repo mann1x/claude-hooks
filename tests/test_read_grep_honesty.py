@@ -46,6 +46,24 @@ def _grep(tmp_path, **args):
     return tools.execute("grep", json.dumps(args), str(tmp_path))
 
 
+class _TickingClock:
+    """A clock that moves on every read. Windows' monotonic() ticks every
+    ~15.6 ms, so with a 0 s budget a small walk finished before the
+    deadline could pass and the budget tests failed there."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        self.now += 1.0
+        return self.now
+
+
+def _zero_budget(monkeypatch):
+    monkeypatch.setattr(tools, "_WALK_BUDGET_S", 0.0)
+    monkeypatch.setattr(tools, "time", _TickingClock())   # the module's own name, not time itself
+
+
 def test_grep_context_lines(tmp_path):
     (tmp_path / "a.py").write_text("\n".join(
         ["one", "two", "HIT three", "four", "five", "six", "seven",
@@ -95,7 +113,7 @@ def _grep(tmp_path, **args):
 def test_grep_stops_at_the_time_budget_and_says_where(tmp_path, monkeypatch):
     (tmp_path / "a").mkdir()
     (tmp_path / "a" / "f.txt").write_text("needle\n")
-    monkeypatch.setattr(tools, "_WALK_BUDGET_S", 0.0)
+    _zero_budget(monkeypatch)
     out = _grep(tmp_path, pattern="needle")
     assert "search stopped after 0 s" in out and "pass a narrower `path`" in out
     assert out.startswith("(no matches for /needle/ in the part of . searched)")
@@ -114,6 +132,6 @@ def test_grep_skips_binary_files(tmp_path):
 
 def test_glob_stops_at_the_time_budget(tmp_path, monkeypatch):
     (tmp_path / "a.py").write_text("")
-    monkeypatch.setattr(tools, "_WALK_BUDGET_S", 0.0)
+    _zero_budget(monkeypatch)
     out = tools.execute("glob", json.dumps({"pattern": "*.py"}), str(tmp_path))
     assert "search stopped after 0 s" in out

@@ -149,6 +149,7 @@ def _synth_prompt(stub):
 
 
 def test_a_wrap_up_during_research_goes_straight_to_a_partial_answer(tmp_path):
+    pytest.importorskip("langgraph.graph")  # the graph needs the consultants env
     rc = RunControl("csl-w")
     clients = {"planner": _Stub("1. look at a\n2. look at b\n3. look at c"),
                "researcher": _Stub("findings", on_call=rc.request_wrap_up),
@@ -162,6 +163,7 @@ def test_a_wrap_up_during_research_goes_straight_to_a_partial_answer(tmp_path):
 
 
 def test_a_wrap_up_before_anything_ran_still_answers(tmp_path):
+    pytest.importorskip("langgraph.graph")  # the graph needs the consultants env
     rc = RunControl("csl-w")
     rc.request_wrap_up()
     clients = {"planner": _Stub("1. a\n2. b\n3. c"),
@@ -177,6 +179,7 @@ def test_a_wrap_up_before_anything_ran_still_answers(tmp_path):
 
 
 def test_without_a_wrap_up_the_graph_is_unchanged(tmp_path):
+    pytest.importorskip("langgraph.graph")  # the graph needs the consultants env
     rc = RunControl("csl-w")
     clients = {"planner": _Stub("1. a\n2. b\n3. c"),
                "researcher": _Stub("findings"),
@@ -233,6 +236,7 @@ def test_route_and_cli_verb(tmp_path):
 
 
 def test_a_critic_asking_for_more_research_is_overruled_by_a_wrap_up(tmp_path):
+    pytest.importorskip("langgraph.graph")  # the graph needs the consultants env
     rc = RunControl("csl-w")
     clients = {"planner": _Stub("1. a\n2. b\n3. c"),
                "researcher": _Stub("findings"),
@@ -253,6 +257,7 @@ def test_a_cancel_during_a_critic_asking_for_more_research_drains(tmp_path):
     critic left the critic's last verdict standing, and the run went round
     them until LangGraph's recursion limit — "graph crashed", not
     "cancelled"."""
+    pytest.importorskip("langgraph.graph")  # the graph needs the consultants env
     rc = RunControl("csl-c")
     clients = {"planner": _Stub("1. a\n2. b\n3. c"),
                "researcher": _Stub("findings"),

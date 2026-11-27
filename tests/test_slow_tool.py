@@ -18,7 +18,10 @@ def _call(name="grep", args='{"pattern": "x"}'):
 
 
 def test_a_slow_tool_is_reported(monkeypatch):
-    monkeypatch.setattr(runner, "SLOW_TOOL_NOTICE_S", (0.05,))
+    # 0.15 s, not 0.05: elapsed_s is rounded to 0.1 s, and on Windows
+    # Event.wait() can wake a timer tick (~15 ms) early, so a 0.05 s notice
+    # read 0.045 s and reported 0.0.
+    monkeypatch.setattr(runner, "SLOW_TOOL_NOTICE_S", (0.15,))
     events: list[dict] = []
 
     def slow(name, args, cwd):
@@ -30,7 +33,7 @@ def test_a_slow_tool_is_reported(monkeypatch):
     assert len(events) == 1
     ev = events[0]
     assert ev["kind"] == "slow_tool" and ev["tool"] == "grep"
-    assert ev["args"] == '{"pattern": "x"}' and ev["elapsed_s"] >= 0.05
+    assert ev["args"] == '{"pattern": "x"}' and ev["elapsed_s"] >= 0.1
 
 
 def test_a_fast_tool_is_not(monkeypatch):

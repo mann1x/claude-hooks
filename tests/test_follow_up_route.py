@@ -84,6 +84,7 @@ def _state(tmp_path):
 
 
 def test_a_synthesize_route_skips_the_researcher(tmp_path):
+    pytest.importorskip("langgraph.graph")  # the graph needs the consultants env
     synth = _Seq('{"route": "synthesize"}', "ONE LINE: cap 3.")
     deps = _deps(tmp_path, route=True, synth=synth)
     out = build_follow_up_graph(deps).invoke(_state(tmp_path))
@@ -93,6 +94,7 @@ def test_a_synthesize_route_skips_the_researcher(tmp_path):
 
 
 def test_a_research_route_runs_as_before(tmp_path):
+    pytest.importorskip("langgraph.graph")  # the graph needs the consultants env
     synth = _Seq('{"route": "research"}', "ANSWER")
     deps = _deps(tmp_path, route=True, synth=synth)
     build_follow_up_graph(deps).invoke(_state(tmp_path))
@@ -100,6 +102,7 @@ def test_a_research_route_runs_as_before(tmp_path):
 
 
 def test_off_the_graph_has_no_route_node(tmp_path):
+    pytest.importorskip("langgraph.graph")  # the graph needs the consultants env
     g = build_follow_up_graph(_deps(tmp_path, route=False, synth=_Seq("A")))
     assert FOLLOW_UP_ROUTE_NODE not in g.get_graph().nodes
     g = build_follow_up_graph(_deps(tmp_path, route=True, synth=_Seq("A")))
