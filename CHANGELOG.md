@@ -124,6 +124,46 @@ release with the auto-generated source archive
   `python scripts/episodic_doctor.py --rebuild-embeddings http://127.0.0.1:11434`
   (about 2 h for 72k exchanges; refuses when the two servers' vectors
   differ, cosine < 0.995). Eval: `benchmarks/episodic/`.
+- **A fifth of past conversations, the biggest ones among them, were never
+  in episodic search.** 17,838 exchanges in 4,450 archived conversations had
+  never been indexed — the largest session of most projects, and the one
+  where most of claude-hooks' work since September happened. Two causes.
+  Sync dropped a whole transcript when an exclusion marker appeared
+  anywhere in it, so a session that once read episodic-memory's own source
+  (the markers sit in `sync.ts`) or began with one summarizer turn was never
+  indexed again; a marker now counts only in text a user wrote, and the
+  summarizer's marker drops just its own exchange. And sync indexed only
+  the files it copied in the same run, while the archive copy keeps the
+  source's mtime: a file copied during the 26-day outage, or skipped, counted
+  as current forever. Such files now go on a list (`index_pending`) that every
+  sync works through, `EPISODIC_MEMORY_INDEX_BATCH` exchanges at a time
+  (500); the first sync lists the whole archive once, and
+  `episodic_doctor.py --rebuild-embeddings <GPU URL>` drains it at once (36
+  min here; `verify_deploy` WARNs while anything is owed).
+- **Episodic search leaves out `claude -p` runs and shows each conversation
+  once.** Transcripts of spawned runs (Caliber, OpenWolf, skill generators,
+  workflow agents: 5,193 conversations) were indexed and quoted the
+  project's own docs back as hits; they are now neither indexed nor
+  summarized, and the first sync removes those already in the index
+  (`EPISODIC_MEMORY_INDEX_SPAWNED=1` keeps them). A long session no longer
+  fills several of the top 10: results are one per conversation, its best
+  exchange. With the catch-up, judged on the same queries: P@10 0.41 → 0.53,
+  nDCG@10 0.38 → 0.55, exact@10 0.61 → 0.82, MRR 0.68 → 0.95 against the
+  fused bge search, and 0.26 / 0.24 / 0.36 / 0.52 before any of this.
+- **A council researcher's `grep` could run for hours with no sign of
+  life.** The tool walked the whole project tree in the lane's own thread
+  with no time limit; in a 1.26M-file tree two lanes grepped for over an
+  hour, the stall monitor (which watches model calls) saw nothing, and
+  wrap-up waited for the tool (csl-2026-11-27-0507-da28). `grep` and `glob`
+  now stop after 30 s and say where and how to narrow the search, `grep`
+  skips binary files, and any tool call still running after 60 s, 10 min
+  and 1 h is logged and recorded as a `slow_tool` guard event. And a lane
+  no longer has to wait for a tool at all: on wrap-up or cancel it leaves
+  the running call within a second (answered as stopped, the rest of the
+  batch unrun), where an engine restart used to be the only way out; grep
+  and glob notice and quit. Caliber and `/get-advice` run tools as before.
+  `claude-consultants events --no-follow` prints a running council's events
+  so far and exits.
 - **An episodic search took up to 4 minutes and blocked the server.**
   Formatting each result read its whole transcript to print a line count;
   one 6.4 GB live transcript cost ~97 s per search (the model itself loads

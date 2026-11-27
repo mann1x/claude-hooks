@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 import logging
+import contextvars
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -665,6 +667,90 @@ class ToolGuards:
         return output
 
 
+#: Seconds into one tool call at which it is reported as slow: the engine
+#: log gets a warning and ``on_slow`` an event (``kind="slow_tool"``). A
+#: tool runs in the loop's thread and nothing can interrupt it, so the
+#: report is what keeps a long call from looking like a dead lane (two
+#: researcher greps ran for over an hour with no event, csl-2026-11-27-0507-da28).
+SLOW_TOOL_NOTICE_S = (60.0, 600.0, 3600.0)
+
+
+def _slow_tool_watch(name: str, args_str: str,
+                     on_slow: Optional[Callable[[dict], None]]):
+    """Start the slow-call notices for one tool call; returns a stop function."""
+    stop = threading.Event()
+    t0 = time.monotonic()
+
+    def _watch() -> None:
+        for at in SLOW_TOOL_NOTICE_S:
+            if stop.wait(max(0.0, at - (time.monotonic() - t0))):
+                return
+            event = {"kind": "slow_tool", "tool": name, "args": args_str[:300],
+                     "elapsed_s": round(time.monotonic() - t0, 1)}
+            log.warning("tool %s(%s) still running after %.0f s",
+                        name, args_str[:120], event["elapsed_s"])
+            if on_slow is not None:
+                try:
+                    on_slow(event)
+                except Exception:
+                    log.exception("on_slow callback raised; ignored")
+
+    threading.Thread(target=_watch, name=f"slow-tool-{name}", daemon=True).start()
+    return stop.set
+
+
+#: How often a lane waiting on a stoppable tool call checks its stop signal.
+TOOL_STOP_POLL_S = 1.0
+
+#: The answer to a tool call the lane stopped waiting for.
+TOOL_STOPPED_ANSWER = (
+    "[SYSTEM MESSAGE] This call was stopped before it finished: the run is "
+    "wrapping up or was cancelled. Do not call more tools; answer from what "
+    "you already have.")
+
+
+def _run_stoppable(tool_executor: "ToolExecutor", name: str, args_str: str,
+                   cwd: str, stop_check: Callable[[], bool]):
+    """Run one tool call in a worker thread, giving up when ``stop_check``
+    turns true. Returns ``(output, exc, stopped)``.
+
+    A tool runs in the lane's thread and nothing can interrupt it: two
+    researcher greps held a council for over an hour and its wrap-up could
+    only wait (csl-2026-11-27-0507-da28). Here the lane waits in steps of
+    ``TOOL_STOP_POLL_S`` and, on a stop, flags the worker (``tool_stop``,
+    which the walking tools check) and moves on without it."""
+    from claude_hooks import tool_stop
+
+    halt = threading.Event()
+    done = threading.Event()
+    box: dict = {}
+
+    def _work() -> None:
+        tool_stop.bind(halt)
+        try:
+            box["out"] = tool_executor(name, args_str, cwd)
+        except BaseException as exc:  # handed back to the lane's thread
+            box["exc"] = exc
+        finally:
+            done.set()
+
+    ctx = contextvars.copy_context()
+    threading.Thread(target=ctx.run, args=(_work,), name=f"tool-{name}",
+                     daemon=True).start()
+    while not done.wait(TOOL_STOP_POLL_S):
+        try:
+            stopping = bool(stop_check())
+        except Exception:
+            log.exception("tool stop_check raised; waiting on")
+            stopping = False
+        if stopping:
+            halt.set()
+            log.warning("tool %s(%s) stopped: the run is wrapping up or cancelled",
+                        name, args_str[:120])
+            return None, None, True
+    return box.get("out"), box.get("exc"), False
+
+
 def execute_tool_calls(tool_calls: list[dict], cwd: str,
                        seen: dict[str, str],
                        tool_executor: ToolExecutor,
@@ -672,7 +758,9 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
                        on_tool: Optional[OnTool] = None,
                        repeats: Optional[dict[str, int]] = None,
                        guards: Optional["ToolGuards"] = None,
-                       cut_off: bool = False) -> list[dict]:
+                       cut_off: bool = False,
+                       on_slow: Optional[Callable[[dict], None]] = None,
+                       stop_check: Optional[Callable[[], bool]] = None) -> list[dict]:
     """Run each tool and return ``role: tool`` messages.
 
     Duplicate (name+args) calls within a single agent loop return a
@@ -701,6 +789,7 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
     written wrong, it was not finished.
     """
     results: list[dict] = []
+    stopped = False
     for tc in tool_calls:
         tc_id = tc.get("id") or ""
         fn = tc.get("function") or {}
@@ -710,6 +799,16 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
             args_str = json.dumps(args_str)
         key = dedup_key(name, args_str)
         err: Optional[str] = None
+        # Stopped: the rest of the batch is answered, never run.
+        if stopped:
+            if on_tool is not None:
+                try:
+                    on_tool(name, args_str, TOOL_STOPPED_ANSWER, 0, "stopped")
+                except Exception:
+                    log.exception("on_tool callback raised; ignored")
+            results.append({"role": "tool", "tool_call_id": tc_id,
+                            "name": name, "content": TOOL_STOPPED_ANSWER})
+            continue
         verdict = (guards.tracker.inspect(name, args_str) if guards is not None
                    else loop_detection.OK)
         if verdict.kind == "hard":
@@ -743,9 +842,28 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
                      "chars); not run", name, len(args_str))
         else:
             t0 = time.monotonic()
+            stop_watch = _slow_tool_watch(name, args_str, on_slow)
             try:
-                output = tool_executor(name, args_str, cwd)
+                if stop_check is None:
+                    output = tool_executor(name, args_str, cwd)
+                else:
+                    output, exc, stopped = _run_stoppable(
+                        tool_executor, name, args_str, cwd, stop_check)
+                    if exc is not None:
+                        raise exc
+                    if stopped:
+                        stop_watch()
+                        dt_ms = int((time.monotonic() - t0) * 1000)
+                        if on_tool is not None:
+                            try:
+                                on_tool(name, args_str, TOOL_STOPPED_ANSWER, dt_ms, "stopped")
+                            except Exception:
+                                log.exception("on_tool callback raised; ignored")
+                        results.append({"role": "tool", "tool_call_id": tc_id,
+                                        "name": name, "content": TOOL_STOPPED_ANSWER})
+                        continue
             except Exception as exc:  # surface to recorder; re-raise
+                stop_watch()
                 dt_ms = int((time.monotonic() - t0) * 1000)
                 err = f"{type(exc).__name__}: {exc}"
                 if on_tool is not None:
@@ -754,6 +872,7 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
                     except Exception:
                         log.exception("on_tool callback raised; ignored")
                 raise
+            stop_watch()
             dt_ms = int((time.monotonic() - t0) * 1000)
             log.info(
                 "tool %s(%s) -> %d chars in %d ms",
@@ -1534,6 +1653,8 @@ def run_loop(
             on_tool=on_tool, repeats=repeats, guards=guards,
             cut_off=(choice.get("done_reason") or final.get("done_reason")
                      or finish_reason) == "length",
+            on_slow=lambda event: _emit_guard(config, event),
+            stop_check=getattr(config, "wrap_up_check", None),
         )
         payload["messages"].extend(batch)
         for tc in results_called:

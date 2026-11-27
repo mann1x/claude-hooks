@@ -2098,6 +2098,11 @@ def cmd_tool_ack(args, base: str) -> int:
     return 0
 
 
+#: ``events --no-follow``: the stream has replayed what happened once it has
+#: been quiet this long (a running council otherwise holds it open to the end).
+EVENTS_IDLE_EXIT_S = 3.0
+
+
 def cmd_events(args, base: str) -> int:
     """GET /v1/consult/<sid>/events — SSE stream over runtime_events.
 
@@ -2121,9 +2126,12 @@ def cmd_events(args, base: str) -> int:
         headers["Last-Event-ID"] = str(int(args.since))
     url = f"{base}/v1/consult/{args.sid}/events"
     req = urllib.request.Request(url, headers=headers, method="GET")
+    follow = not getattr(args, "no_follow", False)
     try:
-        # Long timeout — SSE connections are long-lived by design.
-        resp = urllib.request.urlopen(req, timeout=86400.0)
+        # Long timeout — SSE connections are long-lived by design. Without
+        # --follow a read that waits EVENTS_IDLE_EXIT_S ends the listing.
+        resp = urllib.request.urlopen(
+            req, timeout=86400.0 if follow else EVENTS_IDLE_EXIT_S)
     except urllib.error.HTTPError as e:
         try:
             err_body = e.read().decode(errors="replace")
@@ -2164,7 +2172,14 @@ def cmd_events(args, base: str) -> int:
     try:
         record_lines: list[str] = []
         while True:
-            raw = resp.readline()
+            try:
+                raw = resp.readline()
+            except TimeoutError:
+                if follow:
+                    raise
+                if record_lines:
+                    _emit(record_lines)
+                break
             if not raw:
                 break
             line = raw.decode("utf-8", errors="replace").rstrip("\n")
@@ -2900,6 +2915,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Tail the SSE event stream for a session.",
     )
     ev.add_argument("sid")
+    ev.add_argument(
+        "--no-follow", action="store_true",
+        help=(f"Print what has happened so far and exit once the stream has "
+              f"been quiet for {EVENTS_IDLE_EXIT_S:.0f} s, instead of following "
+              "a running council to its end (a quick status read)."),
+    )
     ev.add_argument(
         "--milestones", action="store_true",
         help=(

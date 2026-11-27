@@ -83,3 +83,37 @@ def test_grep_schema_advertises_context_lines():
                 if s["function"]["name"] == "grep")
     assert spec["function"]["parameters"]["properties"]["context_lines"][
         "type"] == "integer"
+
+
+# A walk is bounded in time: the tools run in the caller's thread and nothing
+# can interrupt them. Two council researchers grepped backup_models (1.26M
+# files) for over an hour, csl-2026-11-27-0507-da28.
+def _grep(tmp_path, **args):
+    return tools.execute("grep", json.dumps(args), str(tmp_path))
+
+
+def test_grep_stops_at_the_time_budget_and_says_where(tmp_path, monkeypatch):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "f.txt").write_text("needle\n")
+    monkeypatch.setattr(tools, "_WALK_BUDGET_S", 0.0)
+    out = _grep(tmp_path, pattern="needle")
+    assert "search stopped after 0 s" in out and "pass a narrower `path`" in out
+    assert out.startswith("(no matches for /needle/ in the part of . searched)")
+
+
+def test_grep_within_budget_is_unchanged(tmp_path):
+    (tmp_path / "f.txt").write_text("needle\n")
+    assert _grep(tmp_path, pattern="needle") == "f.txt:1: needle"
+
+
+def test_grep_skips_binary_files(tmp_path):
+    (tmp_path / "weights.bin").write_bytes(b"\x00\x01needle\x00")
+    (tmp_path / "notes.txt").write_text("needle\n")
+    assert _grep(tmp_path, pattern="needle") == "notes.txt:1: needle"
+
+
+def test_glob_stops_at_the_time_budget(tmp_path, monkeypatch):
+    (tmp_path / "a.py").write_text("")
+    monkeypatch.setattr(tools, "_WALK_BUDGET_S", 0.0)
+    out = tools.execute("glob", json.dumps({"pattern": "*.py"}), str(tmp_path))
+    assert "search stopped after 0 s" in out
