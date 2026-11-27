@@ -16,6 +16,8 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-11-27
+
 ### Added
 - **The embedder can run on a GPU through Vulkan, and claude-hooks
   picks the backend** (ch-33). `embedding.mode` takes `vulkan` next to
@@ -10444,7 +10446,8 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v2.0.2...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/mann1x/claude-hooks/compare/v2.0.2...v2.1.0
 [2.0.2]: https://github.com/mann1x/claude-hooks/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/mann1x/claude-hooks/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/mann1x/claude-hooks/compare/v1.20.2...v2.0.0

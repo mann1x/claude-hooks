@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v2.0.2** — ~8.8k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v2.1.0** — ~9.1k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -448,6 +448,21 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > v2.0.2 clears `npm audit` in `episodic-memory`: runtime dependencies
 > are raised, `overrides` set floors for transitive ones, and the
 > `dist/mcp-server.js` bundle is rebuilt, since it holds the SDK and `zod`.
+> v2.1.0 moves the embedder onto a GPU that claude-hooks chooses: the
+> opencoti c14 r19 llamafile (qwen3-embedding-0.6b, release
+> `embedder-c14-r19`: CPU + Vulkan, and CPU + Vulkan + CUDA per OS) runs on
+> `cpu` / `vulkan` / `cuda` as `embedding.mode` says, with every GPU start
+> probe-checked against a CPU reference (Mesa 20 RADV returned cosine 0.38
+> with no error). The backend switches at runtime, waiting until the
+> embedder is idle — `claude-hooks-daemon-ctl embedder switch|reset` or HTTP
+> on `127.0.0.1:38091` — so a GPU benchmark can borrow the iGPU and give it
+> back. Also: a council wakes the session that started it, resource claims
+> say whether timing matters (`--perf`), the cross-project task graph with
+> gates, and episodic search repaired (dead 26 days) and ranked by keyword.
+> claudemem auto-reindex is off by default: 2 queries in 8 months against
+> continuous GPU embedding and Opus enrichment. See
+> [`docs/llamafile-integration.md`](docs/llamafile-integration.md) and
+> [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 
