@@ -40,6 +40,14 @@ Judging uses Ollama Cloud: claim `ollama-cloud` first.
 | qwen3-embedding:0.6b, clean windows, vector + BM25 fused | 0.52 | 0.55 | 0.68 | 0.77 | 0.71 |
 | **+ unindexed conversations caught up, `claude -p` runs out, one result per conversation (fused)** | **0.53** | **0.55** | **0.82** | **0.95** | **0.89** |
 | same, vector only | 0.41 | 0.41 | 0.75 | 0.78 | 0.82 |
+| **the live index after its catch-up (2026-11-27, 84,496 exchanges), fused** | **0.54** | **0.55** | **0.82** | **0.95** | **0.89** |
+| same, vector only | 0.42 | 0.42 | 0.75 | 0.78 | 0.82 |
+
+The live rows are a SQLite backup of the production index taken after
+`episodic_doctor --rebuild-embeddings` caught it up (0 transcripts owed),
+queried through the production CPU llamafile (0.48 s fused, 0.38 s vector)
+and judged in the same pool as the bench copy. Marker MRR on the live
+index: 0.75 fused against the baseline's 0.24.
 
 Judged in one pool (glm-5.3, 2026-11-27, with the rows above re-scored in
 it: the old fused bge row reads 0.41 / 0.38 / 0.61 / 0.68 there). The last
