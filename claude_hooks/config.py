@@ -463,7 +463,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
             # project has no .claudemem directory. Complements claudemem's
             # own post-commit git hook (`claudemem hooks install`) by
             # covering mid-session edits and out-of-Claude-Code changes.
-            "enabled": True,
+            # Off by default since 2026-11-27: measured on solidpc, 2
+            # claudemem queries in 8 months against continuous GPU
+            # embedding and Opus enrichment (README "Claudemem
+            # auto-reindex").
+            "enabled": False,
             # Stop-event: reindex if any Edit/Write/MultiEdit ran this turn.
             "check_on_stop": True,
             # SessionStart: if the index is older than staleness_minutes AND

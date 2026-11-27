@@ -210,7 +210,7 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     # it never adds latency to the hook itself.
     reindex_cfg = (config.get("hooks") or {}).get("claudemem_reindex") or {}
     if (
-        reindex_cfg.get("enabled", True)
+        reindex_cfg.get("enabled", False)
         and reindex_cfg.get("check_on_stop", True)
         and turn_modified
         and not _host_kept_quiet(event, config)

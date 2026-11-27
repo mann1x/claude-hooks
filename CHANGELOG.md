@@ -156,6 +156,20 @@ release with the auto-generated source archive
   turn. None for a queued send or mail to yourself. See `docs/mailbox.md`
   "Ringing the doorbell".
 
+### Changed
+- **claudemem auto-reindex is off by default, and claudemem is no longer
+  recommended.** Measured on solidpc: 2 claudemem queries across 1,696
+  transcripts in 8 months, while the reindex hook kept 7 projects' indexes
+  fresh — ~26,000 embedding calls to Ollama on the RTX 3090 in one day,
+  some inside other sessions' GPU measurements, and every changed file
+  re-summarised through `claude -p` Opus (`enableEnrichment`; 192k
+  summaries held). Moving those indexes to the claude-hooks embedder would
+  have meant ~110M tokens, ~43 h on the iGPU. `hooks.claudemem_reindex.enabled`
+  now defaults to `false` (`DEFAULT_CONFIG`, both hook fallbacks, the
+  example config); README "Claudemem auto-reindex" has the numbers and how
+  to run claudemem cheaply if a project does use it (the `local` provider
+  on the claude-hooks embedder, `--no-llm`).
+
 ### Fixed
 - **Episodic search failed on every call, and nothing was indexed, for
   26 days — behind a healthy `/health`.** transformers.js cached the

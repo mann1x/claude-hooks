@@ -329,7 +329,8 @@
       "unblock_mail": true
     },
     "claudemem_reindex": {
-      "enabled": true,
+      "_comment": "Not recommended: claudemem was queried 2 times in 8 months on solidpc while its index cost continuous embedding and Opus enrichment tokens. See README 'Claudemem auto-reindex'.",
+      "enabled": false,
       "check_on_stop": true,
       "check_on_session_start": true,
       "staleness_minutes": 10,

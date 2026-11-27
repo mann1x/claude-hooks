@@ -103,7 +103,7 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     # source file, kick off a detached reindex. Silent no-op if claudemem
     # is not installed or the project has no .claudemem directory.
     reindex_cfg = (config.get("hooks") or {}).get("claudemem_reindex") or {}
-    if reindex_cfg.get("enabled", True) and reindex_cfg.get("check_on_session_start", True):
+    if reindex_cfg.get("enabled", False) and reindex_cfg.get("check_on_session_start", True):
         try:
             from claude_hooks.claudemem_reindex import (
                 _DEFAULT_IGNORED_DIRS,
