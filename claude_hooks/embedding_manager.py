@@ -52,6 +52,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Optional
 
+from claude_hooks import llamafile_backend
+
 log = logging.getLogger("claude_hooks.embedding_manager")
 
 
@@ -131,10 +133,32 @@ class EmbeddingConfig:
     # Pooling mode; qwen3-embedding wants ``last``.
     pooling: str = "last"
 
-    # "auto" | "cpu" — auto tries the GPU first and falls back to
-    # CPU on spawn/health failure (sticky for the session). "cpu"
-    # passes --gpu disable on every spawn and never probes.
+    # Backend, decided here and never by the engine (ch-33; see
+    # claude_hooks/llamafile_backend.py):
+    #   "cpu"    -> --gpu disable on every spawn, never probes.
+    #   "vulkan" -> --gpu vulkan -dev <device> -ngl 99, the device
+    #               resolved by name before each spawn; the vectors are
+    #               checked against a CPU reference after start, and any
+    #               failure falls back to CPU for the daemon session.
+    #   "auto"   -> the pre-ch-33 flags (-ngl 99, the engine picks the
+    #               GPU); kept for configs that already say it.
     mode: str = "auto"
+
+    # mode="vulkan": which device — a VulkanN id or part of the name
+    # `<llamafile> --gpu vulkan --list-devices` prints (e.g. "RENOIR").
+    # Empty = the only device listed; several devices -> refused.
+    device: str = ""
+    # mode="vulkan": a Vulkan ICD manifest for the child only
+    # (VK_ICD_FILENAMES), e.g. a private RADV build when the system
+    # Mesa is too old. Empty = the system's drivers.
+    vulkan_icd: str = ""
+    # mode="vulkan": let the engine use a driver it knows to be broken
+    # (OPENCOTI_VK_ALLOW_OLD_DRIVER=1). On solidpc's Mesa 20.3.5 that
+    # gave wrong vectors with no error; the probe check catches it.
+    allow_old_driver: bool = False
+    # mode="vulkan": compare probe vectors with the shipped CPU
+    # reference after each start (only for the shipped model).
+    verify_backend: bool = True
 
     # When mode=auto, override the VRAM budget check; ignored when
     # mode=cpu.
@@ -185,6 +209,10 @@ class EmbeddingManager:
         self.proc: Optional[subprocess.Popen] = None
         self.last_activity_at: float = time.time()
         self.gpu_offload_failed: bool = False
+        # Why the session fell back to CPU (empty while it has not).
+        self.fallback_reason: str = ""
+        # mode="vulkan": the VulkanN id resolved before the last spawn.
+        self.vk_device: str = ""
         self._stop_reaper = threading.Event()
         self._reaper_thread: Optional[threading.Thread] = None
         # Sanity-check pooling at construct time — silently dropping
@@ -194,9 +222,10 @@ class EmbeddingManager:
                 f"invalid pooling mode {cfg.pooling!r}; "
                 f"expected one of {sorted(_VALID_POOLING)}"
             )
-        if cfg.mode not in ("auto", "cpu"):
+        if cfg.mode not in llamafile_backend.BACKENDS:
             raise ValueError(
-                f"invalid mode {cfg.mode!r}; expected 'auto' or 'cpu'"
+                f"invalid mode {cfg.mode!r}; expected one of "
+                f"{', '.join(llamafile_backend.BACKENDS)}"
             )
 
     # ----- introspection ---------------------------------------- #
@@ -244,6 +273,8 @@ class EmbeddingManager:
                 "idle_seconds": time.time() - self.last_activity_at,
                 "idle_timeout_seconds": self.cfg.idle_timeout_seconds,
                 "gpu_offload_failed": self.gpu_offload_failed,
+                "device": self.vk_device if self._effective_mode() == "vulkan" else "",
+                "fallback_reason": self.fallback_reason,
             }
 
     # ----- spawn / health --------------------------------------- #
@@ -258,16 +289,64 @@ class EmbeddingManager:
         """
         if self.cfg.mode == "cpu" or self.gpu_offload_failed:
             return "cpu"
-        return "auto"
+        return self.cfg.mode
+
+    def _child_env(self) -> dict:
+        return llamafile_backend.child_env(
+            mode=self._effective_mode(), vulkan_icd=self.cfg.vulkan_icd,
+            allow_old_driver=self.cfg.allow_old_driver,
+        )
+
+    def _fall_back(self, reason: str) -> None:
+        """CPU for the rest of the daemon session. Caller holds the lock."""
+        log.warning("embedding backend %s unusable (%s); using CPU for the "
+                    "rest of the session", self.cfg.mode, reason)
+        self.gpu_offload_failed = True
+        self.fallback_reason = reason
+
+    def _resolve_vulkan_device(self) -> None:
+        """Set ``self.vk_device`` from ``cfg.device`` and the engine's
+        device list, or fall back to CPU. Caller holds the lock."""
+        try:
+            out = llamafile_backend.list_devices(
+                self.cfg.llamafile_path, self._child_env())
+            self.vk_device = llamafile_backend.resolve_device(
+                self.cfg.device, llamafile_backend.parse_devices(out))
+        except llamafile_backend.BackendError as e:
+            self.vk_device = ""
+            self._fall_back(str(e))
+
+    def _backend_verified(self) -> bool:
+        """mode="vulkan": the probe vectors match the CPU reference.
+
+        Skipped (True) for a custom GGUF, with ``verify_backend`` off,
+        or when no reference ships. Caller holds the lock."""
+        if (self._effective_mode() != "vulkan" or not self.cfg.verify_backend
+                or self.cfg.model_gguf):
+            return True
+        ref = llamafile_backend.load_reference()
+        if ref is None:
+            log.warning("no embedder probe reference; Vulkan vectors unchecked")
+            return True
+        host = "127.0.0.1" if self.cfg.host in ("0.0.0.0", "::", "") else self.cfg.host
+        ok, detail = llamafile_backend.check_vectors(
+            f"http://{host}:{self.cfg.port}/embedding", ref)
+        log.info("embedding backend check on %s: %s", self.vk_device, detail)
+        if not ok:
+            self._fall_back(detail)
+        return ok
 
     def _gpu_flags(self) -> list[str]:
-        """Decide whether to pass ``-ngl 99`` or ``--gpu disable``.
+        """Backend arguments for the next spawn.
 
-        Calls :mod:`claude_hooks.gpu_probe` lazily so unit tests can
-        stub it out without importing nvidia-smi machinery.
+        ``cpu`` and ``vulkan`` are explicit (llamafile_backend.flags);
+        ``auto`` keeps the pre-ch-33 decision. Calls
+        :mod:`claude_hooks.gpu_probe` lazily so unit tests can stub it
+        out without importing nvidia-smi machinery.
         """
-        if self._effective_mode() == "cpu":
-            return ["--gpu", "disable"]
+        mode = self._effective_mode()
+        if mode in ("cpu", "vulkan"):
+            return llamafile_backend.flags(mode, self.vk_device)
         # auto mode: pre-flight VRAM check. ``can_fit_in_vram``
         # returns None when the probe can't determine VRAM (vulkan
         # vendor or no GPU at all) — treat that as "try GPU anyway"
@@ -381,6 +460,7 @@ class EmbeddingManager:
             "stdin": subprocess.DEVNULL,
             "stdout": subprocess.DEVNULL,
             "stderr": subprocess.DEVNULL,
+            "env": self._child_env(),
         }
         if sys.platform.startswith("win"):
             # CREATE_NO_WINDOW suppresses the console allocation that
@@ -473,6 +553,8 @@ class EmbeddingManager:
                 )
 
             cwd = self.cfg.cwd or os.path.dirname(self.cfg.llamafile_path)
+            if self._effective_mode() == "vulkan":
+                self._resolve_vulkan_device()
             try:
                 self.proc = self._spawn_once(cwd)
             except OSError as e:
@@ -482,31 +564,36 @@ class EmbeddingManager:
                     "executable and the platform is supported."
                 ) from e
 
-            if self._wait_for_health():
+            healthy = self._wait_for_health()
+            if healthy and self._backend_verified():
                 self.last_activity_at = time.time()
                 log.info(
-                    "llamafile ready on port %d (pid=%s, mode=%s)",
+                    "llamafile ready on port %d (pid=%s, mode=%s%s)",
                     self.cfg.port, self.proc.pid, self._effective_mode(),
+                    f", device={self.vk_device}"
+                    if self._effective_mode() == "vulkan" else "",
                 )
                 return {
                     "ready": True,
                     "port": self.cfg.port,
                     "mode": self._effective_mode(),
                     "spawned": True,
+                    **({"gpu_fallback": True, "fallback_reason": self.fallback_reason}
+                       if self.gpu_offload_failed and self.cfg.mode != "cpu" else {}),
                 }
 
-            # Spawn succeeded but health never returned 200. If we
-            # were trying the GPU path, fall back to CPU once. Any
-            # other failure surfaces as a hard error so the
-            # CompositeEmbedder can fail over to its primary.
+            # Health never returned 200, or the GPU's vectors failed the
+            # probe check (which already recorded the fall-back). If we
+            # were trying a GPU path, fall back to CPU once. Any other
+            # failure surfaces as a hard error so the CompositeEmbedder
+            # can fail over to its primary.
             self._terminate_locked()
-            if self._effective_mode() == "auto" and not self.gpu_offload_failed:
-                log.warning(
-                    "llamafile didn't come up on GPU within %.1fs; "
-                    "falling back to CPU-only for the rest of the session",
-                    self.cfg.spawn_timeout_seconds,
-                )
-                self.gpu_offload_failed = True
+            if self.cfg.mode in ("auto", "vulkan") and (
+                    not self.gpu_offload_failed or healthy):
+                if not healthy:
+                    self._fall_back(
+                        f"no health on {self.cfg.mode} within "
+                        f"{self.cfg.spawn_timeout_seconds:.1f}s")
                 try:
                     self.proc = self._spawn_once(cwd)
                 except OSError as e:
@@ -523,6 +610,7 @@ class EmbeddingManager:
                         "mode": "cpu",
                         "spawned": True,
                         "gpu_fallback": True,
+                        "fallback_reason": self.fallback_reason,
                     }
                 self._terminate_locked()
             raise RuntimeError(
@@ -641,6 +729,10 @@ def config_from_dict(cfg: dict) -> EmbeddingConfig:
         n_parallel=int(e.get("n_parallel") or 3),
         pooling=str(e.get("pooling") or "last"),
         mode=str(e.get("mode") or "auto"),
+        device=str(e.get("device") or ""),
+        vulkan_icd=os.path.expanduser(str(e.get("vulkan_icd") or "")),
+        allow_old_driver=bool(e.get("allow_old_driver", False)),
+        verify_backend=bool(e.get("verify_backend", True)),
         vram_budget_mb=int(e.get("vram_budget_mb") or _DEFAULT_VRAM_BUDGET_MB),
         nice=int(e.get("nice", -5)),
         spawn_timeout_seconds=float(e.get("spawn_timeout_seconds") or 30.0),
@@ -664,7 +756,9 @@ def main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover
     parser.add_argument("action", choices=("spawn", "status", "shutdown"))
     parser.add_argument("--llamafile", required=True)
     parser.add_argument("--port", type=int, default=38092)
-    parser.add_argument("--mode", choices=("auto", "cpu"), default="auto")
+    parser.add_argument("--mode", choices=llamafile_backend.BACKENDS, default="auto")
+    parser.add_argument("--device", default="")
+    parser.add_argument("--vulkan-icd", default="")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -673,6 +767,7 @@ def main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover
     )
     cfg = EmbeddingConfig(
         llamafile_path=args.llamafile, port=args.port, mode=args.mode,
+        device=args.device, vulkan_icd=args.vulkan_icd,
     )
     mgr = EmbeddingManager(cfg)
     if args.action == "spawn":

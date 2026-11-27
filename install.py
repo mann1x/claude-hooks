@@ -3759,6 +3759,62 @@ def _download_composite_llamafile(
     return True
 
 
+def _ask_embedding_backend(existing: dict, llamafile_path: str, *,
+                           non_interactive: bool) -> dict:
+    """Which backend the embedder runs on: ``cpu``, ``vulkan`` (with a
+    device and optionally a private Vulkan driver) or the legacy
+    ``auto``. claude-hooks passes the choice on every spawn; the engine
+    never picks one itself (ch-33, claude_hooks/llamafile_backend.py).
+
+    Defaults come from the existing config (a re-run keeps what is
+    there); a fresh install defaults to ``cpu``.
+    """
+    mode = existing.get("mode") or "cpu"
+    device = existing.get("device") or ""
+    icd = existing.get("vulkan_icd") or ""
+    if non_interactive:
+        print(f"    --non-interactive: embedder backend = {mode}"
+              + (f" (device {device or 'the only one'})" if mode == "vulkan" else "") + ".")
+        return {"mode": mode, "device": device, "vulkan_icd": icd}
+    print("    Embedder backend: cpu, or vulkan to embed on a GPU through Vulkan")
+    print("    (any vendor, iGPUs included). The vectors are checked against a")
+    print("    CPU reference at every start; a mismatch falls back to CPU.")
+    while True:
+        ans = input(f"    Backend [cpu/vulkan/auto] [{mode}]: ").strip().lower() or mode
+        if ans in ("cpu", "c"):
+            return {"mode": "cpu", "device": device, "vulkan_icd": icd}
+        if ans == "auto":
+            print("    auto lets the engine pick the GPU itself; prefer cpu or vulkan.")
+            return {"mode": "auto", "device": device, "vulkan_icd": icd}
+        if ans in ("vulkan", "v"):
+            break
+        print("    Answer cpu, vulkan or auto.")
+    ans = input("    Private Vulkan driver manifest (VK_ICD_FILENAMES; empty = the "
+                f"system's) [{icd}]: ").strip()
+    icd = os.path.expanduser(ans) if ans else icd
+    if icd and not os.path.isfile(icd):
+        print(f"    Note: {icd} does not exist yet (scripts/build_private_radv.sh "
+              "builds one for an AMD GPU on an old Mesa).")
+    if os.path.isfile(llamafile_path):
+        from claude_hooks import llamafile_backend as lb  # noqa: PLC0415
+        env = lb.child_env(mode="vulkan", vulkan_icd=icd)
+        try:
+            devices = lb.parse_devices(lb.list_devices(llamafile_path, env))
+        except lb.BackendError as e:
+            devices = []
+            print(f"    Could not list devices: {e}")
+        for dev_id, name in devices:
+            print(f"      {dev_id}: {name}")
+        if not devices:
+            print("    The engine lists no usable Vulkan device with this driver; the")
+            print("    daemon will fall back to CPU until one is.")
+        elif not device and len(devices) == 1:
+            device = devices[0][1]
+    ans = input("    Device (part of its name, or VulkanN; empty = the only one) "
+                f"[{device}]: ").strip()
+    return {"mode": "vulkan", "device": ans or device, "vulkan_icd": icd}
+
+
 def _setup_llamafile_engine(
     cfg: dict, *,
     non_interactive: bool,
@@ -3853,21 +3909,9 @@ def _setup_llamafile_engine(
         llamafile_path = str(target_default)
         model_gguf = gguf
 
-    # Mode (auto / cpu).
-    if non_interactive:
-        mode = existing.get("mode") or "auto"
-        print(f"    --non-interactive: GPU mode = {mode}.")
-    else:
-        from claude_hooks import gpu_probe
-        gpu = gpu_probe.probe()
-        hint = (f"detected {gpu['vendor']} GPU"
-                if gpu.get("vendor") != "none"
-                else "no GPU detected; CPU recommended")
-        default = "auto" if gpu.get("vendor") != "none" else "cpu"
-        ans = input(
-            f"    GPU mode [auto/cpu] ({hint}) [{default}]: "
-        ).strip().lower() or default
-        mode = "cpu" if ans in ("cpu", "c") else "auto"
+    backend = _ask_embedding_backend(
+        existing, llamafile_path, non_interactive=non_interactive)
+    mode = backend["mode"]
 
     # LAN-exposure prompt (#242, 2026-05-21). Default loopback so the
     # embedder isn't exposed to the network without an explicit opt-in
@@ -3929,6 +3973,12 @@ def _setup_llamafile_engine(
         "n_parallel": int(existing.get("n_parallel") or 3),
         "pooling": "last",
         "mode": mode,
+        # Backend details (ch-33): kept across re-runs like every key
+        # here, or a re-install would silently drop a Vulkan setup.
+        "device": backend["device"],
+        "vulkan_icd": backend["vulkan_icd"],
+        "allow_old_driver": bool(existing.get("allow_old_driver", False)),
+        "verify_backend": bool(existing.get("verify_backend", True)),
         "idle_timeout_seconds": float(
             existing.get("idle_timeout_seconds") or 3600.0
         ),

@@ -17,6 +17,28 @@ release with the auto-generated source archive
 ## [Unreleased]
 
 ### Added
+- **The embedder can run on a GPU through Vulkan, and claude-hooks
+  picks the backend** (ch-33). `embedding.mode` takes `vulkan` next to
+  `cpu` and the legacy `auto`; `embedding.device` names the GPU by part
+  of its name (`RENOIR`) and is resolved against the engine's device
+  list before each spawn. Every spawn names its backend: an opencoti
+  llamafile started without `--gpu` picks a GPU itself. A Vulkan start
+  is checked: three probe texts are compared with a CPU reference
+  (`claude_hooks/embedder_probe_reference.json`), and below cosine
+  0.99 the daemon falls back to CPU and says why — on solidpc's Mesa
+  20.3.5 RADV the vectors came back wrong (cosine 0.38) with no error.
+  `embedding.vulkan_icd` hands the child a driver of its own;
+  `scripts/build_private_radv.sh` builds RADV 25.2.8 (ACO only) for a
+  host whose Mesa is too old, without touching the system's. The child
+  gets a private `HOME`/`TMPDIR` under `~/.claude`, because under the
+  daemon's sandbox the engine otherwise loads a stale Vulkan library
+  from `~/.llamafile`. `make -C vendor/llamafile/dist fetch-opencoti
+  opencoti` builds the opencoti c14 r19 composite (engine + Linux and
+  Windows Vulkan libraries + the same GGUF, 932 MB) from pinned inputs.
+  On solidpc's Radeon iGPU a ~460-token embed takes 0.65 s against
+  10.6 s on the (loaded) CPU, with the CPU's vectors (min cosine
+  0.99905). `install.py` asks for the backend, keeps an existing one on
+  a re-run, and a fresh install now defaults to `cpu`.
 - **A council wakes the session that started it.** `consult --wait` and
   `follow-up --wait` used to return only when the run ended, so a run
   parked at the adversary checkpoint waited on a session that was never

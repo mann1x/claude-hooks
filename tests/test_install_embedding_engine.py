@@ -250,19 +250,20 @@ class TestSetupLlamafileEngine:
         assert block["model_gguf"] == ""
         assert block["ctx_size"] == install._DEFAULT_LLAMAFILE_CTX
         assert block["pooling"] == "last"
-        assert block["mode"] == "auto"  # existing missing -> default auto
+        # ch-33: a fresh install runs on CPU; a GPU backend is chosen, never implied.
+        assert block["mode"] == "cpu"
         assert block["port"] == 38092
 
     def test_interactive_default_path(self, tmp_path, monkeypatch):
-        """User accepts defaults + chooses 'auto' GPU mode."""
+        """User accepts every default. ch-33: the backend default is cpu
+        even with a GPU present — a detected GPU no longer implies one."""
         cfg = {}
         monkeypatch.setattr("builtins.input", _scripted_input([
             "",   # accept default settings
-            "",   # accept GPU mode default (auto when GPU detected)
+            "",   # accept backend default (cpu)
             "",   # #242: accept LAN-exposure default (loopback)
         ]))
         with patch.object(Path, "is_file", return_value=True):
-            # Pretend an NVIDIA GPU was detected.
             with patch("claude_hooks.gpu_probe.probe", return_value={
                     "vendor": "nvidia", "total_mb": 24000,
                     "free_mb": 22000, "raw": "x",
@@ -270,7 +271,7 @@ class TestSetupLlamafileEngine:
                 block = install._setup_llamafile_engine(
                     cfg, non_interactive=False, dry_run=False,
                 )
-        assert block["mode"] == "auto"
+        assert block["mode"] == "cpu"
         assert block["model_gguf"] == ""  # default = baked composite
         # #242: default LAN-exposure answer is loopback.
         assert block["host"] == "127.0.0.1"

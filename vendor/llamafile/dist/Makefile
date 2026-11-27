@@ -121,6 +121,64 @@ fetch-gguf-ollama:
 	 ln -sf "$$BLOB" "$(GGUF)"; \
 	 echo "==> symlinked $$BLOB -> $(GGUF)"
 
+# ----- opencoti-llamafile composite (ch-33) ---------------------------
+#
+# The same model on the opencoti-llamafile engine (c14 r19) with its
+# Vulkan libraries, so the daemon can embed on a GPU through Vulkan
+# (e.g. solidpc's Radeon iGPU). The baked .args name NO backend: an
+# engine started without --gpu picks a GPU itself, so claude-hooks
+# always passes one (claude_hooks/llamafile_backend.py). The engine
+# looks for ggml-vulkan.so / ggml-vulkan.dll at the zip root.
+#
+#   $ make -C vendor/llamafile/dist fetch-opencoti opencoti
+
+OC_TAG          ?= c14-r19
+OC_DIR          := $(VENDOR_DIR)/opencoti-$(OC_TAG)
+OC_HF_REPO      ?= ManniX-ITA/opencoti-llamafile
+OC_BARE         := $(OC_DIR)/components/engine/2611262234001/opencoti-llamafile-0.10.5-c14-bare.llamafile
+OC_VK_SO        := $(OC_DIR)/components/vulkan/2611270025004/ggml-vulkan-x86_64.so
+OC_VK_DLL       := $(OC_DIR)/components/vulkan/2611270025004/ggml-vulkan-win-x86_64.dll
+OC_OUT          := $(DIST_DIR)qwen3-embedding-0.6b-16k-opencoti-$(OC_TAG).llamafile
+OC_STAGE        := $(OC_DIR)/build
+
+.PHONY: opencoti fetch-opencoti
+
+fetch-opencoti:
+	@echo "==> fetching opencoti-llamafile $(OC_TAG) inputs from $(OC_HF_REPO)"
+	@cd "$(OC_DIR)" && hf download "$(OC_HF_REPO)" --local-dir . \
+		--include "$(patsubst $(OC_DIR)/%,%,$(OC_BARE))" \
+		"$(patsubst $(OC_DIR)/%,%,$(OC_VK_SO))" \
+		"$(patsubst $(OC_DIR)/%,%,$(OC_VK_DLL))" >/dev/null
+	@cd "$(OC_DIR)" && sha256sum -c SHA256SUMS
+
+opencoti: $(OC_OUT)
+
+$(OC_OUT): $(OC_BARE) $(OC_VK_SO) $(OC_VK_DLL) $(ZIPALIGN) $(GGUF)
+	@cd "$(OC_DIR)" && sha256sum --quiet -c SHA256SUMS
+	@mkdir -p "$(OC_STAGE)"
+	@printf -- "%s\n" \
+		"-m" "$(GGUF_NAME)" \
+		"--embedding" \
+		"--server" \
+		"--host" "0.0.0.0" \
+		"--port" "$(PORT)" \
+		"--pooling" "$(POOLING)" \
+		"--ctx-size" "$(CTX_SIZE)" \
+		"..." > "$(OC_STAGE)/.args"
+	@! grep -q -E -- '^(--gpu|-ngl|--n-gpu-layers|-dev|--device)$$' "$(OC_STAGE)/.args"
+	@cp -L "$(GGUF)" "$(OC_STAGE)/$(GGUF_NAME)"
+	@cp "$(OC_VK_SO)" "$(OC_STAGE)/ggml-vulkan.so"
+	@cp "$(OC_VK_DLL)" "$(OC_STAGE)/ggml-vulkan.dll"
+	@cp "$(OC_BARE)" "$(OC_STAGE)/out.llamafile"
+	@chmod +x "$(OC_STAGE)/out.llamafile"
+	@cd "$(OC_STAGE)" && "$(ZIPALIGN)" -j0 out.llamafile \
+		"$(GGUF_NAME)" .args ggml-vulkan.so ggml-vulkan.dll
+	@mv "$(OC_STAGE)/out.llamafile" "$(OC_OUT)"
+	@rm -f "$(OC_STAGE)/$(GGUF_NAME)" "$(OC_STAGE)/ggml-vulkan.so" \
+		"$(OC_STAGE)/ggml-vulkan.dll" "$(OC_STAGE)/.args"
+	@echo "==> built $(OC_OUT) ($$(stat -c%s "$(OC_OUT)") bytes)"
+	@cd "$(DIST_DIR)" && sha256sum "$(notdir $(OC_OUT))"
+
 # ----- verification ---------------------------------------------------
 
 check: $(OUT)

@@ -69,6 +69,8 @@ include = ["claude_hooks*", "consultants*"]
 # The cloud-session mailbox instructions are copied into the relay folder
 # by install.py and scripts/deploy.py, so they must ship with the package.
 [tool.setuptools.package-data]
+# CPU reference vectors the embedder's Vulkan backend is checked against (ch-33).
+"claude_hooks" = ["embedder_probe_reference.json"]
 "claude_hooks.mailbox" = ["cloud/*.md"]
 # The council-sandbox launcher pin (plan E2): the engine checks the
 # installed binary against it before running it as root.
