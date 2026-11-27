@@ -151,6 +151,30 @@ def _http(method: str, url: str, *, body: Optional[dict] = None,
 
 # ----------------------- consult / status / result --------------- #
 
+def caller_notify(env=None) -> Optional[dict]:
+    """Where the engine can wake the calling session: Claude Code's inbox
+    socket for it (exported to the Bash tool), its token, the session id
+    and this host. None outside a Claude Code session. The engine posts
+    there when the run needs an answer or ends
+    (consultants/server/attention_push.py)."""
+    env = os.environ if env is None else env
+    from claude_hooks.mailbox.store import host_name
+    out = {"socket": env.get("CLAUDE_CODE_MESSAGING_SOCKET") or "",
+           "token": env.get("CLAUDE_CODE_MESSAGING_TOKEN") or "",
+           "session_id": env.get("CLAUDE_CODE_SESSION_ID") or "",
+           "host": host_name()}
+    out = {k: v for k, v in out.items() if v}
+    return out if (out.get("socket") or out.get("session_id")) else None
+
+
+def _add_notify(body: dict, args) -> None:
+    if getattr(args, "no_push", False):
+        return
+    notify = caller_notify()
+    if notify:
+        body["notify"] = notify
+
+
 def cmd_consult(args, base: str) -> int:
     body = {
         "message": args.message,
@@ -182,6 +206,7 @@ def cmd_consult(args, base: str) -> int:
     # operators who pass it explicitly so they update tooling.
     if args.trace is True or args.trace is False:
         _warn_trace_deprecated()
+    _add_notify(body, args)
     out = _http("POST", f"{base}/v1/consult", body=body)
     # M5: --wait → block until terminal, then print the result.
     if getattr(args, "wait", False):
@@ -202,19 +227,53 @@ _RUN_STILL_GOING = ("running", "suspended")
 ENGINE_RESTART_TOLERANCE_S = 300.0
 
 
+#: What a wait returns on. ``attention`` (default) also returns while the
+#: run waits on the caller, so a backgrounded wait is the notification;
+#: ``terminal`` is the old behaviour (a Workflow whose agent cannot answer
+#: a checkpoint); ``any-change`` also returns on every progress change.
+WAIT_UNTIL = ("attention", "terminal", "any-change")
+#: Exit codes of a wait that returned before the run ended.
+EXIT_NEEDS_ATTENTION = 10
+EXIT_CHANGED = 11
+# One reading of "the run waits on you", shared with the engine's push.
+from consultants.attention import (  # noqa: E402
+    PAUSE_PENDING_GRACE_S, attention_of)
+
+
+def _change_key(rec: dict) -> str:
+    """What ``any-change`` compares: status, per-role progress, controls."""
+    return json.dumps({k: rec.get(k) for k in (
+        "status", "progress", "pause_state", "cancel_requested",
+        "wrap_up_requested")}, sort_keys=True, default=str)
+
+
+class WaitStopped(Exception):
+    """A wait that returned before the run ended (attention or change)."""
+
+    def __init__(self, rec: dict, why: dict, exit_code: int):
+        super().__init__(why.get("reason"))
+        self.rec, self.why, self.exit_code = rec, why, exit_code
+
+
 def _wait_for_terminal(base: str, sid: str, *,
                        interval: float, timeout: float,
+                       until: str = "terminal",
                        sleep_fn=time.sleep,
                        now_fn=time.monotonic) -> dict:
     """Poll ``GET /v1/consult/{sid}`` until ``status != "running"``.
 
     Returns the final status record. Raises ``CLIError`` if a positive
     ``timeout`` elapses while the run is still going (the run is NOT
-    cancelled — it keeps executing server-side). ``sleep_fn`` / ``now_fn``
-    are injectable for deterministic tests.
+    cancelled — it keeps executing server-side). With ``until`` =
+    ``attention`` it raises ``WaitStopped`` as soon as the run waits on
+    the caller (``attention_of()``); ``any-change`` also on any change of
+    ``_change_key()``. ``sleep_fn`` / ``now_fn`` are injectable for
+    deterministic tests.
     """
     deadline = (now_fn() + timeout) if timeout and timeout > 0 else None
     down_since: Optional[float] = None
+    first_key: Optional[str] = None
+    pending_since: Optional[float] = None
     while True:
         try:
             rec = _http("GET", f"{base}/v1/consult/{sid}")
@@ -234,6 +293,21 @@ def _wait_for_terminal(base: str, sid: str, *,
         down_since = None
         if str(rec.get("status") or "") not in _RUN_STILL_GOING:
             return rec
+        if until != "terminal":
+            now = now_fn()
+            if rec.get("pause_state") == "pending":
+                pending_since = now if pending_since is None else pending_since
+            else:
+                pending_since = None
+            why = attention_of(rec, pending_for=(
+                now - pending_since if pending_since is not None else 0.0))
+            if why is not None:
+                raise WaitStopped(rec, why, EXIT_NEEDS_ATTENTION)
+            key = _change_key(rec)
+            if first_key is None:
+                first_key = key
+            elif until == "any-change" and key != first_key:
+                raise WaitStopped(rec, {"reason": "changed"}, EXIT_CHANGED)
         if deadline is not None and now_fn() >= deadline:
             raise CLIError(
                 f"--wait timed out after {timeout:.0f}s; session {sid} "
@@ -274,7 +348,20 @@ def _consult_wait(args, base: str, run_record: dict) -> int:
         return 0
     interval = max(0.2, float(getattr(args, "poll_interval", 2.0) or 2.0))
     timeout = float(getattr(args, "wait_timeout", 0.0) or 0.0)
-    rec = _wait_for_terminal(base, sid, interval=interval, timeout=timeout)
+    until = getattr(args, "wait_until", None) or "attention"
+    try:
+        rec = _wait_for_terminal(base, sid, interval=interval,
+                                 timeout=timeout, until=until)
+    except WaitStopped as stop:
+        # ok:false — there is no answer yet; a caller keying on .ok must
+        # never read this as one. The exit code says why it returned.
+        print(json.dumps({
+            "ok": False, "sid": sid,
+            "needs_attention": stop.exit_code == EXIT_NEEDS_ATTENTION,
+            **stop.why,
+            "rewait": f"claude-consultants wait {sid}",
+            "status": stop.rec}, indent=2, default=str))
+        return stop.exit_code
     if str(rec.get("status") or "") == _RUN_TERMINAL_OK:
         result = _fetch_result(base, sid)
         print(json.dumps({"ok": True, **result}, indent=2))
@@ -283,6 +370,12 @@ def _consult_wait(args, base: str, run_record: dict) -> int:
     # record with ok=False so callers key on JSON, not just the rc.
     print(json.dumps({"ok": False, **rec}, indent=2))
     return 1
+
+
+def cmd_wait(args, base: str) -> int:
+    """Wait on an existing run: the same loop and output as ``--wait``,
+    for re-arming after answering a checkpoint or across a compaction."""
+    return _consult_wait(args, base, {"sid": args.sid})
 
 
 def cmd_status(args, base: str) -> int:
@@ -329,6 +422,7 @@ def cmd_follow_up(args, base: str) -> int:
     allow_extra = _resolve_allow_extra(args, cwd)
     if allow_extra is not None:
         body["allow_extra"] = allow_extra
+    _add_notify(body, args)
     out = _http("POST",
                 f"{base}/v1/consult/{args.parent_sid}/follow-up",
                 body=body)
@@ -2355,20 +2449,36 @@ def cmd_skill_eval_tool_executor(args, base: str) -> int:
 
 # ----------------------- argparse wiring ------------------------- #
 
-def _add_wait_args(parser) -> None:
-    """``--wait`` / ``--poll-interval`` / ``--wait-timeout``, shared by
-    ``consult`` and ``follow-up`` so the two verbs cannot drift: the
-    skill waits on both, and ``follow-up`` once rejected ``--wait``."""
+def _add_wait_args(parser, *, verb: bool = False) -> None:
+    """``--wait`` / ``--wait-until`` / ``--poll-interval`` /
+    ``--wait-timeout``, shared by ``consult``, ``follow-up`` and ``wait``
+    so the verbs cannot drift: the skill waits on all of them, and
+    ``follow-up`` once rejected ``--wait``."""
     # M5: --wait turns the otherwise-async consult into a blocking call —
-    # POST, then poll until terminal, then print the RESULT (same shape
-    # as `result`) instead of the initial run record. Removes the
-    # Workflow-authoring footgun of hand-rolling a poll loop. The bare
-    # (no --wait) path is byte-identical to before.
+    # POST, then poll, then print the RESULT (same shape as `result`)
+    # instead of the initial run record. The bare (no --wait) path is
+    # byte-identical to before.
+    if not verb:
+        parser.add_argument(
+            "--no-push", dest="no_push", action="store_true", default=False,
+            help="Do not let the engine post to this session's inbox when "
+                 "the run needs an answer or ends (default: it does, when "
+                 "run from a Claude Code session).",
+        )
+        parser.add_argument(
+            "--wait", action="store_true", default=False,
+            help="Block until the consultation finishes or needs you "
+                 "(see --wait-until), then print the result or the "
+                 "reason. Without it, returns the run record at once.",
+        )
     parser.add_argument(
-        "--wait", action="store_true", default=False,
-        help="Block until the consultation finishes, then print the "
-             "final result (poll loop). Without it, returns the run "
-             "record immediately and you poll `status`/`result`.",
+        "--wait-until", dest="wait_until", choices=WAIT_UNTIL,
+        default="attention",
+        help="attention (default): also return, exit 10 with a JSON "
+             "reason, while the run waits on you — adversary checkpoint, "
+             "tool approval, a pause; terminal: only when the run ends "
+             "(for callers that cannot answer); any-change: also return "
+             "(exit 11) on every progress change.",
     )
     parser.add_argument(
         "--poll-interval", dest="poll_interval", type=float, default=2.0,
@@ -2453,6 +2563,15 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("status", help="Poll a session's status.")
     s.add_argument("sid")
     s.set_defaults(fn=cmd_status)
+
+    # wait — the one waiter: backgrounded, its exit is the notification
+    w = sub.add_parser(
+        "wait", help="Wait on a running session: returns when it ends "
+        "(result, exit 0 / 1) or needs you (exit 10, JSON reason). "
+        "Run it in the background and again after answering.")
+    w.add_argument("sid")
+    _add_wait_args(w, verb=True)
+    w.set_defaults(fn=cmd_wait)
 
     # result
     r = sub.add_parser("result", help="Fetch a completed session's "

@@ -111,8 +111,8 @@ authoritative `consultancy` block — read this, don't infer:
 
 **While the run is `running`, wait for it with ONE long-lived waiter**
 — never a foreground poll loop. See [Waiting for a
-run](#4-wait-for-the-run--the-only-three-patterns) for the three
-supported patterns and the anti-pattern they replace.
+run](#4-wait-for-the-run--one-waiter) for the waiter and the
+anti-pattern it replaces.
 
 **When the council finishes**, do NOT silently present the answer — the
 consultancy is in `ready_to_review`. Enter the [Review
@@ -252,7 +252,7 @@ Returns:
 Save the `sid`. Tell the user briefly you've kicked off the council
 and will surface progress.
 
-### 4. Wait for the run — the only three patterns
+### 4. Wait for the run — one waiter
 
 A council takes **minutes to tens of minutes** (33 min is normal at
 `xhigh`). One Bash tool call is bounded by a timeout far shorter than
@@ -276,43 +276,55 @@ always exits still `running`, you learn nothing, and repeating it
 spends the consultation's whole wall-clock on tool calls. `jq` is also
 not guaranteed to be installed — the examples here use `python3 -c`.
 
-Pick a pattern by whether the run can pause for you:
-
-#### A. Adversary checkpoint OFF → `--wait`, backgrounded
-
-`consult` and `follow-up` both accept `--wait`: the CLI blocks
-server-side until the run is terminal, then prints the **result** JSON
-(`{"ok": true, "summary_markdown": …}`), exiting 1 on failure.
-
-Issue it as a **background** Bash call (`run_in_background: true`).
-The harness notifies you when the process exits, so there is no
-polling and completion cannot be missed:
+There is one waiter. Start the council with `--wait` (`consult` or
+`follow-up`), or wait on any existing sid with `claude-consultants wait
+<sid>`, **always as a background Bash call** (`run_in_background:
+true`). The harness notifies you when the process exits, and it exits
+exactly when you have something to do:
 
 ```
 claude-consultants consult --wait --message "<framing>" --cwd "$(pwd)"
+claude-consultants wait <sid>     # re-arm after answering, or after a compaction
 ```
 
-`--wait-timeout <s>` bounds the client only; the run continues
-server-side if the wait gives up.
+| exit | stdout | do |
+|---|---|---|
+| 0 | the result (`{"ok": true, "summary_markdown": …}`) | review it (step 5) |
+| 1 | the run record, `ok: false` (failed / cancelled), or the error | tell the user |
+| **10** | `{"ok": false, "needs_attention": true, "reason", "deadline_ts", "on_timeout", "answer", "rewait", "status"}` | answer it, then start `rewait` again in the background |
 
-#### B. Adversary checkpoint ON → wait for terminal *or* pause
+Exit 10 is the run **waiting on you**. `reason` is one of
+`adversary_checkpoint`, `tool_approval`, `paused` or
+`pause_not_taking_effect` (a pause still pending after 60 s), and
+`answer` names the verb that answers it. Answer before `deadline_ts`
+when you can (what happens on the deadline is `on_timeout`; see the
+table below), then re-arm with `rewait`. A wait started while
+something is already waiting returns at once, so re-arm only after
+answering. An engine that stays unreachable past 300 s also ends the
+wait (non-zero, with the error); a restart shorter than that is ridden
+out, since the engine suspends and resumes running councils.
 
-`--wait` would sit through the entire checkpoint (up to
-`adversary_checkpoint_timeout_s`, default 30 min) without telling you
-it wants an answer. Launch without `--wait`, then run **one**
-backgrounded loop that exits on either signal:
+**The engine also pushes.** `consult` / `follow-up` hand the engine
+this session's inbox socket, and the engine posts a message into it when
+the run needs you (same reasons as exit 10, plus a tool running 10+ min)
+and when it ends — so a session whose waiter died, or that never started
+one, still wakes up. It arrives as a message from another session headed
+`[consultants] <sid> …`, never as the user. When both the push and the
+waiter's exit arrive for the same state, act once. Where the socket is
+not reachable (another host) it comes as a priority-1 mail instead.
+`--no-push` turns it off for one run.
 
-```bash
-while :; do
-  claude-consultants status <sid> > /tmp/st.json
-  python3 -c "import json,sys; d=json.load(open('/tmp/st.json')); sys.exit(0 if d.get('status')!='running' or d.get('adversary_checkpoint_deadline_ts') or d.get('pending_tool_approvals') else 3)" && break
-  sleep 20
-done
-claude-consultants status <sid>
-```
+`--wait-until terminal` restores the old behaviour (return only when
+the run ends) and is only for callers that cannot answer, such as a
+Workflow agent. `--wait-until any-change` also returns (exit 11) on
+every progress change, for narrating a run step by step. `--wait-timeout
+<s>` bounds the client only; the run continues server-side.
 
-Two fields appear in `status` **only while something is waiting on
-you**, and either one means "answer me":
+#### What each attention state means
+
+The waiter reads these from `status` (its exit-10 output carries the
+record under `status`). The first two appear **only while something is
+waiting on you**:
 
 - `adversary_checkpoint_deadline_ts` — the engine paused before
   synthesis for an assistant-authored challenge. Write it, then
@@ -360,7 +372,7 @@ opposite ends: an unanswered spend approval must not authorize spend,
 while an unanswered pause has already spent everything up to that point
 and abandoning the run would waste it.
 
-#### C. Live visibility wanted → `events --milestones`, backgrounded
+#### Live narration (optional, beside the waiter)
 
 ```
 claude-consultants events <sid> --milestones
@@ -380,14 +392,14 @@ keeps only state changes and renders one compact line each:
 ```
 
 `complete` is the canonical done signal; `awaiting_adversary` is the
-"answer me" signal. Backgrounded, the stream's exit *is* the
-completion notification. `--kinds a,b` narrows further; `--since
+"answer me" signal. The stream is for watching, not for waking: keep
+the waiter running beside it. `--kinds a,b` narrows further; `--since
 <event_id>` resumes after a blip or across a compaction boundary.
 
-**In all three cases**: start the waiter, tell the user what you
-kicked off, and get on with other work. Do not re-check on your own
+**Either way**: start the waiter, tell the user what you kicked off,
+and get on with other work. Do not re-check on your own
 cadence — the notification is the signal. When you do have progress
-(pattern C, or the status you read on exit), surface transitions in
+(the narration stream, or the status you read on exit), surface transitions in
 plain language: "Planner done; researcher mid-investigation, 3 tool
 calls so far." One line per transition, no spam.
 
@@ -496,8 +508,8 @@ first. Returns:
 
 ### 4. Wait + fetch (same as ask)
 
-Wait with one of the [three patterns](#4-wait-for-the-run--the-only-three-patterns)
-— `follow-up --wait` backgrounded is the default — then
+Wait with [the waiter](#4-wait-for-the-run--one-waiter)
+— `follow-up --wait` backgrounded — then
 `result <new_sid>`. Never a foreground `for`/`sleep` poll loop.
 Print `summary_markdown` verbatim. Use an extended footer to thread
 the lineage:
@@ -595,7 +607,7 @@ claude-consultants follow-up <sid> --message "<specific clarifying question>" --
 ```
 
 Wait for `<new_sid>` the same way you waited for the parent
-([three patterns](#4-wait-for-the-run--the-only-three-patterns)),
+([the waiter](#4-wait-for-the-run--one-waiter)),
 fetch `result <new_sid>`, and
 **return to step 1** on the new answer. Do this WITHOUT asking the user
 each round — that's the whole point of the bounded auto-loop.
@@ -736,9 +748,10 @@ strongest form — via the **adversary checkpoint**.
 and emits an `awaiting_adversary` event carrying a `deadline_ts` and the
 synthesizer's `self_confidence`. React like this:
 
-1. **Subscribe** to the stream — `claude-consultants events <sid>` (or
-   `--since <id>` to replay across a reconnect / compaction). The
-   `awaiting_adversary` block is durable, so a missed SSE is recoverable.
+1. **Notice it** — your waiter (`--wait` or `wait <sid>`) exits 10 with
+   `reason: adversary_checkpoint` and the deadline. `events <sid>
+   --milestones` shows the same `awaiting_adversary` event, durable
+   across a reconnect or compaction.
 2. **Read what you are judging** — `state <sid>` carries each lane's
    `research_previews` and the `critique`; `events <sid> --milestones`
    names the role and lane of every node.
@@ -758,6 +771,7 @@ synthesizer's `self_confidence`. React like this:
 4. **Ack to resume** — `claude-consultants adversary-ack <sid>` (or
    `resume <sid>` during the checkpoint window, which delegates to the
    ack). The council resumes immediately with your brief in the prompt.
+   Re-arm `claude-consultants wait <sid>` in the background.
 5. **Or do nothing** — the checkpoint **auto-proceeds at the deadline**
    (default 10 min) so a lost SSE / missed poll never hangs the run. If
    you have no challenge worth making, just let it lapse.
@@ -1555,9 +1569,8 @@ checkpoint:
 - The events stream emits `awaiting_tool_approval`, which
   `--milestones` always keeps.
 
-Pattern B in [Wait for the run](#4-wait-for-the-run--the-only-three-patterns)
-already exits on either signal; extend its check to
-`pending_tool_approvals` when a run can reach an `ask_human` rung.
+[The waiter](#4-wait-for-the-run--one-waiter) exits 10 with `reason:
+tool_approval` while a call is parked; answer it, then re-arm.
 
 **Answering.**
 

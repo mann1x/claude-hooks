@@ -463,6 +463,32 @@ wrapped up (`LoopConfig.forced_think`, `GRACEFUL_STOPS`); a loop a guard
 ended (reasoning loop, repeated call, mistakes, struggle) always answers
 with thinking off. It is the A/B arm for the think-off default.
 
+### Waiting on a run, and being woken by it
+
+One waiter: `consult --wait`, `follow-up --wait` or `claude-consultants wait
+<sid>`, run in the background. It exits 0 with the result, 1 on a failed or
+cancelled run, and **10 while the run waits on the caller**, with one JSON
+object naming `reason` (`adversary_checkpoint` / `tool_approval` / `paused` /
+`pause_not_taking_effect`), `deadline_ts`, `on_timeout`, `answer` (the verb)
+and `rewait`. `--wait-until terminal` returns only at the end (for callers
+that cannot answer: the Workflow driver and the bench); `--wait-until
+any-change` also returns, exit 11, on every progress change. The reading is
+`consultants/attention.py`, shared with the engine.
+
+The engine pushes as well (`consultants/server/attention_push.py`):
+`consult` / `follow-up` send `notify` — the calling session's Claude Code
+inbox socket (`CLAUDE_CODE_MESSAGING_SOCKET`), its token, the session id
+and host — kept in the in-flight record (user-only file) so a resumed run
+still has it. One watcher thread per run reads its status every 5 s and
+posts once per distinct attention state, once per tool running 10+ min
+(`slow_tool` guard events), and once at the end, as Claude Code's own
+injection format (an auth line, then `{"type":"user",...}`). An idle
+session starts a turn with it; Claude Code labels it as another session's
+message, so it can never answer a permission prompt. On another host, or
+when the socket does not answer, it is a priority-1 mail to the alias the
+session registered. `--no-push` opts out. Background: backup_models #2414,
+csl-2026-11-27-0656-503b idle 20 min at the checkpoint.
+
 ### Engine restarts — councils are suspended and resumed
 
 Since 2026-10-01 an engine restart (deploy, `systemctl restart`, crash)

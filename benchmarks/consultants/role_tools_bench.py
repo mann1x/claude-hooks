@@ -763,7 +763,8 @@ def run_cost_arm(*, project: Path, question: str, all_roles: bool,
     env = dict(os.environ, CONSULTANTS_URL=base)
     t0 = time.monotonic()
     proc = subprocess.run(
-        ["claude-consultants", "consult", "--wait", "--cwd", str(project),
+        ["claude-consultants", "consult", "--wait", "--wait-until", "terminal",
+         "--cwd", str(project),
          "--effort", effort, "--message", question],
         capture_output=True, text=True, timeout=timeout_s, env=env,
     )

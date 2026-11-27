@@ -2,12 +2,13 @@
 
 # Tasks — claude-hooks
 
-3 active · 2 ready · prefix `ch`
+4 active · 2 ready · prefix `ch`
 
-## Active (3)
+## Active (4)
 
-- [ch-29](.claude-hooks/tasks/ch-29.md) **H** `episodic` Episodic search dead 26 days: model cache in node_modules + SessionEnd sync dies in the daemon sandbox — 10h
-- [ch-30](.claude-hooks/tasks/ch-30.md) **H** `episodic` Episodic search quality: clean inputs, chunking, BM25 hybrid, better embedder — rebuild the index — 1m
+- [ch-29](.claude-hooks/tasks/ch-29.md) **H** `episodic` Episodic search dead 26 days: model cache in node_modules + SessionEnd sync dies in the daemon sandbox — 11h
+- [ch-30](.claude-hooks/tasks/ch-30.md) **H** `episodic` Episodic search quality: clean inputs, chunking, BM25 hybrid, better embedder — rebuild the index — 23m
+- [ch-31](.claude-hooks/tasks/ch-31.md) **H** `consultants.wait` Council caller is woken on attention (waiter exit 10 + engine inbox push); resource claims state perf sensitivity — 1m
 - [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 14d
 
 ## Ready (2)
@@ -34,5 +35,5 @@
 - [ch-22](.claude-hooks/tasks/archive/ch-22.md) `consultants.polykv` PolyKV F4: quality A/B of the shared layout (role text last) vs as-built — 32d
 - [ch-21](.claude-hooks/tasks/archive/ch-21.md) `consultants.polykv` PolyKV: per-lane output cap so concurrent lanes fit beside the shared layer on a small engine — 32d
 - [ch-10](.claude-hooks/tasks/archive/ch-10.md) `consultants.polykv` Council F — PolyKV, complete (opencoti + xOllama), last — 32d
-- [ch-20](.claude-hooks/tasks/archive/ch-20.md) **H** `security.secrets` Commit secret gate — gitleaks + .gitleaks.toml config rules + host-secret search, on every host and in CI — 32d
-- [ch-16](.claude-hooks/tasks/archive/ch-16.md) **H** `resources` Resource manager: shared/exclusive/quiet locks on hosts, GPUs, pods, cloud — real-time waiters, no mail — 33d
+- [ch-20](.claude-hooks/tasks/archive/ch-20.md) **H** `security.secrets` Commit secret gate — gitleaks + .gitleaks.toml config rules + host-secret search, on every host and in CI — 33d
+- [ch-16](.claude-hooks/tasks/archive/ch-16.md) **H** `resources` Resource manager: shared/exclusive/quiet locks on hosts, GPUs, pods, cloud — real-time waiters, no mail — 34d

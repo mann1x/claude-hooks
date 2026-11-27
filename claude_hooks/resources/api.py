@@ -102,6 +102,29 @@ def owner_here(*, session_id: Optional[str] = None,
                  pid_started=started, cwd=cwd)
 
 
+def perf_holder(host: Optional[str] = None, *,
+                session_id: Optional[str] = None):
+    """A claim of another session on ``host`` whose timing matters — a
+    quiet claim, or any claim stated ``--perf`` — or None. Background work
+    (a reindex, a big copy) that would skew a measurement waits while one
+    stands; a claim stated ``--no-perf`` or not stated never holds it back.
+    Never raises: no store means nothing is being measured."""
+    host = (host or host_name()).lower()
+    try:
+        held = store().snapshot()
+    except Exception:
+        log.debug("resources: perf check failed", exc_info=True)
+        return None
+    from claude_hooks.resources import model
+    for c in held:
+        if session_id and c.session_id == session_id:
+            continue
+        if model.perf_of(c) and any(
+                it.resource.split("/")[0] == host for it in c.items):
+            return c
+    return None
+
+
 def quiet_holder(host: Optional[str] = None, *,
                  session_id: Optional[str] = None):
     """The claim keeping ``host`` quiet, unless it is ``session_id``'s

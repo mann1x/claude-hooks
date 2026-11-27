@@ -82,13 +82,32 @@ def _fmt_claim(c: Claim) -> str:
     ttl = (f", until {c.expires_at[:19].replace('T', ' ')}" if c.expires_at
            else f", for {c.ttl_s // 60} min once granted" if c.ttl_s else "")
     why = f" — {c.reason}" if c.reason else ""
-    return f"{c.label()}  [{c.owner}, since {since} UTC{ttl}, id {c.id}]{why}"
+    return (f"{c.label()}  [{c.owner}, since {since} UTC{ttl}, id {c.id}, "
+            f"{model.perf_tag(c)}]{why}")
 
 
 def _granted_line(c: Claim, reused: bool = False) -> str:
     verb = "ALREADY HELD" if reused else "GRANTED"
-    return (f"{verb} {c.id}: {c.label()}\n"
-            f"  release with: claude-hooks-res release --claim {c.id}")
+    return (f"{verb} {c.id}: {c.label()} [{model.perf_tag(c)}]\n"
+            f"  release with: claude-hooks-res release --claim {c.id}"
+            + (f"\n  {PERF_HINT}" if model.perf_of(c) is None else ""))
+
+
+#: Said when a claim leaves it open whether others may load the resource.
+PERF_HINT = ("say whether timing matters to it: --perf (a measurement: keep "
+             "load off) or --no-perf (others may use it lightly beside you)")
+
+
+def _perf_opts(p) -> None:
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--perf", dest="perf", action="store_const", const=True,
+                   default=None,
+                   help="timing matters (a benchmark): others keep load off "
+                        "the resource; quiet claims are always this")
+    g.add_argument("--no-perf", dest="perf", action="store_const",
+                   const=False,
+                   help="timing does not matter (a rebuild, a long job): "
+                        "others may copy files or do light work beside it")
 
 
 def cmd_status(args) -> int:
@@ -98,7 +117,9 @@ def cmd_status(args) -> int:
             "claims": [{"id": o.claim.id, "state": o.claim.state,
                         "items": [str(i) for i in o.claim.items],
                         "owner": o.claim.owner, "session_id": o.claim.session_id,
-                        "reason": o.claim.reason, "since": o.claim.granted_at
+                        "reason": o.claim.reason,
+                        "perf_sensitive": model.perf_of(o.claim),
+                        "since": o.claim.granted_at
                         or o.claim.created_at, "expires_at": o.claim.expires_at,
                         "position": o.position,
                         "waiting_for": o.block.describe() if o.block else ""}
@@ -128,7 +149,8 @@ def _request(args, *, own_process: bool = False):
     return _store().request(
         items, _owner(args, own_process=own_process), reason=args.reason or "",
         ttl_s=parse_duration(args.ttl), lease_s=int(parse_duration(args.lease)
-                                                   or 0) or _default_lease())
+                                                   or 0) or _default_lease(),
+        perf=getattr(args, "perf", None))
 
 
 def _default_lease() -> int:
@@ -389,6 +411,16 @@ def cmd_quiet_check(args) -> int:
     return 1
 
 
+def cmd_perf_check(args) -> int:
+    from claude_hooks.resources import api
+    c = api.perf_holder(args.host, session_id=api.session_id_here())
+    if c is None:
+        print("no measurement running: light work is fine")
+        return 0
+    print(f"MEASURING: {_fmt_claim(c)}")
+    return 1
+
+
 def cmd_renew(args) -> int:
     from claude_hooks.resources import api
     session = args.session if args.session is not None else api.session_id_here()
@@ -486,6 +518,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--follow-pid", type=int, default=None,
                        help="tie the claim to this process (a detached "
                             "job) instead of the session")
+        _perf_opts(p)
 
     p = sub.add_parser("status", help="who holds what, who waits")
     p.add_argument("--json", action="store_true")
@@ -520,6 +553,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ttl", default="")
     p.add_argument("--lease", default="")
     p.add_argument("--timeout", default="", help="give up waiting after")
+    _perf_opts(p)
     p.set_defaults(fn=cmd_run, command=[])
 
     p = sub.add_parser("release", help="release claims")
@@ -539,6 +573,13 @@ def build_parser() -> argparse.ArgumentParser:
                        help="exit 1 while another session keeps HOST quiet")
     p.add_argument("host", nargs="?", default=None)
     p.set_defaults(fn=cmd_quiet_check)
+
+    p = sub.add_parser("perf-check",
+                       help="exit 1 while another session measures on HOST "
+                            "(a quiet claim or one stated --perf): check "
+                            "before a big copy or other load")
+    p.add_argument("host", nargs="?", default=None)
+    p.set_defaults(fn=cmd_perf_check)
 
     p = sub.add_parser("renew", help="renew this session's leases "
                                      "(with --ttl / --by: extend them)")

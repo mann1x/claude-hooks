@@ -302,7 +302,9 @@ class ResourceStore:
                 renewed_at=r["renewed_at"] or "",
                 expires_at=r["expires_at"] or "",
                 lease_s=int(r["lease_s"] or 0),
-                ttl_s=int(r.get("ttl_s") or 0)))
+                ttl_s=int(r.get("ttl_s") or 0),
+                perf=(bool(r["perf"]) if r.get("perf") is not None
+                      else None)))
         return out
 
     def _capacity(self, cur) -> dict[str, int]:
@@ -388,7 +390,8 @@ class ResourceStore:
     def request(self, items: Sequence[Item], owner: Owner, *,
                 reason: str = "", ttl_s: float = 0,
                 lease_s: int = DEFAULT_LEASE_S,
-                reuse: bool = True) -> Outcome:
+                reuse: bool = True,
+                perf: Optional[bool] = None) -> Outcome:
         """Queue a claim and grant it at once if it can be. With ``reuse``,
         a granted claim of the same session that follows the same process
         and already covers ``items`` is returned instead of queueing a
@@ -398,6 +401,7 @@ class ResourceStore:
         items = tuple(items)
         if not items:
             raise model.SpecError("a claim needs at least one resource")
+        model.check_perf(items, perf)
 
         def go(cur):
             live, capacity, _ = self._settle(cur)
@@ -408,6 +412,12 @@ class ResourceStore:
                             and (owner.pid or c.session_id == owner.session_id)
                             and model.covers(c, items)):
                         self._restamp(cur, c, owner.session_id)
+                        if perf is not None and c.perf != perf:
+                            # The latest statement is the one that holds.
+                            cur.execute(self._q(
+                                "UPDATE resource_claims SET perf = ? "
+                                "WHERE id = ?"), (int(bool(perf)), c.id))
+                            c.perf = perf
                         return Outcome(c, True, reused=True)
             now_iso = self._now_iso()
             # No expiry while queued: the grant sets it from ``ttl_s``.
@@ -415,13 +425,14 @@ class ResourceStore:
             cur.execute(self._q(
                 "INSERT INTO resource_claims (id, items, state, session_id, "
                 "alias, host, pid, pid_started, reason, cwd, created_at, "
-                "renewed_at, expires_at, lease_s, ttl_s) VALUES "
-                "(?, ?, 'waiting', ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)"),
+                "renewed_at, expires_at, lease_s, ttl_s, perf) VALUES "
+                "(?, ?, 'waiting', ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)"),
                 (cid, json.dumps([i.as_list() for i in items]),
                  owner.session_id, owner.alias, owner.host or self.host,
                  owner.pid, owner.pid_started, reason[:500], owner.cwd,
                  now_iso, now_iso, int(lease_s),
-                 int(ttl_s) if ttl_s and ttl_s > 0 else 0))
+                 int(ttl_s) if ttl_s and ttl_s > 0 else 0,
+                 None if perf is None else int(bool(perf))))
             live, capacity, _ = self._settle(cur)
             mine = next((c for c in live if c.id == cid), None)
             if mine is None:
@@ -658,13 +669,15 @@ class ResourceStore:
                     try:
                         claims = self._claims(cur)
                     except Exception as e:
-                        if "ttl_s" not in str(e):
+                        if not any(name in str(e) for name, _ in
+                                   schema.ADDED_CLAIM_COLUMNS):
                             raise
-                        # Not migrated yet; this path never writes.
+                        # Not migrated yet; this path never writes, so it
+                        # reads the columns the table has.
                         self._rollback(conn, False)
                         cur = conn.cursor()
-                        claims = self._claims(
-                            cur, schema.LEGACY_CLAIM_COLUMNS)
+                        claims = self._claims(cur, schema.readable_columns(
+                            self._columns(cur)))
                     if self.dialect == "postgres":
                         conn.rollback()
                     break

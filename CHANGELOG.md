@@ -17,6 +17,29 @@ release with the auto-generated source archive
 ## [Unreleased]
 
 ### Added
+- **A council wakes the session that started it.** `consult --wait` and
+  `follow-up --wait` used to return only when the run ended, so a run
+  parked at the adversary checkpoint waited on a session that was never
+  told: csl-2026-11-27-0656-503b sat idle 20 minutes. Now the wait also
+  returns, with exit 10 and a JSON reason (adversary checkpoint, tool
+  approval, a parked pause, a pause that does not take effect), naming the
+  deadline, what happens on it and the command that answers; `claude-consultants
+  wait <sid>` re-arms it; `--wait-until terminal` keeps the old behaviour for
+  callers that cannot answer (the Workflow driver and the bench pass it).
+  And the engine pushes: `consult` / `follow-up` hand it the session's
+  Claude Code inbox socket, and it posts into it when the run needs an
+  answer, when a tool has run 10+ minutes, and when the run ends — so a
+  session whose waiter died, or that never started one, still wakes. It
+  falls back to a priority-1 mail where the socket is unreachable;
+  `--no-push` turns it off. The skill now has one waiter instead of three
+  patterns to choose from.
+- **Resource claims say whether timing matters.** `--perf` / `--no-perf`
+  (MCP `perf`) on every claim; quiet is always a measurement. `status`,
+  the session block and the PreToolUse note show it, background work
+  (the claudemem reindex) waits for any measurement on the host, not only
+  a quiet one, and `claude-hooks-res perf-check` asks the same from a
+  script. opencoti held off a model copy behind a GPU claim for an index
+  rebuild that never said it was not a benchmark.
 - **`claude-hooks-tasks update`.** The CLI can change a task's fields
   (title, priority, area, plan, due, defer, description, acceptance,
   depends, tags, checked items) through `task-update`, so a dependency
