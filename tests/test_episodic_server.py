@@ -529,7 +529,7 @@ def test_last_sync_is_the_last_completed_one():
 
 
 def test_a_sync_that_skipped_indexing_is_degraded(archive):
-    es.SYNC_LOG.write_text(SYNC_LOG_SAMPLE)
+    es.SYNC_LOG.write_text(SYNC_LOG_SAMPLE, encoding="utf-8")
     with mock.patch.object(es, "_run_cli", return_value=_cp(0)):
         code, body = es.health(fresh=True)
     assert (code, body["status"], body["cli_ok"]) == (503, "degraded", True)
